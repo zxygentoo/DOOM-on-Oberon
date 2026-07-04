@@ -9,9 +9,32 @@
 
 open GoblintCil
 
+(* The target machine model (SEAM.md §4): ILP32, little-endian, char
+   unsigned (LDB zero-extends; there is no sign-extending byte load).
+   Start from goblint-cil's stock gcc 32-bit machdep and pin the two
+   RISC5-specific choices. Selected with --risc5-machdep; must be set
+   before initCIL. *)
+let risc5_mach : Machdep.mach =
+  match Machdep.gcc32 with
+  | Some m -> { m with char_is_unsigned = true; little_endian = true }
+  | None -> failwith "goblint-cil was built without a gcc32 machdep probe"
+
 let () =
+  let args = List.tl (Array.to_list Sys.argv) in
+  let m32 = List.mem "--risc5-machdep" args in
+  let inputs = List.filter (fun a -> a <> "--risc5-machdep") args in
+  if m32 then envMachine := Some risc5_mach;
   initCIL ();
-  let inputs = List.tl (Array.to_list Sys.argv) in
+  Printf.printf
+    "machdep: %s — int=%d long=%d ptr=%d%s\n"
+    (if m32 then "RISC5 (ILP32)" else "host")
+    (bitsSizeOf intType / 8)
+    (bitsSizeOf longType / 8)
+    (bitsSizeOf voidPtrType / 8)
+    (match !envMachine with
+     | Some m ->
+       Printf.sprintf " char_unsigned=%b LE=%b" m.char_is_unsigned m.little_endian
+     | None -> " (host defaults)");
   Printf.printf "parsing %d translation units\n%!" (List.length inputs);
   let failed = ref [] in
   let parsed =
@@ -89,7 +112,8 @@ let () =
     (List.length !renamed - List.length doom_renames)
     (List.length doom_renames);
   List.iter (fun n -> Printf.printf "  DOOM rename: %s\n" n) doom_renames;
-  let oc = open_out "out/merged.c" in
-  dumpFile defaultCilPrinter oc "out/merged.c" merged;
+  let out = if m32 then "out/merged_m32.c" else "out/merged.c" in
+  let oc = open_out out in
+  dumpFile defaultCilPrinter oc out merged;
   close_out oc;
-  Printf.printf "wrote out/merged.c\n%!"
+  Printf.printf "wrote %s\n%!" out

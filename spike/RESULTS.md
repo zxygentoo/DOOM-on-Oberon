@@ -47,6 +47,26 @@ pointer↔int casts that warn on the LP64 host — a reminder the real pipeline
 must run CIL with a **32-bit machdep** (goblint-cil supports custom machine
 models; on ILP32 that code is exact).
 
+## 32-bit machdep rerun (`--risc5-machdep`)
+
+The driver now takes `--risc5-machdep`: `Machdep.gcc32` with the two RISC5
+pins from SEAM.md §4 (`char_is_unsigned = true`, `little_endian = true`),
+installed via `envMachine` before `initCIL`. Confirmed in-process:
+`int=4 long=4 ptr=4 char_unsigned=true LE=true`.
+
+- **80/80 parse, merge clean, stats identical** to the host run (same
+  1 184 functions, 12 080 instrs, same 10 DOOM-real renames) — no DOOM
+  code is machine-model-sensitive at the front-end level.
+- Diff of the two merged TUs is exactly the expected shape and nothing
+  else: `size_t` prints as `unsigned int`, literal suffixes `UL` → `U`,
+  all confined to glibc declarations.
+- **Roundtrip `gcc -m32 -std=gnu99 -c`: OK** (host has multilib), giving
+  real ILP32 budget numbers for all of doomgeneric at -O0:
+  **.text 404 KB, .data 62 KB, .bss 245 KB ≈ 712 KB total** — comfortably
+  inside SEAM.md §8's 1.75 MB blob cap, before any of our size work.
+- The `InterceptsOverrun` pointer↔int concern from the host run is moot
+  under ILP32, as predicted.
+
 ## What this buys (per DOOM.md §9, now unlocked)
 
 - Track 1c's "single-TU amalgamation + PureDOOM rename map" → a library
@@ -54,8 +74,7 @@ models; on ILP32 that code is exact).
 - Backend workload is now measured, not guessed: 12 k CIL instrs (already
   side-effect-free, types resolved, CFG attached) → order 100–200 k RISC5
   instructions — comfortably inside the 1.75 MB blob budget.
-- Next steps on this branch if adopted: 32-bit machdep run of the same
-  gate; then the backend skeleton — CIL instr → shared `Risc5_isa.instr`
-  (the emulator's `risc.ml` type) → `encode` — with the §7 differential
-  jig (random C snippet: our backend in the emulator vs host gcc) from
-  day one.
+- Next step on this branch if adopted: the backend skeleton — CIL instr →
+  shared `Risc5_isa.instr` (the emulator's `risc.ml` type) → `encode` —
+  with the §7 differential jig (random C snippet: our backend in the
+  emulator vs host gcc) from day one.
