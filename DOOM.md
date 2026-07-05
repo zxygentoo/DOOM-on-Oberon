@@ -111,8 +111,9 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   form is `risc5_isa.instr` — a **host-repo, stock-OCaml** module: the instr
   ADT + `encode`/`decode` + inlinable field accessors, the single definition
   of the RISC5 encoding. It's shared by the compiler, the core tests, and —
-  a later sub-project of its own — the emulator's own decode (the accessor
-  layer is designed so `single_step` can adopt it at zero perf cost). The
+  a sub-project of its own, **now landed** — the emulator's own decode (the
+  accessor layer is designed so `single_step` adopts it at zero perf cost —
+  spike-proven, SEAM §6). The
   backend emits `instr` lists directly; the 1a hand-rolled functions are an
   OCaml eDSL over the same type — so compiled and hand-written code are the
   same kind of value and mix freely in one blob. The DOOM-repo "assembler"
@@ -233,7 +234,7 @@ proven end-to-end.
 | | Deliverable | Verify |
 |---|---|---|
 | **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs) · the assembler/linker contract (SEAM §6) · blob header w/ version byte · the himem layout constants page | ✅ **`SEAM.md` FROZEN v1 (2026-07-05)** — 6/6 register split, offsets 0–35, layout all locked; changes require a version bump |
-| **3b** | `risc5_isa` (host repo, stock OCaml: instr ADT + `encode`/`decode` + inlinable accessors — the shared encoding) + the DOOM-repo instr-level linker over it (label/branch resolution, `LEA` + `FixedMul` intrinsic expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and mnemonic disassembler deferred | layered: (i) **encode/decode round-trip** qcheck (`decode ∘ encode = id` over generated instrs) + the **typed lockstep** — `encode i` fed to the HardCaml core performs `i`, via the Phase-4 harness — anchoring the module to silicon, not just the emulator; (ii) **label torture** — random forward/back branch skeletons over random gaps, every label site tags memory; link the instr list, run in emulator, every branch lands on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps |
+| **3b** ◐ | ◐ **`risc5_isa` module in hand** — instr ADT + `encode`/`decode` + `[@inline]` field accessors (stock OCaml, zero-dep; the single definition of the encoding). Landed via its first consumer — the vendored emulator's `single_step` now decodes through the accessor layer (SEAM §6, zero-cost). **Remaining:** hoist to a standalone host-repo module (shared with the backend) + the DOOM-repo **instr-level linker** over it (label/branch resolution, `LEA` + `FixedMul` expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and disassembler deferred | **module ✅:** round-trip invariants property-tested (`decode ∘ encode = id`; `encode ∘ decode = id` for canonical words — `test_risc5_isa.ml`) + decode/accessor path anchored to silicon (emulator-on-`risc5_isa` ≡ HardCaml core, 250k+-case lockstep; boot + visual goldens green on host `develop`, vendor pin `e36fcf0`, 2026-07-06). **Remaining:** (i) encode-side **typed lockstep** — `encode i` → core performs `i` (Phase-4 harness); (ii) **label torture** — random branch skeletons, every label lands on its tag; (iii) jig blobs **emulator ≡ Cyclesim ≡ silicon** from hello blob on |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
 
@@ -354,5 +355,6 @@ sim/verification harnesses). This repo: the DOOM arc — toolchain, runtime,
 stub, blob. Cross-repo: the machine work (2a) and the shared `risc5_isa`
 module both land in the host repo — stock OCaml, upstream of both the
 compiler and the emulator. Pointing the emulator's own `single_step` at
-`risc5_isa` is a later, independent sub-project (accessor-first API makes it
-zero-cost); the DOOM arc doesn't wait on it.*
+`risc5_isa` — a later, independent sub-project — **landed 2026-07-06**
+(accessor-first API proved zero-cost, SEAM §6; vendored at `e36fcf0`, host
+`develop` green); the DOOM arc didn't wait on it.*
