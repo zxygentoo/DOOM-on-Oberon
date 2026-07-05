@@ -96,9 +96,20 @@ separately: 288 / 0).
   Value-shape checking deliberately does not descend through pointers —
   otherwise glibc's `FILE` (carrying `__off64_t` fields) poisons every
   function that touches stdio.
-- Enforcement: the backend hard-errors on `ILongLong`/`TFloat`; this
-  census is the standing pre-codegen gate, and the float list is the 1c
-  work list.
+- **bitfields: one struct, three functions.** Declared: `struct color`
+  (`i_video.h:141` — `b:8, g:8, r:8, a:8`), the palette-entry type; it is
+  *not* WAD-facing (DOOM's on-disk structs are confirmed clean — plain
+  integer fields + mask macros throughout). Accessed in `I_SetPalette`
+  (4 sites — live under CMAP256: it fills the `extern struct color
+  colors[256]` table the port's dither LUTs read, gamma pre-applied via
+  `gammatable`) and in `cmap_to_rgb565`/`cmap_to_fb` (9 sites — the
+  truecolor conversion path our blit replaces). Disposition: one-line
+  patch, `struct color { uint8_t b, g, r, a; }` — identical layout,
+  identical use-site syntax, and the backend never implements a bitfield
+  ABI at all.
+- Enforcement: the backend hard-errors on `ILongLong`/`TFloat`/`fbitfield`;
+  this census is the standing pre-codegen gate, and the float + bitfield
+  lists are the 1c work list.
 
 ## What this buys (per DOOM.md §9, now unlocked)
 

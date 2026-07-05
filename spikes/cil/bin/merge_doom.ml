@@ -164,8 +164,10 @@ let () =
   in
   let doom64 : (string, int) Hashtbl.t = Hashtbl.create 16
   and doomf : (string, int) Hashtbl.t = Hashtbl.create 16
+  and doombf_acc : (string, int) Hashtbl.t = Hashtbl.create 16
   and libc64 = ref 0
-  and libcf = ref 0 in
+  and libcf = ref 0
+  and libcbf_acc = ref 0 in
   let bump tbl k =
     Hashtbl.replace tbl k (1 + Option.value ~default:0 (Hashtbl.find_opt tbl k))
   in
@@ -185,6 +187,20 @@ let () =
 
         method! vexpr e =
           (try note (typeOf e) with _ -> ());
+          DoChildren
+
+        (* bitfield *accesses*: the thing the backend would actually have
+           to codegen (shift/mask loads, read-modify-write stores) *)
+        method! vlval (_, off) =
+          let rec walk = function
+            | NoOffset -> ()
+            | Field (fi, o) ->
+              if fi.fbitfield <> None
+              then if doom then bump doombf_acc where else incr libcbf_acc;
+              walk o
+            | Index (_, o) -> walk o
+          in
+          walk off;
           DoChildren
       end
     in
@@ -215,6 +231,50 @@ let () =
     "glibc-header noise (ignored; mini-libc removes): %d 64-bit, %d float sites\n"
     !libc64
     !libcf;
+  (* ── bitfield census (SEAM §4's third ban, same treatment): any composite
+     whose fields carry explicit bit widths. Bitfields have no portable
+     layout (direction/unit/straddle/signedness all implementation-defined),
+     and supporting them means defining a bitfield ABI in the backend —
+     verify DOOM needs none. *)
+  let doombf = ref []
+  and libcbf = ref 0 in
+  iterGlobals merged (fun g ->
+    match g with
+    | GCompTag (ci, loc) ->
+      let bfs = List.filter (fun f -> f.fbitfield <> None) ci.cfields in
+      if bfs <> []
+      then
+        if in_doom loc
+        then
+          doombf
+          := Printf.sprintf
+               "%s %s (%s:%d): %s"
+               (if ci.cstruct then "struct" else "union")
+               ci.cname
+               loc.file
+               loc.line
+               (String.concat
+                  ", "
+                  (List.map
+                     (fun f ->
+                       Printf.sprintf
+                         "%s:%d"
+                         f.fname
+                         (Option.value ~default:(-1) f.fbitfield))
+                     bfs))
+             :: !doombf
+        else incr libcbf
+    | _ -> ());
+  Printf.printf "bitfield census — DOOM-source composites:\n";
+  if !doombf = []
+  then Printf.printf "  none\n"
+  else List.iter (fun s -> Printf.printf "  %s\n" s) !doombf;
+  Printf.printf "glibc-header composites with bitfields (ignored): %d\n" !libcbf;
+  Printf.printf "bitfield accesses — DOOM-source sites (by function):\n";
+  if Hashtbl.length doombf_acc = 0
+  then Printf.printf "  none\n"
+  else Hashtbl.iter (fun k n -> Printf.printf "  %s: %d accesses\n" k n) doombf_acc;
+  Printf.printf "glibc-header bitfield accesses (ignored): %d\n" !libcbf_acc;
   let out = if m32 then "out/merged_m32.c" else "out/merged.c" in
   let oc = open_out out in
   dumpFile defaultCilPrinter oc out merged;
