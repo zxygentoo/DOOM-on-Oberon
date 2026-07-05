@@ -1,6 +1,6 @@
 # DOOM on Oberon
 
-Run DOOM on the Hardcaml RISC5 Oberon machine (`~/Projects/oberon-risc-hardcaml`,
+Run DOOM on the Hardcaml RISC5 Oberon machine ([oberon-risc-hardcaml](https://github.com/zxygentoo/oberon-risc-hardcaml),
 Nexys 4 / XC7A100T @ 60 MHz) — as an Oberon command, on real silicon.
 
 "But can it run DOOM?" — Today, Oberon becomes a real OS!
@@ -350,7 +350,7 @@ compiler-agnostic on purpose and don't move.
 
 ---
 
-*Host repo: `~/Projects/oberon-risc-hardcaml` (Hardcaml design, board layer,
+*Host repo: [oberon-risc-hardcaml](https://github.com/zxygentoo/oberon-risc-hardcaml) (Hardcaml design, board layer,
 sim/verification harnesses). This repo: the DOOM arc — toolchain, runtime,
 stub, blob. Cross-repo: the machine work (2a) and the shared `risc5_isa`
 module both land in the host repo — stock OCaml, upstream of both the

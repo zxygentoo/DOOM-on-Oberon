@@ -131,9 +131,9 @@ hot decoder can branch on `p`/`q` directly, though the emulator ships
 emits `instr` lists directly;
 hand-written 1a code is an OCaml eDSL constructing the same `instr` values.
 Nothing round-trips through text. The concrete API — accessors, the `instr`
-ADT, `encode`/`decode`, and the invariants — is sketched in
-[`risc5_isa.mli`](risc5_isa.mli) (a spec artifact here; implemented in the
-host repo).
+ADT, `encode`/`decode`, and the invariants — is defined in
+[`risc5_isa.mli`](vendor/oberon-risc-emu-ocaml/lib/risc5_isa.mli) (landed in the
+vendored emulator; the standalone host-repo module is the 3b hoist).
 
 So the "assembler" is not a parser but an **instr-level linker** — a small
 pipeline of `instr list` passes:
