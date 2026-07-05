@@ -232,7 +232,7 @@ proven end-to-end.
 
 | | Deliverable | Verify |
 |---|---|---|
-| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs — frozen before backend work) · the assembler/linker contract (SEAM §6) · blob header w/ version byte · the himem layout constants page | it's a spec: one page, reviewed, frozen |
+| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs) · the assembler/linker contract (SEAM §6) · blob header w/ version byte · the himem layout constants page | ✅ **`SEAM.md` FROZEN v1 (2026-07-05)** — 6/6 register split, offsets 0–35, layout all locked; changes require a version bump |
 | **3b** | `risc5_isa` (host repo, stock OCaml: instr ADT + `encode`/`decode` + inlinable accessors — the shared encoding) + the DOOM-repo instr-level linker over it (label/branch resolution, `LEA` + `FixedMul` intrinsic expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and mnemonic disassembler deferred | layered: (i) **encode/decode round-trip** qcheck (`decode ∘ encode = id` over generated instrs) + the **typed lockstep** — `encode i` fed to the HardCaml core performs `i`, via the Phase-4 harness — anchoring the module to silicon, not just the emulator; (ii) **label torture** — random forward/back branch skeletons over random gaps, every label site tags memory; link the instr list, run in emulator, every branch lands on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
