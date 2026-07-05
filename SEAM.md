@@ -1,6 +1,6 @@
 # SEAM.md — the 3a spec (ABI · asm · blob format · himem layout)
 
-**Status: DRAFT — freezes as v1 after review. The freeze is the deliverable.**
+**Status: FROZEN v1 (2026-07-05) — changes require a `version` bump (§10).**
 
 Consumers: the OCaml backend (1b), the 1a eDSL, the `risc5_isa` module +
 instr-level linker (3b; `risc5_isa` lives in the host repo, stock OCaml),
@@ -40,11 +40,15 @@ after freeze without bumping the header version.
 | H | MUL high / DIV remainder | clobbered by MUL/DIV and any call |
 | flags | N Z C V | never live across a call |
 
-Review knob (pre-freeze only): the 6/6 caller/callee split of R0–R11.
-More temps ease expression pressure in the backend's naive first cut;
-more regvars pay off as the allocator ladder climbs (naive → local →
-linear-scan). Hand-rolled leaves don't care — they use caller-saved
-registers freely and save nothing.
+Split rationale (frozen 6/6): six caller-saved (R0–R5) comfortably covers a
+naive backend's expression scratch — real C rarely needs >4 simultaneously
+live temps — so the other six go callee-saved, for values live across calls.
+This maximizes the callee-saved side, which is the one that matters: it is
+pay-per-use (unused ones cost nothing) *and* the side that can't be widened
+later without breaking hand-asm that hard-codes what it may clobber. So if a
+future measurement disagrees, the safe error is on this side. Hand-rolled
+leaves use all of R0–R11 freely, amortizing any callee-saved saves over
+their loops.
 
 ## 3. Calling convention (o32-shaped — simple, proven, varargs for free)
 
@@ -237,8 +241,10 @@ events (make/break, code), 256 entries.
 
 ## 10. Freeze protocol
 
-Until frozen: edit freely, this file is the argument. After: the register
-map, calling convention, type metrics, header offsets 0–35, and the layout
-table are **v1-frozen** — changes mean `version = 2` and a conscious
-migration of every consumer. Additions to reserved header/SHARED fields,
-new linker passes, and the eventual text-view syntax are non-breaking.
+**Frozen as v1 on 2026-07-05.** The register map, calling convention, type
+metrics, header offsets 0–35, and the layout table are **locked** — changes
+mean `version = 2` and a conscious migration of every consumer. Additions to
+reserved header/SHARED fields, new linker passes, and the eventual text-view
+syntax are non-breaking. The §9 confirm-in-sim items (C1–C5) are documented
+assumptions the freeze rests on; if one falsifies at bring-up, that is itself
+a `version = 2` event.
