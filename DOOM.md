@@ -13,7 +13,7 @@ Nexys 4 / XC7A100T @ 60 MHz) — as an Oberon command, on real silicon.
 |---|---|---|
 | ~25–40 MIPS integer (386DX/486SX class) | 60 MHz, CPI 1.37 on running-OS code ≈ 40+ MIPS | ✅ enough — Phases 9–10 accidentally built a DOOM-class core |
 | 16.16 fixed-point mul w/ 64-bit intermediate | `MUL` + `H` register = the exact shape of `FixedMul`, 2-cycle DSP multiplier | ✅ near custom-built |
-| 4+ MB RAM (zone ~6 MB + WAD ~4 MB) | Architectural map 1 MB; **physical PSRAM 16 MiB**; core address bus is already 24-bit (`RISC5.v:7`) | ⚠️ widen SoC decode only (2a) |
+| 4+ MB RAM (zone ~6 MB + WAD ~4 MB) | Architectural map 1 MB; **physical PSRAM 16 MiB**; core address bus is already 24-bit (`RISC5.v:7`) | ✅ **done (2a)** — decode widened; 16 MiB himem addressable |
 | 320×200×8 palette video | 1024×768×1-bit mono | ✅ **decided: 1-bit dithered** (see §2) |
 | C toolchain | Oberon-07 only; no RISC5 C compiler exists | ❌ the long pole (track 1, §7) |
 | Keyboard w/ press+release | UART (bring-up) / raw PS/2 scancodes (native) | ✅ with make/break framing (§6) |
@@ -68,7 +68,7 @@ The core already emits 24-bit byte addresses (16 MB); ROM (`0xFFE000`) and MMIO
 (`0xFFFFC0`) already sit at the *top* of that space; `Cellram` already fronts
 the full 16 MiB PSRAM chip. The 1 MB limit is purely board-SoC decode.
 
-**2a (§7) = widen the decode, change nothing else:**
+**2a (§7) — ✅ LANDED 2026-07-05 — widen the decode, change nothing else:**
 - board `Soc` address decode 20 → 24 bits (board layer only — `lib/` core stays
   byte-identical, Phase-8 proofs untouched);
 - `Cache` tag width extended to cover the wider space;
@@ -239,7 +239,7 @@ proven end-to-end.
 
 | | Deliverable | Verify |
 |---|---|---|
-| **2a** | 24-bit board decode + wide cache tags; himem visible | existing goldens green at old map; himem r/w test; boots unchanged |
+| **2a** ✅ | 24-bit board decode + wide cache tags; himem visible | ✅ **LANDED on `develop` (2026-07-05, `caf942d`)** — the three board masks (`Cellram`/`Cache`/`Framebuf`) widened to the full 16 MiB; `lib/` core byte-identical (Phase-8 proofs untouched). Goldens byte-identical (`0xb9bdbf56…`), `@bench_boot` mirror 0-mismatch, 5 himem unit tests green; timing closes (WNS +0.147 ns @ 60 MHz); boots clean on hardware. Physical `MemAdr[22:0]` pins + XDC were already wired → no top/XDC change |
 | **2b** | Oberon-07 prototypes of the DG hooks: dither-blit on the real panel (LUT, Bayer look, the 25% budget), ms timer, UART key queue + host-side serial agent | eyeballs on silicon; measured blit cycles vs §5's estimate; key make/break echoed end-to-end |
 | **2c** | stub loader: blob file + WAD chunks → himem (host-side chunk splitter included); header parse; `.bss` zero | loads a crafted image; himem contents verified |
 
