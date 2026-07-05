@@ -1,5 +1,5 @@
 (* Execute a straight-line leaf body (a Risc5_isa.instr list) in the vendored emulator —
-   the execution half of the differential jig (DOOM.md §7). Place [args] in R0.., load the
+   the execution half of the differential jig (AGENT.md §7). Place [args] in R0.., load the
    encoded instrs at [base], single-step once per instr, read R0. Straight-line only (no
    branches/calls): prologue/epilogue and the return branch arrive with the call slice. *)
 

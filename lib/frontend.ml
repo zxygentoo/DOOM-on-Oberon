@@ -1,10 +1,10 @@
-(* goblint-cil front end for the RISC5 target: the machine model (SEAM §4) and parsing C
+(* goblint-cil front end for the RISC5 target: the machine model (ABI §4) and parsing C
    into the typed AST the backend consumes. Mirrors the spike's driver
    (spikes/cil/bin/merge_doom.ml); owns the machdep so the whole toolchain shares one. *)
 
 open GoblintCil
 
-(* SEAM §4: ILP32, little-endian, char unsigned. Pin the two RISC5 choices onto
+(* ABI §4: ILP32, little-endian, char unsigned. Pin the two RISC5 choices onto
    goblint-cil's stock gcc-32 machdep; must be installed before initCIL. *)
 let risc5_mach : Machdep.mach =
   match Machdep.gcc32 with

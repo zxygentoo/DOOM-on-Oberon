@@ -1,4 +1,4 @@
-(* CIL spike driver — the DOOM.md §9 gate.
+(* CIL spike driver — the AGENT.md §9 gate.
 
    Parse every preprocessed doomgeneric TU with goblint-cil, [Mergecil.merge]
    them into one file (the library-call replacement for single-TU
@@ -9,7 +9,7 @@
 
 open GoblintCil
 
-(* The target machine model (SEAM.md §4): ILP32, little-endian, char
+(* The target machine model (ABI.md §4): ILP32, little-endian, char
    unsigned (LDB zero-extends; there is no sign-extending byte load).
    Start from goblint-cil's stock gcc 32-bit machdep and pin the two
    RISC5-specific choices. Selected with --risc5-machdep; must be set
@@ -112,7 +112,7 @@ let () =
     (List.length !renamed - List.length doom_renames)
     (List.length doom_renames);
   List.iter (fun n -> Printf.printf "  DOOM rename: %s\n" n) doom_renames;
-  (* ── 64-bit / float census (the SEAM §4 bans, verified rather than
+  (* ── 64-bit / float census (the ABI §4 bans, verified rather than
      asserted). Walk the typed merged AST: every site whose type contains a
      64-bit integer (or any float) — formals, locals, globals, and each
      expression's result type — grouped by enclosing function, split
@@ -231,7 +231,7 @@ let () =
     "glibc-header noise (ignored; mini-libc removes): %d 64-bit, %d float sites\n"
     !libc64
     !libcf;
-  (* ── bitfield census (SEAM §4's third ban, same treatment): any composite
+  (* ── bitfield census (ABI §4's third ban, same treatment): any composite
      whose fields carry explicit bit widths. Bitfields have no portable
      layout (direction/unit/straddle/signedness all implementation-defined),
      and supporting them means defining a bitfield ABI in the backend —

@@ -1,4 +1,4 @@
-(* Slice-1 differential jig (DOOM.md §7/§9): compile small C leaves with OUR backend, run
+(* Slice-1 differential jig (AGENT.md §7/§9): compile small C leaves with OUR backend, run
    them in the emulator, and diff R0 against host gcc over edge + random int args. gcc's
    [int] is 32-bit on x86-64, matching RISC5, so int-only samples must agree bit-for-bit.
 
@@ -57,14 +57,14 @@ let samples =
   ; "int notx(int a){ return ~a; }", "notx", 1
   ]
 
-(* The pre-codegen gate must REFUSE these (SEAM §4 bans + not-yet-supported forms),
+(* The pre-codegen gate must REFUSE these (ABI §4 bans + not-yet-supported forms),
    raising Unsupported rather than silently miscompiling. *)
 let rejects =
-  [ "float f(float x){ return x; }", "f" (* float — SEAM §4 *)
-  ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — SEAM §4 *)
+  [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
+  ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
   ; "int h(int a){ if (a) return 1; return 0; }", "h" (* control flow — later slice *)
   ; "int k(int *p){ return *p; }", "k" (* memory — later slice *)
-  ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — SEAM §5 *)
+  ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
   ]
 
 let () =

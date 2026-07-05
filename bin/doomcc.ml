@@ -1,7 +1,7 @@
-(* doomcc — the whole-program driver (DOOM.md 1b): preprocessed C (.i) -> RISC5 blob.
+(* doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
 
    This is the *shape* of the full pipeline. The front (parse + amalgamate) and the middle
-   (per-function codegen, via Backend.Codegen) are real; the back (the SEAM §6 instr-level
+   (per-function codegen, via Backend.Codegen) are real; the back (the ABI §6 instr-level
    linker + blob emit, track 3b) is stubbed. Until the later codegen slices land (calls,
    control flow, memory), most functions gate-refuse — so for now doomcc doubles as a
    progress gauge: per merged program it reports how many functions compile and, for the
@@ -73,8 +73,8 @@ let () =
     |> List.sort (fun a b -> compare (fst b) (fst a))
     |> List.iter (fun (n, k) -> Printf.printf "         %5d  %s\n" n k)
   end;
-  (* ---- (4) back end — STUB (SEAM §6 / track 3b) ----
+  (* ---- (4) back end — STUB (ABI §6 / track 3b) ----
      The instr-level linker (label/branch resolution, LEA + FixedMul expansion, section
      layout, header + checksum, symbol map) turns the per-function instr lists + data/bss
      into the flat blob at 0x100000. Not built yet. *)
-  Printf.printf "link:    TODO (SEAM §6 / 3b) — would emit %s @ 0x100000\n" !out
+  Printf.printf "link:    TODO (ABI §6 / 3b) — would emit %s @ 0x100000\n" !out

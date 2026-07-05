@@ -1,4 +1,4 @@
-# CIL spike results — DOOM.md §9 gate
+# CIL spike results — AGENT.md §9 gate
 
 **Verdict: GREEN.** goblint-cil swallows doomgeneric whole.
 
@@ -50,7 +50,7 @@ models; on ILP32 that code is exact).
 ## 32-bit machdep rerun (`--risc5-machdep`)
 
 The driver now takes `--risc5-machdep`: `Machdep.gcc32` with the two RISC5
-pins from SEAM.md §4 (`char_is_unsigned = true`, `little_endian = true`),
+pins from ABI.md §4 (`char_is_unsigned = true`, `little_endian = true`),
 installed via `envMachine` before `initCIL`. Confirmed in-process:
 `int=4 long=4 ptr=4 char_unsigned=true LE=true`.
 
@@ -63,11 +63,11 @@ installed via `envMachine` before `initCIL`. Confirmed in-process:
 - **Roundtrip `gcc -m32 -std=gnu99 -c`: OK** (host has multilib), giving
   real ILP32 budget numbers for all of doomgeneric at -O0:
   **.text 404 KB, .data 62 KB, .bss 245 KB ≈ 712 KB total** — comfortably
-  inside SEAM.md §8's 1.75 MB blob cap, before any of our size work.
+  inside ABI.md §8's 1.75 MB blob cap, before any of our size work.
 - The `InterceptsOverrun` pointer↔int concern from the host run is moot
   under ILP32, as predicted.
 
-## 64-bit / float census (SEAM §4's bans, verified rather than asserted)
+## 64-bit / float census (ABI §4's bans, verified rather than asserted)
 
 The driver walks the typed merged AST (RISC5 machdep) and reports every
 site whose **value shape** forces 64-bit integers or floats on the backend,
@@ -111,7 +111,7 @@ separately: 288 / 0).
   this census is the standing pre-codegen gate, and the float + bitfield
   lists are the 1c work list.
 
-## What this buys (per DOOM.md §9, now unlocked)
+## What this buys (per AGENT.md §9, now unlocked)
 
 - Track 1c's "single-TU amalgamation + PureDOOM rename map" → a library
   call, verified here at full scale.

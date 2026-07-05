@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CIL spike (DOOM.md §9): preprocess exactly the TUs our port would compile —
+# CIL spike (AGENT.md §9): preprocess exactly the TUs our port would compile —
 # the Makefile's SRC_DOOM list minus the platform TU (doomgeneric_xlib.c,
 # which our own DG hooks replace). Host gcc/glibc headers are fine for the
 # parse/merge gate; the real pipeline will use a 32-bit machdep + mini-libc

@@ -1,8 +1,8 @@
-(* Slice 1 of the RISC5 backend (DOOM.md 1b): CIL typed AST -> Risc5_isa.instr list, for
+(* Slice 1 of the RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr list, for
    straight-line integer *leaf* functions — the minimal vertical the differential jig
-   exercises. Naive register allocation (SEAM §2: a leaf may use R0-R11 freely; args and
+   exercises. Naive register allocation (ABI §2: a leaf may use R0-R11 freely; args and
    return sit in R0..). Anything outside the supported subset raises [Unsupported] — the
-   pre-codegen gate (SEAM §4 + the spikes/cil census) refuses to miscompile rather than
+   pre-codegen gate (ABI §4 + the spikes/cil census) refuses to miscompile rather than
    guess. Each unsupported message names the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
@@ -12,17 +12,17 @@ exception Unsupported of string
 
 let unsupported fmt = Printf.ksprintf (fun s -> raise (Unsupported s)) fmt
 
-(* ---- the SEAM §4 gate: reject banned types (float / 64-bit / bitfield) up front ---- *)
+(* ---- the ABI §4 gate: reject banned types (float / 64-bit / bitfield) up front ---- *)
 let rec check_type (t : C.typ) =
   match t with
   | C.TInt ((C.ILongLong | C.IULongLong), _) ->
-    unsupported "64-bit integer (SEAM §4: no long long in the blob)"
-  | C.TFloat _ -> unsupported "float (SEAM §4: banned in blob v1)"
+    unsupported "64-bit integer (ABI §4: no long long in the blob)"
+  | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
   | C.TNamed (ti, _) -> check_type ti.ttype
   | C.TComp (ci, _) ->
     List.iter
       (fun (f : C.fieldinfo) ->
-        if f.fbitfield <> None then unsupported "bitfield (SEAM §4: banned)";
+        if f.fbitfield <> None then unsupported "bitfield (ABI §4: banned)";
         check_type f.ftype)
       ci.cfields
   | C.TArray (t', _, _) -> check_type t'
@@ -33,7 +33,7 @@ let is_unsigned_int (t : C.typ) =
   | C.TInt (ik, _) -> not (C.isSigned ik)
   | _ -> false
 
-(* ---- registers (SEAM §2). Leaf + straight-line ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
+(* ---- registers (ABI §2). Leaf + straight-line ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
 type reg = int
 
 let return_reg = 0
@@ -107,7 +107,7 @@ let binop_instr op rd b c : R.instr =
   | C.Shiftlt -> rr R.Lsl
   | C.Shiftrt -> rr R.Asr (* arithmetic; the unsigned case is guarded in gen_expr *)
   | C.Div | C.Mod ->
-    unsupported "/ and %% lower to __div/__mod calls (SEAM §5) — call slice"
+    unsupported "/ and %% lower to __div/__mod calls (ABI §5) — call slice"
   | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne | C.LAnd | C.LOr ->
     unsupported "comparison/logical op needs flags + branch — control-flow slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->

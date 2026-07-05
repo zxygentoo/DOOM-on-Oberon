@@ -7,6 +7,44 @@ Nexys 4 / XC7A100T @ 60 MHz) — as an Oberon command, on real silicon.
 
 ---
 
+## 0. How we work together (read this first)
+
+**This is a learning project. Speed is explicitly *not* a goal.** The point
+is for the human to learn compiler backends, systems programming, and the
+craft of bringing a large C program onto a bare machine — deeply. We build
+this **together — track by track, slice by slice, step by step.** Optimize
+for understanding, not throughput.
+
+Concretely, as the agent on this project you should:
+
+- **Explain before building.** For each slice: first walk the problem — the
+  CIL construct to lower, the ABI rule, the RISC5 encoding, the DOOM-side
+  gotcha — then how it maps to our `risc5_isa` instrs and backend, *then*
+  write code. Never drop a finished slice without the walkthrough.
+- **Teach the "why."** Surface the compiler/systems reasoning: why CIL hands
+  us side-effect-free near-three-address IR, why the register-allocator ladder
+  is the perf schedule and not a nicety (Amdahl, §4), why RISC5 `DIV` floors
+  where C truncates, why the blob never touches storage, little-endian
+  packing, the himem stack switch. Treat each slice as a mini-lesson.
+- **Small, reviewable increments.** One slice (or sub-block) at a time. Prefer
+  a short diff the human can fully read over a large code dump. Stop at natural
+  checkpoints and let them absorb / ask questions / drive.
+- **Don't run ahead.** Do not jump to later slices or adjacent tracks
+  unprovoked. The human sets the pace and is the driver; you are the
+  pair-programming guide.
+- **Pair the code with its spec.** When lowering a construct, keep the
+  reference open — `ABI.md` for the ABI/linker seam, `risc5_isa`'s `.mli` for
+  the instr type, the CIL typed AST, the doomgeneric source — map it
+  construct-by-construct, and call out anywhere our choice departs from the
+  obvious transliteration (and why).
+- **Verify each step.** No slice is "done" until it passes the differential
+  jig — our backend in the emulator vs host gcc (§7, 1b). Green tests are the
+  unit of progress, not lines written.
+- **It's fine to go slow and re-explain.** If a concept needs more grounding,
+  give it.
+
+---
+
 ## 1. Feasibility scorecard
 
 | DOOM (1993) needs | Our machine | Verdict |
@@ -93,7 +131,7 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   and `Mergecil.merge` *is* the single-TU amalgamation, spike-measured on
   the real tree (80/80 TUs, exactly 10 static collisions, auto-renamed).
   The backend owns instruction selection (a dream on this ISA: 16 regs,
-  ~20 instructions, one addressing mode), the SEAM ABI, and a
+  ~20 instructions, one addressing mode), the ABI, and a
   register-allocator ladder — naive → local → linear-scan — landable
   incrementally behind a correct-but-slow first cut, because the
   hand-rolled hot list (§7, 1a) carries ~half the frame regardless
@@ -113,7 +151,7 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   of the RISC5 encoding. It's shared by the compiler, the core tests, and —
   a sub-project of its own, **now landed** — the emulator's own decode (the
   accessor layer is designed so `single_step` adopts it at zero perf cost —
-  spike-proven, SEAM §6). The
+  spike-proven, ABI §6). The
   backend emits `instr` lists directly; the 1a hand-rolled functions are an
   OCaml eDSL over the same type — so compiled and hand-written code are the
   same kind of value and mix freely in one blob. The DOOM-repo "assembler"
@@ -148,7 +186,7 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   via a pluggable `w_file` layer; ~50 lines).
 - Base-relative data addressing is only needed for Option A relocatability;
   the v1 fixed-address blob skips it — and since DB-relative is already the
-  backend's global addressing mode (SEAM §2), Option A stays cheap later.
+  backend's global addressing mode (ABI §2), Option A stays cheap later.
 
 ## 5. Runtime architecture — stub module + blob
 
@@ -233,8 +271,8 @@ proven end-to-end.
 
 | | Deliverable | Verify |
 |---|---|---|
-| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs) · the assembler/linker contract (SEAM §6) · blob header w/ version byte · the himem layout constants page | ✅ **`SEAM.md` FROZEN v1 (2026-07-05)** — 6/6 register split, offsets 0–35, layout all locked; changes require a version bump |
-| **3b** ◐ | ◐ **`risc5_isa` module in hand** — instr ADT + `encode`/`decode` + `[@inline]` field accessors (stock OCaml, zero-dep; the single definition of the encoding). Landed via its first consumer — the vendored emulator's `single_step` now decodes through the accessor layer (SEAM §6, zero-cost). **Remaining:** hoist to a standalone host-repo module (shared with the backend) + the DOOM-repo **instr-level linker** over it (label/branch resolution, `LEA` + `FixedMul` expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and disassembler deferred | **module ✅:** round-trip invariants property-tested (`decode ∘ encode = id`; `encode ∘ decode = id` for canonical words — `test_risc5_isa.ml`) + decode/accessor path anchored to silicon (emulator-on-`risc5_isa` ≡ HardCaml core, 250k+-case lockstep; boot + visual goldens green on host `develop`, vendor pin `e36fcf0`, 2026-07-06). **Remaining:** (i) encode-side **typed lockstep** — `encode i` → core performs `i` (Phase-4 harness); (ii) **label torture** — random branch skeletons, every label lands on its tag; (iii) jig blobs **emulator ≡ Cyclesim ≡ silicon** from hello blob on |
+| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs) · the assembler/linker contract (ABI §6) · blob header w/ version byte · the himem layout constants page | ✅ **`ABI.md` FROZEN v1 (2026-07-05)** — 6/6 register split, offsets 0–35, layout all locked; changes require a version bump |
+| **3b** ◐ | ◐ **`risc5_isa` module in hand** — instr ADT + `encode`/`decode` + `[@inline]` field accessors (stock OCaml, zero-dep; the single definition of the encoding). Landed via its first consumer — the vendored emulator's `single_step` now decodes through the accessor layer (ABI §6, zero-cost). **Remaining:** hoist to a standalone host-repo module (shared with the backend) + the DOOM-repo **instr-level linker** over it (label/branch resolution, `LEA` + `FixedMul` expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and disassembler deferred | **module ✅:** round-trip invariants property-tested (`decode ∘ encode = id`; `encode ∘ decode = id` for canonical words — `test_risc5_isa.ml`) + decode/accessor path anchored to silicon (emulator-on-`risc5_isa` ≡ HardCaml core, 250k+-case lockstep; boot + visual goldens green on host `develop`, vendor pin `e36fcf0`, 2026-07-06). **Remaining:** (i) encode-side **typed lockstep** — `encode i` → core performs `i` (Phase-4 harness); (ii) **label torture** — random branch skeletons, every label lands on its tag; (iii) jig blobs **emulator ≡ Cyclesim ≡ silicon** from hello blob on |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
 
@@ -256,7 +294,7 @@ is content, not infrastructure.
 | | Deliverable | Verify |
 |---|---|---|
 | **1a** | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` | each runs in the jig in Cyclesim vs host reference — before the backend exists |
-| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; SEAM ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
+| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
 | **1c** | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only) | host build plays E1M1; pieces unit-tested in the jig |
 | **1d** | first frame of E1M1 **in simulation** — harness preloads blob+WAD straight into the PSRAM model; pixel-exact framebuffer dumps via the visual-golden harness, a bring-up luxury no DOOM port ever had. (0.39 M cyc/s ≈ 10 s/frame is *steady-state*; `D_DoomMain` init is hundreds of M cycles ≈ tens of sim-minutes — don't debug a "hang" that is `R_InitTextures`.) Then v1 stub on hardware | sim framebuffer golden ≡ host-reference frame (same dither code, bit-identical); demo desync check; on-hardware E1M1 |
 
@@ -345,7 +383,7 @@ RISC5 ≠ RISC-V — nothing to borrow), and the host reference build stays
 plain gcc on original sources — CIL runs only on the target path, so a
 CIL front-end bug can't corrupt both sides of the diff. If the backend
 stalls outright, the escape hatch is §4's: retarget lcc/vbcc onto the
-frozen seam — the SEAM ABI, track 2, and the himem plan were
+frozen seam — the ABI, track 2, and the himem plan were
 compiler-agnostic on purpose and don't move.
 
 ---
@@ -356,5 +394,5 @@ stub, blob. Cross-repo: the machine work (2a) and the shared `risc5_isa`
 module both land in the host repo — stock OCaml, upstream of both the
 compiler and the emulator. Pointing the emulator's own `single_step` at
 `risc5_isa` — a later, independent sub-project — **landed 2026-07-06**
-(accessor-first API proved zero-cost, SEAM §6; vendored at `e36fcf0`, host
+(accessor-first API proved zero-cost, ABI §6; vendored at `e36fcf0`, host
 `develop` green); the DOOM arc didn't wait on it.*

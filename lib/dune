@@ -1,5 +1,5 @@
-; Slice 1 of the RISC5 backend (DOOM.md 1b): CIL typed AST -> Risc5_isa.instr.
-;   Frontend : goblint-cil parse + the RISC5 machdep (SEAM §4, ILP32/LE/char-unsigned)
+; Slice 1 of the RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr.
+;   Frontend : goblint-cil parse + the RISC5 machdep (ABI §4, ILP32/LE/char-unsigned)
 ;   Codegen  : the translation + the pre-codegen gate (float / 64-bit / bitfield bans)
 ;   Runner   : execute a straight-line leaf body in the vendored emulator (jig exec half)
 ; Depends on goblint-cil (front end) and emu (Risc5_isa to emit, Risc to run).

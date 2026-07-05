@@ -1,6 +1,6 @@
-; doomcc — the whole-program driver (DOOM.md 1b): preprocessed C (.i) -> RISC5 blob.
+; doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
 ; The shape of the full pipeline: front (parse + amalgamate) and per-function codegen are
-; real; the instr-level linker + blob emit (SEAM §6 / 3b) are stubbed. See bin/doomcc.ml.
+; real; the instr-level linker + blob emit (ABI §6 / 3b) are stubbed. See bin/doomcc.ml.
 
 (executable
  (name doomcc)

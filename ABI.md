@@ -1,4 +1,4 @@
-# SEAM.md — the 3a spec (ABI · asm · blob format · himem layout)
+# ABI.md — the 3a spec (calling convention · asm · blob format · himem layout)
 
 **Status: FROZEN v1 (2026-07-05) — changes require a `version` bump (§10).**
 
@@ -206,7 +206,7 @@ B    LNK                                  ; back to the stub
 
 Signatures: `Init(wad_addr, cfg_addr) → 0 | error code`;
 `Tick() → 0 continue | 1 quit`; `KeyIn(ev)` (enqueues; v1 blob also polls
-UART itself, §6 of DOOM.md). `exit()`/`I_Error` set status in the shared
+UART itself, §6 of AGENT.md). `exit()`/`I_Error` set status in the shared
 page and return through the thunk — never halt.
 
 ## 8. Himem layout v1 (the constants page)

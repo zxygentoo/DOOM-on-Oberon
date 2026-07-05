@@ -1,5 +1,5 @@
 (** goblint-cil front end for the RISC5 target: parse C under the RISC5 machine model
-    (SEAM §4 — ILP32, little-endian, char unsigned) into the typed AST the backend
+    (ABI §4 — ILP32, little-endian, char unsigned) into the typed AST the backend
     consumes. Owns the machdep, installed on first parse. *)
 
 (** [parse_file path] parses one preprocessed translation unit (.i). Raises [Failure] on
