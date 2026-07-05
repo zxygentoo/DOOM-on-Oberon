@@ -24,7 +24,8 @@ Nexys 4 / XC7A100T @ 60 MHz) — as an Oberon command, on real silicon.
 Performance estimate: assume DOOM's working set drops the 4 KB cache to CPI 2–3
 → ~20–30 MIPS ≈ 386DX-40 territory ≈ **10–20 fps at low detail**. Playable.
 Two named risks, two levers: (1) naive compiler codegen costs 2–3× vs gcc -O2
-— a reason to pick a compiler with a real register allocator (§4); (2) cache
+— why the backend's register-allocator ladder (§4) is the perf schedule, not
+a nicety; (2) cache
 lines are single-word, so texture/span streaming eats a miss every 4th
 byte-load — the likeliest source of CPI worse than 3. The fps lever if it
 disappoints: multi-word lines + CellRAM burst fills — touches neither DOOM
@@ -50,9 +51,12 @@ nor the core, and 2a's tag rework is the natural moment to leave room for it.
 5. **Delivery = Option B: kosher stub module + flat blob in himem** (§5).
    Option A (emit genuine `.rsc`, DOOM as a first-class module) is the polish
    pass; same compiler/runtime/blob, only the envelope changes.
-6. **Retarget a small C compiler** host-side (§4): **lcc first** +
-   hand-rolled hot loops — the classic port shape; vbcc stays the perf pass
-   behind the frozen ABI (§7). No self-hosting ambitions.
+6. **All-OCaml toolchain** (§4, §9 — spike-verified, `spikes/cil/`):
+   goblint-cil front-end + our own RISC5 backend, sharing one ISA
+   encoder with the emulator and core tests. Hand-rolled hot loops stay.
+   Escape hatch if the backend stalls: retarget lcc or vbcc onto the same
+   frozen ABI/assembler seam — nothing else moves. No self-hosting
+   ambitions.
 7. **The blob never touches storage.** The stub loads blob + WAD into himem;
    the WAD reaches the blob as a pointer. Kills an entire SPI/SD driver in
    the blob — and the two-drivers-one-controller hazard of leaving the card
@@ -81,37 +85,38 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
 
 ## 4. Toolchain — the long pole
 
-- **Compiler: lcc first; vbcc is the perf pass.** lcc is the easiest retarget
-  of any real C compiler (lburg tree grammar, ~1 k lines; the Fraser–Hanson
-  book is a literate retargeting manual and its MIPS backend is nearly our
-  template) — but it barely optimizes, so pair it with hand-rolled assembly
-  for the famous hot list (§7, 1a): DrawColumn/DrawSpan/FixedMul cover ~half
-  the frame, and Amdahl puts lcc+asm within ~25–30% of a good optimizer.
-  Every 90s port shipped exactly this shape. vbcc (global optimizer, real
-  register allocator) stays the drop-in upgrade behind the frozen ABI if fps
-  disappoints. cproc/QBE is out (QBE is 64-bit-only); naive stack-machine
-  codegen à la chibicc risks 3–5× — a floor lcc comfortably clears. RISC5 is
-  a dream backend either way: 16 regs, ~20 instructions, one addressing
-  mode. lcc is C89-only: the amalgamation pass carries the conformance
-  burden, and the host reference build polices it (`-std=c89 -pedantic`)
-  for free. (A spike-gated all-OCaml alternative — CIL front-end + our own
-  backend — lives in §9.)
+- **Compiler: goblint-cil front-end + our own RISC5 backend, all OCaml**
+  (locked at §9's green gate; evidence in `spikes/cil/`). CIL hands the
+  backend a gift-wrapped IR: expressions guaranteed side-effect-free
+  (assignments/calls hoisted into explicit instrs over typed temporaries —
+  most of the way to three-address code), types resolved, CFG attached —
+  and `Mergecil.merge` *is* the single-TU amalgamation, spike-measured on
+  the real tree (80/80 TUs, exactly 10 static collisions, auto-renamed).
+  The backend owns instruction selection (a dream on this ISA: 16 regs,
+  ~20 instructions, one addressing mode), the SEAM ABI, and a
+  register-allocator ladder — naive → local → linear-scan — landable
+  incrementally behind a correct-but-slow first cut, because the
+  hand-rolled hot list (§7, 1a) carries ~half the frame regardless
+  (Amdahl: naive ≈ 2× optimal overall, local ≈ 1.3×; every 90s port
+  shipped the asm-hot-loop shape). Escape hatch, one sentence: if the
+  OCaml backend stalls, lcc (easiest retarget in the business) or vbcc
+  (optimizing) bolt onto the same frozen ABI/assembler seam — nothing
+  else moves.
 - **The ABI is the track-3 keystone (§7, 3a)** — register args, callee-saved
   set, frame pointer, varargs, struct return; neither the backend nor the
   hand-rolled 1a functions can be written without it, so it freezes first.
   With interrupts unused the blob can own R12–R13 internally: ~14 allocatable
   registers.
-- **No linker; one tiny assembler.** Amalgamate doomgeneric into a **single
-  translation unit** (PureDOOM proves DOOM amalgamates — and its rename pass
-  is a ready-made map of the `static`-symbol collisions to expect). The
-  compiler emits RISC5 asm text; the track-3 assembler/flattener (~300 lines,
-  §7 3b) resolves labels, expands intrinsic calls (`BL FixedMul` inlines to
-  `MUL` + `H` — lcc has no inline asm, so inlining lives in the assembler),
-  and emits a flat blob linked at a fixed himem address (say `0x100000`).
-  No relocation needed. Label resolution has
-  to live somewhere — better a legible afternoon's tool with free listings
-  than fixup passes hidden inside the backend. (Wirth's compilers never had a
-  separate assembler; we nearly keep that.)
+- **No linker; the "assembler" is a thin parser over the shared ISA.** One
+  `Risc5_isa` module — the emulator's `risc.ml` instr type + `encode` —
+  serves core tests, emulator, compiler, and the asm-text parser for the
+  hand-written 1a functions (which may instead be an OCaml eDSL emitting
+  instrs directly; compiled and hand-written code meet as instr lists, so
+  they mix freely in one blob). Intrinsic call expansion (`BL FixedMul` →
+  `MUL` + `H` inline) lives at this layer; the flat blob links at a fixed
+  himem address (say `0x100000`), no relocation. Label resolution lives in
+  one legible place with free listings. (Wirth's compilers never had a
+  separate assembler; ours is a parser over the encoder.)
 - **Codegen gotchas (the two real traps):**
   - **DIV semantics.** Two traps, not one. (a) RISC5 `DIV` is *floored*
     (verified in Phase 3a); C mandates *truncation toward zero*. (b) The
@@ -130,8 +135,9 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   one-big-block malloc (DOOM zone-allocates internally), and a memory-backed
   `w_file` fronting the preloaded WAD (doomgeneric's WAD I/O is stdio-shaped
   via a pluggable `w_file` layer; ~50 lines).
-- Base-relative data addressing (vbcc supports it — Amiga small-data mode) is
-  only needed for Option A relocatability; the v1 fixed-address blob skips it.
+- Base-relative data addressing is only needed for Option A relocatability;
+  the v1 fixed-address blob skips it — and since DB-relative is already the
+  backend's global addressing mode (SEAM §2), Option A stays cheap later.
 
 ## 5. Runtime architecture — stub module + blob
 
@@ -205,17 +211,18 @@ Two mountains and the rope between them: **track 1** compiles DOOM to RISC5
 machine code; **track 2** makes the machine/OS ready to receive it;
 **track 3** is the seam both anchor to — ABI, assembler, blob format, himem
 layout. Track 3 goes first (days of work, and everything else bakes its
-artifacts in); tracks 1 and 2 then run fully parallel. And because the
-linker is `cat`, compiled `.s` and hand-written `.s` mix freely in one blob:
-the C compiler doesn't *enable* the runtime, it *fills in* code and data
-inside an envelope already proven end-to-end.
+artifacts in); tracks 1 and 2 then run fully parallel. And because compiled
+output and hand-written code meet as lists of shared-ISA instrs (asm text is
+just one way in), they mix freely in one blob: the C compiler doesn't
+*enable* the runtime, it *fills in* code and data inside an envelope already
+proven end-to-end.
 
 **Track 3 — the seam** (first; the freeze is the deliverable)
 
 | | Deliverable | Verify |
 |---|---|---|
-| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs — designed to lcc's shape, frozen before backend work) · asm syntax · blob header w/ version byte · the himem layout constants page | it's a spec: one page, reviewed, frozen |
-| **3b** | ~300-line assembler/flattener: labels + one addressing mode + intrinsic call expansion (`BL FixedMul` → `MUL`/`H`/shift inline); no macros, no expression grammar | layered: (i) **qcheck vs the emulator oracle** (`Oracle.Risc`, the Phase-4 lockstep twin) — random field tuples → asm text → assemble → poke + single-step the oracle → architectural effect must match the tuple's intent; the whole operand space, not hand-picked goldens; (ii) **label torture** — random skeletons of forward/back branches over random-length gaps, every label site tags memory; assemble, run in emulator, every branch must land on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps. Hand-encoded byte-diffs stay as the smoke test |
+| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs — frozen before backend work) · asm syntax · blob header w/ version byte · the himem layout constants page | it's a spec: one page, reviewed, frozen |
+| **3b** | the shared `Risc5_isa` module (the emulator's `risc.ml` instr type + `encode`) + a thin asm-text parser over it + intrinsic call expansion (`BL FixedMul` → `MUL`/`H`/shift inline); no macros, no expression grammar | layered: (i) **qcheck vs the emulator oracle** (`Oracle.Risc`, the Phase-4 lockstep twin) — random field tuples → asm text → assemble → poke + single-step the oracle → architectural effect must match the tuple's intent; the whole operand space, not hand-picked goldens; (ii) **label torture** — random skeletons of forward/back branches over random-length gaps, every label site tags memory; assemble, run in emulator, every branch must land on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps. Hand-encoded byte-diffs stay as the smoke test |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
 
@@ -236,20 +243,20 @@ is content, not infrastructure.
 
 | | Deliverable | Verify |
 |---|---|---|
-| **1a** | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` | each runs in the jig in Cyclesim vs host reference — before lcc exists |
-| **1b** | lcc RISC5 backend (lburg grammar + support functions; the Fraser–Hanson book is the manual, its MIPS backend nearly our template) | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; every increment through the same jig |
-| **1c** | single-TU amalgamation + C89 pass + mini-libc + C ports of the 2b prototypes + **host reference build** of the same TU | host build plays E1M1; pieces unit-tested in the jig |
+| **1a** | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` | each runs in the jig in Cyclesim vs host reference — before the backend exists |
+| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `Risc5_isa` instrs → blob; SEAM ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
+| **1c** | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only) | host build plays E1M1; pieces unit-tested in the jig |
 | **1d** | first frame of E1M1 **in simulation** — harness preloads blob+WAD straight into the PSRAM model; pixel-exact framebuffer dumps via the visual-golden harness, a bring-up luxury no DOOM port ever had. (0.39 M cyc/s ≈ 10 s/frame is *steady-state*; `D_DoomMain` init is hundreds of M cycles ≈ tens of sim-minutes — don't debug a "hang" that is `R_InitTextures`.) Then v1 stub on hardware | sim framebuffer golden ≡ host-reference frame (same dither code, bit-identical); demo desync check; on-hardware E1M1 |
 
 **Later** (each optional, independently landable): v2 viewer + task; Option A
-`.rsc` envelope; PS/2 Pmod keys; mouse burst-turn; PWM audio; **vbcc backend
-as the perf pass** — a drop-in behind the frozen ABI, and the 1a asm drawers
-survive the swap.
+`.rsc` envelope; PS/2 Pmod keys; mouse burst-turn; PWM audio; **allocator
+upgrades as the perf pass** (linear-scan and beyond) behind the frozen ABI —
+the 1a asm drawers survive every codegen change.
 
 The backend (1b) is still the biggest single piece — a C backend for the
 world's cleanest 32-bit ISA remains the gentlest possible introduction to
 compiler backends — but it's now the *last* thing standing instead of the
-first long pole: by the time lcc emits its first function, the assembler,
+first long pole: by the time it emits its first function, the assembler,
 loader, sim path and host oracle are all battle-tested, so any failure is
 the backend's fault and nothing else's.
 
@@ -272,8 +279,6 @@ bug; both ≠ host reference is toolchain or port.
 
 ## 8. Open questions
 
-- Compiler licenses: lcc's noncommercial terms are fine for v1; vbcc's
-  license/registration story matters only if/when the perf pass happens.
 - Exact himem layout: blob load addr, stack, zone size, WAD placement, back
   buffer — one page of constants, frozen at 3a (it's a seam artifact;
   everything downstream bakes it in).
@@ -282,21 +287,28 @@ bug; both ≠ host reference is toolchain or port.
   though doomgeneric already carries fixes from ARM ports) — and confirm
   `I_SetPalette` is surfaced under `CMAP256` (may need a two-line doomgeneric
   patch; the 14-LUT dither depends on it, §5).
-- Toolchain implementation language: the lcc route (§4) vs the all-OCaml
-  CIL route — gated on the §9 spike (`feat/cil-spike`).
 
-## 9. Spike-gated alternative — the all-OCaml toolchain (CIL route)
+## 9. Locked — the all-OCaml toolchain (CIL route)
 
-The hardware is OCaml; the toolchain could be too. **goblint-cil**
-(maintained, on opam; C99/C11 + GNU extensions) is a C front-end *as an
-OCaml library*: expressions arrive guaranteed side-effect-free
-(assignments/calls/`++` hoisted into explicit instrs over typed
-temporaries — most of the way to three-address code), types fully
-resolved, CFG included. And `Mergecil.merge` folds all translation units
-into one file with principled static-renaming — track 1c's amalgamation +
-PureDOOM rename map, replaced by a library call. CIL has **no codegen**
-(its only backend pretty-prints C), so the route is: CIL front-end + our
-backend in OCaml.
+The hardware is OCaml; the toolchain is too. Formerly spike-gated; **the
+gate ran green on both machine models** — full evidence in
+`spikes/cil/RESULTS.md`. What the spike proved (goblint-cil 2.1.0, the
+real doomgeneric tree): **80/80** port-relevant TUs parse (`-std=gnu99`
+pin; gcc 15's C23 default was the only blocker), `Mergecil.merge` clean
+with exactly **10** DOOM-real static renames (the PureDOOM rename map,
+automated), **12 080** CIL instrs across 1 184 functions — the measured
+backend workload — identical stats under the RISC5 ILP32 machdep (char
+unsigned, little-endian), and the merged TU recompiles under host gcc;
+`-m32` sizes: .text 404 K + .data 62 K + .bss 245 K ≈ 712 K, comfortably
+inside the 1.75 MB blob cap.
+
+What CIL is: a C front-end *as an OCaml library* (maintained, on opam;
+C99/C11 + GNU extensions) — expressions arrive guaranteed
+side-effect-free (assignments/calls/`++` hoisted into explicit instrs
+over typed temporaries — most of the way to three-address code), types
+fully resolved, CFG included; `Mergecil.merge` is the single-TU
+amalgamation. CIL has **no codegen** (its only backend pretty-prints C),
+so the route is: CIL front-end + our backend in OCaml.
 
 Why it fits this repo: the backend extends machinery that already exists —
 the emulator's typed ISA (`risc.ml`), the lockstep-proven oracle, the
@@ -309,22 +321,16 @@ blob. 3b's assembler becomes a thin parser over the shared instr type; the
 
 The honest cost: we own codegen quality and correctness. Naive
 all-in-memory codegen lands ≈2× optimal even with the asm hot half
-(0.5·1 + 0.5·3); matching lcc+asm (~1.3×) needs at least local register
-allocation, ideally linear-scan — known-shaped work, incrementally
-landable behind a correct-but-slow first cut. Guardrails: CompCert stays
+(0.5·1 + 0.5·3); reaching the classic compiler+asm shape (~1.3×) needs at
+least local register allocation, ideally linear-scan — known-shaped work,
+incrementally landable behind a correct-but-slow first cut. Guardrails: CompCert stays
 out (retargeting = Coq semantics + re-proofs for a new ISA; and Wirth
 RISC5 ≠ RISC-V — nothing to borrow), and the host reference build stays
 plain gcc on original sources — CIL runs only on the target path, so a
-CIL front-end bug can't corrupt both sides of the diff.
-
-**Gate (the spike, `feat/cil-spike`):** preprocess + parse the full
-doomgeneric tree with goblint-cil, `Mergecil.merge` to one file, dump
-stats — parse errors, GNU-isms, statics renamed, instr/function counts —
-and the C-pretty-printed merged TU must recompile under host gcc. Green ⇒
-adopt: 1b = "CIL + OCaml backend (naive → local → linear-scan)", 3b folds
-into the shared ISA module, lcc demotes to fallback. Red ⇒ §4 stands
-unchanged. Either way the SEAM ABI, track 2, and the himem plan don't
-move — the seam spec was compiler-agnostic on purpose.
+CIL front-end bug can't corrupt both sides of the diff. If the backend
+stalls outright, the escape hatch is §4's: retarget lcc/vbcc onto the
+frozen seam — the SEAM ABI, track 2, and the himem plan were
+compiler-agnostic on purpose and don't move.
 
 ---
 

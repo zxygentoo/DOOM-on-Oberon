@@ -2,8 +2,9 @@
 
 **Status: DRAFT — freezes as v1 after review. The freeze is the deliverable.**
 
-Consumers: lcc backend (1b), hand-rolled asm (1a), assembler/flattener (3b),
-stub loader (2c), sim harness (1d), Oberon prototypes (2b). Every constant
+Consumers: the OCaml backend (1b), hand-rolled asm (1a), the shared-ISA
+assembler layer (3b), stub loader (2c), sim harness (1d), Oberon
+prototypes (2b). Every constant
 and convention below is load-bearing for all of them; change nothing here
 after freeze without bumping the header version.
 
@@ -31,7 +32,7 @@ after freeze without bumping the header version.
 | R0 | arg 1 / return value / temp | caller |
 | R1–R3 | args 2–4 / temps | caller |
 | R4–R5 | temps | caller |
-| R6–R11 | register variables (lcc regvars) | **callee** |
+| R6–R11 | register variables (callee-saved regvars) | **callee** |
 | R12 | **FP** frame pointer | callee |
 | R13 | **DB** data base (set once by crt0; never changed) | reserved |
 | R14 | **SP** stack pointer, full-descending, 4-aligned | — |
@@ -40,11 +41,12 @@ after freeze without bumping the header version.
 | flags | N Z C V | never live across a call |
 
 Review knob (pre-freeze only): the 6/6 caller/callee split of R0–R11.
-More temps helps lcc's expression pressure; more regvars helps its
-usage-count allocator in mid-tier hot functions. Hand-rolled leaves don't
-care — they use caller-saved registers freely and save nothing.
+More temps ease expression pressure in the backend's naive first cut;
+more regvars pay off as the allocator ladder climbs (naive → local →
+linear-scan). Hand-rolled leaves don't care — they use caller-saved
+registers freely and save nothing.
 
-## 3. Calling convention (o32-shaped, lcc's home idiom)
+## 3. Calling convention (o32-shaped — simple, proven, varargs for free)
 
 - Args 1–4 in R0–R3; args 5+ on the stack. The caller **always** reserves a
   16-byte *home area* at `SP+0..15` (slots for R0–R3); arg 5 lives at
@@ -52,7 +54,7 @@ care — they use caller-saved registers freely and save nothing.
 - Return value in R0. No 64-bit types exist (§4), so no register pairs.
 - **Aggregates** are never in registers: struct args are copied to the
   stack; struct returns go via a hidden pointer passed as a synthetic first
-  arg in R0 (lcc's default rewrite).
+  arg in R0 (the classic hidden-pointer rewrite).
 - **Varargs**: callee stores R0–R3 into its home area on entry; `va_list` is
   a `char*` walking upward. (`printf`/`I_Error`/`sprintf` are the only
   consumers.)
@@ -84,7 +86,7 @@ care — they use caller-saved registers freely and save nothing.
 | char | 8-bit **unsigned** (chocolate-doom lineage is already clean here) |
 | short | 16-bit |
 | int, long, pointers | 32-bit |
-| long long | **does not exist** (C89; `m_fixed.c` replaced wholesale) |
+| long long | **does not exist** (banned by policy; `m_fixed.c` replaced wholesale) |
 | float, double | **banned in the blob v1** (the amalgamation pass removes the strays; RISC5 single-precision FPU exists if ever needed) |
 | alignment | natural, max 4; stack and structs word-aligned |
 | packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
@@ -101,14 +103,18 @@ Helpers (hand-rolled, 1a) — standard ABI calls, clobber caller-saved only:
 | `FixedDiv` | `(a<<16)/b`, 48/32 software long division, ~200–300 cycles |
 | `memcpy`, `memset`, `memmove` | word-loop cores |
 
-lcc's grammar maps C `/` and `%` to these calls; it never emits a bare `DIV`.
+The backend maps C `/` and `%` to these calls; it never emits a bare `DIV`.
 
 **Assembler intrinsics** — registry frozen at: `{ FixedMul }`.
 `BL FixedMul` expands inline (≈6 instructions: `MUL`, `MOV'` from H,
 `LSL`/`ROR`/`AND`/`IOR`), result in R0, clobbers R0–R1 + H + flags — within
 the ABI's notion of a call, so callers can't tell (except by being fast).
 
-## 6. Assembler input language (what 3b consumes, what lcc emits)
+## 6. Assembler input language (what 3b's parser consumes)
+
+Hand-written 1a code arrives as this text (or as the OCaml eDSL over the
+same instr type); the backend emits shared-ISA instrs directly and never
+round-trips through the text form.
 
 - One instruction per line; `;` comments; labels `name:`; locals `.Lname`.
 - Registers `R0…R15` + aliases `FP DB SP LNK`; immediates decimal or `0x…`.
