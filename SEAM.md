@@ -2,9 +2,9 @@
 
 **Status: DRAFT — freezes as v1 after review. The freeze is the deliverable.**
 
-Consumers: the OCaml backend (1b), hand-rolled asm (1a), the shared-ISA
-assembler layer (3b), stub loader (2c), sim harness (1d), Oberon
-prototypes (2b). Every constant
+Consumers: the OCaml backend (1b), the 1a eDSL, the `risc5_isa` module +
+instr-level linker (3b; `risc5_isa` lives in the host repo, stock OCaml),
+stub loader (2c), sim harness (1d), Oberon prototypes (2b). Every constant
 and convention below is load-bearing for all of them; change nothing here
 after freeze without bumping the header version.
 
@@ -90,7 +90,7 @@ registers freely and save nothing.
 | float, double | **banned in the blob v1** — census-verified strays are 6 cold functions (m_config float vars, am_map zoom, mouse-speed box (dead — no mouse), timedemo fps print), excised/pinned at 1c; RISC5 single-precision FPU exists if ever needed |
 | alignment | natural, max 4; stack and structs word-aligned |
 | packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
-| bitfields | avoid in on-disk structs (DOOM doesn't use them there) |
+| bitfields | **banned outright** — census-verified (`spikes/cil/`): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
 
 ## 5. Runtime helpers and intrinsics
 
@@ -105,40 +105,55 @@ Helpers (hand-rolled, 1a) — standard ABI calls, clobber caller-saved only:
 
 The backend maps C `/` and `%` to these calls; it never emits a bare `DIV`.
 
-**Assembler intrinsics** — registry frozen at: `{ FixedMul }`.
-`BL FixedMul` expands inline (≈6 instructions: `MUL`, `MOV'` from H,
-`LSL`/`ROR`/`AND`/`IOR`), result in R0, clobbers R0–R1 + H + flags — within
-the ABI's notion of a call, so callers can't tell (except by being fast).
+**Intrinsics** (an `instr list → instr list` pass, §6) — registry frozen
+at: `{ FixedMul }`. A `FixedMul` call expands inline (≈6 instructions:
+`MUL`, `MOV'` from H, `LSL`/`ROR`/`AND`/`IOR`), result in R0, clobbers
+R0–R1 + H + flags — within the ABI's notion of a call, so callers can't
+tell (except by being fast).
 
-## 6. Assembler input language (what 3b's parser consumes)
+## 6. The assembler/linker layer (over risc5_isa)
 
-Hand-written 1a code arrives as this text (or as the OCaml eDSL over the
-same instr type); the backend emits shared-ISA instrs directly and never
-round-trips through the text form.
+The canonical representation is `risc5_isa.instr` — a **host-repo,
+stock-OCaml** module: the instr ADT + `encode`/`decode` + inlinable field
+accessors, the single definition of the RISC5 encoding. It's shared by the
+compiler backend, this layer, the core tests, and — a later sub-project —
+the emulator's own decode (the accessor layer is shaped so `single_step`
+can adopt it at zero perf cost). The backend emits `instr` lists directly;
+hand-written 1a code is an OCaml eDSL constructing the same `instr` values.
+Nothing round-trips through text. The concrete API — accessors, the `instr`
+ADT, `encode`/`decode`, and the invariants — is sketched in
+[`risc5_isa.mli`](risc5_isa.mli) (a spec artifact here; implemented in the
+host repo).
 
-- One instruction per line; `;` comments; labels `name:`; locals `.Lname`.
-- Registers `R0…R15` + aliases `FP DB SP LNK`; immediates decimal or `0x…`.
-- Mnemonics = the RISC5 architecture doc's, `'` for u-variants:
-  `MOV LSL ASR ROR AND ANN IOR XOR ADD SUB MUL DIV` (+ immediate forms,
-  16-bit, v-bit sign-fill); `MOV' Rd` reads H; `LDW LDB STW STB Rd, Rn, off`;
-  `B BL BEQ BNE BLT BGE BLE BGT BMI BPL BCS BCC BVS BVC BLS BHI` — operand a
-  label (PC-relative) or a register (register branch; `B LNK` is return).
-- Label uses, exactly three: branch target (automatic PC-rel); `@label` =
-  DB-relative offset for mem ops (`LDW R0, DB, @myglobal`); `.word label` =
-  absolute address in data. Loading an address into a register:
-  pseudo `LEA Rd, label` (expands to `MOV'`+`IOR`, 2 words).
-- Directives: `.code .data .bss name,size .align n .word .byte .space n
-  .asciiz "…"`. Sections are flattened in order: header, code, data;
-  `.bss` reserves without emitting bytes.
-- Predefined symbols: `__data_base __bss_start __bss_end __image_end`.
-- No macros, no expression grammar (`label` and `label+const` only). The
-  intrinsic expansion (§5) is the single piece of magic.
-- Output: flat image at `BLOB_BASE` with the header (§7) auto-emitted —
-  the assembler fills lengths, entry offsets (from the crt0 labels
-  `crt_init`/`crt_tick`/`crt_keyin`), and checksum. Also emits a listing
-  and a symbol map: the debugging currency of the whole project.
+So the "assembler" is not a parser but an **instr-level linker** — a small
+pipeline of `instr list` passes:
 
-Worked example (leaf, caller-saved regs only, no frame):
+- **Label/branch resolution** — symbolic labels (a DOOM-repo layer *above*
+  risc5_isa; `risc5_isa.instr` itself carries resolved offsets only) become
+  concrete PC-relative / DB-relative offsets; forward refs are a two-pass.
+- **Pseudo / intrinsic expansion** — `LEA Rd, label` → `MOV'`+`IOR` (2
+  words); the `FixedMul` intrinsic (§5) → its ≈6-instr inline.
+- **Addressing** — register aliases `FP DB SP LNK` (§2); global data is
+  DB-relative; an absolute address is placed as a data word.
+- **Section layout** — code / data / bss flattened in order; bss reserves
+  without emitting; the flat image links at a fixed himem address (§8), no
+  relocation.
+- **Header + map** — auto-emit the §7 header (lengths, entry offsets from
+  the crt0 entries, checksum); dump a symbol map. `[@@deriving show]` on
+  `instr` gives free listings — the debugging currency.
+
+**Deferred, both directions (demand-driven):** a text *parser* (text →
+instr) and a canonical-mnemonic *disassembler* (instr → text). Neither is
+on a critical path — backend and eDSL both produce `instr`, deriving-show
+covers reading — so each is a leaf, addable later at zero cost to the rest.
+Build one the first time it itches (most likely a hot loop you'd rather
+hand-edit as `.s`). The eventual text syntax, if built: one instr/line,
+`;` comments, `name:` / `.Lname` labels, mnemonics with `'` for u-variants,
+`@label` / `.word` / `.code` / `.data` / `.bss`, no macros, no expression
+grammar.
+
+Worked leaf (no frame), shown in that deferred text view — the near-term
+eDSL constructs the identical `instr` list:
 
 ```
 ; void bzero8(char *p, int n)   ; R0 = p, R1 = n
@@ -225,5 +240,5 @@ events (make/break, code), 256 entries.
 Until frozen: edit freely, this file is the argument. After: the register
 map, calling convention, type metrics, header offsets 0–35, and the layout
 table are **v1-frozen** — changes mean `version = 2` and a conscious
-migration of every consumer. Additions to reserved header/SHARED fields and
-new assembler directives are non-breaking.
+migration of every consumer. Additions to reserved header/SHARED fields,
+new linker passes, and the eventual text-view syntax are non-breaking.

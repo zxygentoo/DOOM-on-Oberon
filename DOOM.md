@@ -107,16 +107,23 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   hand-rolled 1a functions can be written without it, so it freezes first.
   With interrupts unused the blob can own R12–R13 internally: ~14 allocatable
   registers.
-- **No linker; the "assembler" is a thin parser over the shared ISA.** One
-  `Risc5_isa` module — the emulator's `risc.ml` instr type + `encode` —
-  serves core tests, emulator, compiler, and the asm-text parser for the
-  hand-written 1a functions (which may instead be an OCaml eDSL emitting
-  instrs directly; compiled and hand-written code meet as instr lists, so
-  they mix freely in one blob). Intrinsic call expansion (`BL FixedMul` →
-  `MUL` + `H` inline) lives at this layer; the flat blob links at a fixed
-  himem address (say `0x100000`), no relocation. Label resolution lives in
-  one legible place with free listings. (Wirth's compilers never had a
-  separate assembler; ours is a parser over the encoder.)
+- **No linker; and no text assembler on the critical path.** The canonical
+  form is `risc5_isa.instr` — a **host-repo, stock-OCaml** module: the instr
+  ADT + `encode`/`decode` + inlinable field accessors, the single definition
+  of the RISC5 encoding. It's shared by the compiler, the core tests, and —
+  a later sub-project of its own — the emulator's own decode (the accessor
+  layer is designed so `single_step` can adopt it at zero perf cost). The
+  backend emits `instr` lists directly; the 1a hand-rolled functions are an
+  OCaml eDSL over the same type — so compiled and hand-written code are the
+  same kind of value and mix freely in one blob. The DOOM-repo "assembler"
+  is then not a parser but an **instr-level linker**: resolve labels/branches,
+  expand `LEA` and the `FixedMul` intrinsic (`instr list → instr list`
+  passes), lay out code/data/bss, emit the header+checksum, dump a symbol
+  map. The flat blob links at a fixed himem address (say `0x100000`), no
+  relocation. Both text *views* — a parser (text→instr) and a mnemonic
+  disassembler (instr→text) — are deferred/demand-driven; `[@@deriving show]`
+  on `instr` is the free debug-print floor. (Wirth's compilers never had a
+  separate assembler; ours is a data type.)
 - **Codegen gotchas (the two real traps):**
   - **DIV semantics.** Two traps, not one. (a) RISC5 `DIV` is *floored*
     (verified in Phase 3a); C mandates *truncation toward zero*. (b) The
@@ -215,8 +222,9 @@ machine code; **track 2** makes the machine/OS ready to receive it;
 **track 3** is the seam both anchor to — ABI, assembler, blob format, himem
 layout. Track 3 goes first (days of work, and everything else bakes its
 artifacts in); tracks 1 and 2 then run fully parallel. And because compiled
-output and hand-written code meet as lists of shared-ISA instrs (asm text is
-just one way in), they mix freely in one blob: the C compiler doesn't
+output and hand-written code meet as lists of shared `risc5_isa` instrs — the
+backend emits them, the 1a eDSL constructs them — they mix freely in one
+blob: the C compiler doesn't
 *enable* the runtime, it *fills in* code and data inside an envelope already
 proven end-to-end.
 
@@ -224,8 +232,8 @@ proven end-to-end.
 
 | | Deliverable | Verify |
 |---|---|---|
-| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs — frozen before backend work) · asm syntax · blob header w/ version byte · the himem layout constants page | it's a spec: one page, reviewed, frozen |
-| **3b** | the shared `Risc5_isa` module (the emulator's `risc.ml` instr type + `encode`) + a thin asm-text parser over it + intrinsic call expansion (`BL FixedMul` → `MUL`/`H`/shift inline); no macros, no expression grammar | layered: (i) **qcheck vs the emulator oracle** (`Oracle.Risc`, the Phase-4 lockstep twin) — random field tuples → asm text → assemble → poke + single-step the oracle → architectural effect must match the tuple's intent; the whole operand space, not hand-picked goldens; (ii) **label torture** — random skeletons of forward/back branches over random-length gaps, every label site tags memory; assemble, run in emulator, every branch must land on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps. Hand-encoded byte-diffs stay as the smoke test |
+| **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs — frozen before backend work) · the assembler/linker contract (SEAM §6) · blob header w/ version byte · the himem layout constants page | it's a spec: one page, reviewed, frozen |
+| **3b** | `risc5_isa` (host repo, stock OCaml: instr ADT + `encode`/`decode` + inlinable accessors — the shared encoding) + the DOOM-repo instr-level linker over it (label/branch resolution, `LEA` + `FixedMul` intrinsic expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and mnemonic disassembler deferred | layered: (i) **encode/decode round-trip** qcheck (`decode ∘ encode = id` over generated instrs) + the **typed lockstep** — `encode i` fed to the HardCaml core performs `i`, via the Phase-4 harness — anchoring the module to silicon, not just the emulator; (ii) **label torture** — random forward/back branch skeletons over random gaps, every label site tags memory; link the instr list, run in emulator, every branch lands on its tag; (iii) from hello blob on, every jig blob runs **emulator ≡ Cyclesim ≡ silicon** with bit-identical result dumps |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
 
@@ -247,7 +255,7 @@ is content, not infrastructure.
 | | Deliverable | Verify |
 |---|---|---|
 | **1a** | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` | each runs in the jig in Cyclesim vs host reference — before the backend exists |
-| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `Risc5_isa` instrs → blob; SEAM ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
+| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; SEAM ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
 | **1c** | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only) | host build plays E1M1; pieces unit-tested in the jig |
 | **1d** | first frame of E1M1 **in simulation** — harness preloads blob+WAD straight into the PSRAM model; pixel-exact framebuffer dumps via the visual-golden harness, a bring-up luxury no DOOM port ever had. (0.39 M cyc/s ≈ 10 s/frame is *steady-state*; `D_DoomMain` init is hundreds of M cycles ≈ tens of sim-minutes — don't debug a "hang" that is `R_InitTextures`.) Then v1 stub on hardware | sim framebuffer golden ≡ host-reference frame (same dither code, bit-identical); demo desync check; on-hardware E1M1 |
 
@@ -287,9 +295,12 @@ bug; both ≠ host reference is toolchain or port.
   everything downstream bakes it in).
 - doomgeneric `CMAP256` + our little-endian packing — confirm buffer format at
   1c (RISC5 is little-endian, matches WAD; watch packed-struct alignment,
-  though doomgeneric already carries fixes from ARM ports) — and confirm
-  `I_SetPalette` is surfaced under `CMAP256` (may need a two-line doomgeneric
-  patch; the 14-LUT dither depends on it, §5).
+  though doomgeneric already carries fixes from ARM ports). ~~Confirm
+  `I_SetPalette` is surfaced under `CMAP256`~~ — answered by the census:
+  under `CMAP256`, `extern struct color colors[256]` is exported precisely
+  for the platform layer, `I_SetPalette` refills it on every palette switch
+  (gamma pre-applied via `gammatable`), so the 14-LUT dither (§5) reads it
+  with zero doomgeneric patches.
 
 ## 9. Locked — the all-OCaml toolchain (CIL route)
 
@@ -313,14 +324,15 @@ fully resolved, CFG included; `Mergecil.merge` is the single-TU
 amalgamation. CIL has **no codegen** (its only backend pretty-prints C),
 so the route is: CIL front-end + our backend in OCaml.
 
-Why it fits this repo: the backend extends machinery that already exists —
-the emulator's typed ISA (`risc.ml`), the lockstep-proven oracle, the
-differential-qcheck house style. One shared `encode : instr → word` serves
-core tests, emulator, assembler, and compiler — encoding *cannot drift* —
-and verification reaches inside the compiler (random C snippet → our
-backend in the emulator vs host gcc, diffed) instead of stopping at the
-blob. 3b's assembler becomes a thin parser over the shared instr type; the
-1a hot functions can even be an OCaml eDSL emitting instrs directly.
+Why it fits this repo: the backend extends machinery already in the grain
+here — a typed ISA next to the emulator, the lockstep-proven oracle, the
+differential-qcheck house style. The shared `risc5_isa` (a fresh stock-OCaml
+module, host repo) gives one `encode`/`decode` to core tests, emulator,
+linker, and compiler — encoding *cannot drift* — and verification reaches
+inside the compiler (random C snippet → our backend in the emulator vs host
+gcc, diffed) instead of stopping at the blob. 3b's assembler is an
+instr-level linker over that type; the 1a hot functions are an OCaml eDSL
+emitting instrs directly (text assembly deferred, §4).
 
 The honest cost: we own codegen quality and correctness. Naive
 all-in-memory codegen lands ≈2× optimal even with the asm hot half
@@ -339,4 +351,8 @@ compiler-agnostic on purpose and don't move.
 
 *Host repo: `~/Projects/oberon-risc-hardcaml` (Hardcaml design, board layer,
 sim/verification harnesses). This repo: the DOOM arc — toolchain, runtime,
-stub, blob. The machine work (2a) lands in the host repo's board layer.*
+stub, blob. Cross-repo: the machine work (2a) and the shared `risc5_isa`
+module both land in the host repo — stock OCaml, upstream of both the
+compiler and the emulator. Pointing the emulator's own `single_step` at
+`risc5_isa` is a later, independent sub-project (accessor-first API makes it
+zero-cost); the DOOM arc doesn't wait on it.*
