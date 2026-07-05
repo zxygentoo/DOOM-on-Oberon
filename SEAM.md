@@ -122,7 +122,13 @@ stock-OCaml** module: the instr ADT + `encode`/`decode` + inlinable field
 accessors, the single definition of the RISC5 encoding. It's shared by the
 compiler backend, this layer, the core tests, and — a later sub-project —
 the emulator's own decode (the accessor layer is shaped so `single_step`
-can adopt it at zero perf cost). The backend emits `instr` lists directly;
+adopts it at ~zero cost — **spike-proven** on the vendored emulator: every
+`[@inline]` accessor compiles to zero calls, bit-exact under both stock
+non-flambda and flambda2; the sole nuance is that matching the `kind` *variant*
+on the hot path costs a few % under non-flambda — free under flambda2 — so a
+hot decoder can branch on `p`/`q` directly, though the emulator ships
+`match kind` anyway, the cost being immaterial for a dev target). The backend
+emits `instr` lists directly;
 hand-written 1a code is an OCaml eDSL constructing the same `instr` values.
 Nothing round-trips through text. The concrete API — accessors, the `instr`
 ADT, `encode`/`decode`, and the invariants — is sketched in

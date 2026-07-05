@@ -12,7 +12,11 @@
    Two layers, one truth:
      - accessors (Layer 1): word -> int/bool, allocation-free, [@inline] in
        the .ml. The emulator's hot loop and [decode] are both built on these;
-       they ARE the bit-layout truth.
+       they ARE the bit-layout truth. Spike-verified in the vendored emulator:
+       under a stock (non-flambda) build every accessor inlines to zero calls,
+       so [single_step] decodes at the hand-written masks' cost, bit-exact
+       (cosim lockstep + boot golden) on both non-flambda and flambda2 — with
+       one caveat at [kind] (see its note).
      - ADT + codec (Layer 2): the faithful, concrete, encodable instruction,
        for the compiler, disassembler, and tests. Never materialized in the
        emulator loop (that's what keeps the loop non-allocating).
@@ -105,7 +109,12 @@ type kind =
   | Memory
   | Branch (* nullary ⇒ immediate; no allocation *)
 
-val kind : word -> kind (* p, then q *)
+(* [p], then [q]. NOTE — returns a *variant*: a non-flambda hot loop pays a
+   few % to materialize + switch it versus branching on [p]/[q] directly
+   (flambda2 folds it away). [decode] uses it freely; a hot decoder that cares
+   can dispatch on [p]/[q]. The vendored emulator ships [match kind ir] anyway
+   — immaterial for a dev target, and it reads as one shape with [decode]. *)
+val kind : word -> kind
 val p : word -> bool (* bit 31 *)
 val q : word -> bool (* bit 30 *)
 val u : word -> bool (* bit 29 *)
