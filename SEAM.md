@@ -86,8 +86,8 @@ registers freely and save nothing.
 | char | 8-bit **unsigned** (chocolate-doom lineage is already clean here) |
 | short | 16-bit |
 | int, long, pointers | 32-bit |
-| long long | **does not exist** (banned by policy; `m_fixed.c` replaced wholesale) |
-| float, double | **banned in the blob v1** (the amalgamation pass removes the strays; RISC5 single-precision FPU exists if ever needed) |
+| long long | **does not exist** — census-verified (`spikes/cil/`): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
+| float, double | **banned in the blob v1** — census-verified strays are 6 cold functions (m_config float vars, am_map zoom, mouse-speed box (dead — no mouse), timedemo fps print), excised/pinned at 1c; RISC5 single-precision FPU exists if ever needed |
 | alignment | natural, max 4; stack and structs word-aligned |
 | packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
 | bitfields | avoid in on-disk structs (DOOM doesn't use them there) |

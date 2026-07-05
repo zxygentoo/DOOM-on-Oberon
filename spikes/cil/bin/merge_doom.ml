@@ -112,6 +112,109 @@ let () =
     (List.length !renamed - List.length doom_renames)
     (List.length doom_renames);
   List.iter (fun n -> Printf.printf "  DOOM rename: %s\n" n) doom_renames;
+  (* ── 64-bit / float census (the SEAM §4 bans, verified rather than
+     asserted). Walk the typed merged AST: every site whose type contains a
+     64-bit integer (or any float) — formals, locals, globals, and each
+     expression's result type — grouped by enclosing function, split
+     DOOM-source vs glibc-header noise (the latter vanishes with the
+     mini-libc headers). Under --risc5-machdep `long` is 32-bit, so only
+     genuine ILongLong/IULongLong can trip the 64-bit check; typedef chains
+     like int64_t unroll before testing. *)
+  (* Trap, demonstrated live: host-LP64 stdint.h says [typedef long int
+     int64_t] — under the 32-bit machdep that silently narrows to 32 bits,
+     so a kind-only check (ILongLong) misses every int64_t site AND the
+     merged AST is arithmetically wrong. Catch the *typedef name* too; the
+     real pipeline avoids the trap by preprocessing against the target
+     mini-libc headers. *)
+  let name64 s =
+    let n = String.length s in
+    let rec go i = i + 2 <= n && ((s.[i] = '6' && s.[i + 1] = '4') || go (i + 1)) in
+    go 0
+  in
+  (* Value-shape checks: does a value of this type force 64-bit (or float)
+     representation on the backend? Deliberately does NOT recurse through
+     pointers — a pointee's innards are the pointee's problem (all pointers
+     are 32-bit), and descending would let glibc's FILE (which carries
+     __off64_t fields) poison every function that touches stdio. By-value
+     structs/arrays do recurse (their layout is the backend's problem). *)
+  let rec val64 t =
+    match t with
+    | TInt ((ILongLong | IULongLong), _) -> true
+    | TNamed (ti, _) -> name64 ti.tname || val64 ti.ttype
+    | TArray (t', _, _) -> val64 t'
+    | TComp (ci, _) -> List.exists (fun f -> val64 f.ftype) ci.cfields
+    | _ -> false
+  and valf t =
+    match t with
+    | TFloat _ -> true
+    | TNamed (ti, _) -> valf ti.ttype
+    | TArray (t', _, _) -> valf t'
+    | TComp (ci, _) -> List.exists (fun f -> valf f.ftype) ci.cfields
+    | _ -> false
+  in
+  let contains64 = val64
+  and containsf = valf in
+  let in_doom (l : location) =
+    (* merged locations point back at original sources via #line markers *)
+    let f = l.file in
+    let n = String.length f and p = "doomgeneric/" in
+    let pl = String.length p in
+    let rec go i = i + pl <= n && (String.sub f i pl = p || go (i + 1)) in
+    go 0
+  in
+  let doom64 : (string, int) Hashtbl.t = Hashtbl.create 16
+  and doomf : (string, int) Hashtbl.t = Hashtbl.create 16
+  and libc64 = ref 0
+  and libcf = ref 0 in
+  let bump tbl k =
+    Hashtbl.replace tbl k (1 + Option.value ~default:0 (Hashtbl.find_opt tbl k))
+  in
+  let census_fun (fd : fundec) =
+    let where =
+      Printf.sprintf "%s (%s:%d)" fd.svar.vname fd.svar.vdecl.file fd.svar.vdecl.line
+    in
+    let doom = in_doom fd.svar.vdecl in
+    let note t =
+      if contains64 t then if doom then bump doom64 where else incr libc64;
+      if containsf t then if doom then bump doomf where else incr libcf
+    in
+    List.iter (fun vi -> note vi.vtype) (fd.sformals @ fd.slocals);
+    let v =
+      object
+        inherit nopCilVisitor
+
+        method! vexpr e =
+          (try note (typeOf e) with _ -> ());
+          DoChildren
+      end
+    in
+    ignore (visitCilFunction v fd)
+  in
+  iterGlobals merged (fun g ->
+    match g with
+    | GFun (fd, _) -> census_fun fd
+    | GVar (vi, _, _) | GVarDecl (vi, _) ->
+      if contains64 vi.vtype
+      then
+        if in_doom vi.vdecl
+        then
+          bump
+            doom64
+            (Printf.sprintf "global %s (%s:%d)" vi.vname vi.vdecl.file vi.vdecl.line)
+        else incr libc64
+    | _ -> ());
+  Printf.printf "64-bit census — DOOM-source sites (by function):\n";
+  if Hashtbl.length doom64 = 0
+  then Printf.printf "  none\n"
+  else Hashtbl.iter (fun k n -> Printf.printf "  %s: %d typed sites\n" k n) doom64;
+  Printf.printf "float census — DOOM-source sites (by function):\n";
+  if Hashtbl.length doomf = 0
+  then Printf.printf "  none\n"
+  else Hashtbl.iter (fun k n -> Printf.printf "  %s: %d typed sites\n" k n) doomf;
+  Printf.printf
+    "glibc-header noise (ignored; mini-libc removes): %d 64-bit, %d float sites\n"
+    !libc64
+    !libcf;
   let out = if m32 then "out/merged_m32.c" else "out/merged.c" in
   let oc = open_out out in
   dumpFile defaultCilPrinter oc out merged;

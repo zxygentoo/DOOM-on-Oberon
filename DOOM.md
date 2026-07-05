@@ -130,7 +130,10 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
     cycles). `FixedDiv` is `(a<<16)/b` — a 48-bit dividend the 32/32 divider
     can't take directly — so a small software long division (~200–300 cycles,
     seedable from the hardware divider's `H` remainder). Fine: FixedDiv is
-    orders of magnitude rarer than FixedMul.
+    orders of magnitude rarer than FixedMul. Census-verified at the spike:
+    these two are the tree's *only* 64-bit sites, so the backend never
+    represents a 64-bit integer; six cold float functions are the strays 1c
+    excises (`spikes/cil/RESULTS.md`).
 - **Mini-libc**, ~1–2 k lines: `mem*`, `str*`, `sprintf`-ish (printf → UART),
   one-big-block malloc (DOOM zone-allocates internally), and a memory-backed
   `w_file` fronting the preloaded WAD (doomgeneric's WAD I/O is stdio-shaped

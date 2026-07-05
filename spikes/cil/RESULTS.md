@@ -67,6 +67,39 @@ installed via `envMachine` before `initCIL`. Confirmed in-process:
 - The `InterceptsOverrun` pointer↔int concern from the host run is moot
   under ILP32, as predicted.
 
+## 64-bit / float census (SEAM §4's bans, verified rather than asserted)
+
+The driver walks the typed merged AST (RISC5 machdep) and reports every
+site whose **value shape** forces 64-bit integers or floats on the backend,
+grouped by enclosing function, DOOM-source only (glibc decl noise counted
+separately: 288 / 0).
+
+- **64-bit: exactly two functions — `FixedMul` (4 sites) and `FixedDiv`
+  (6 sites), both `m_fixed.c`.** Nothing else in the tree. Replace those
+  two with the 1a hand-rolled procedures and the backend never represents
+  a 64-bit integer at all. Cross-checked textually: `int64_t` appears on
+  3 source lines, all in `m_fixed.c`.
+- **float: six cold functions** — the concrete list behind "the
+  amalgamation pass removes the strays": `SetVariable` /
+  `M_GetFloatVariable` (m_config — float-typed config vars; pin to int,
+  and note `M_LoadDefaults` runs at Init, so the path is live),
+  `AM_LevelInit` / `AM_Responder` (am_map — chocolate's float zoom;
+  vanilla used fixed, revert), `V_DrawMouseSpeedBox` (v_video — dead, no
+  mouse), `G_CheckDemoStatus` (g_game — float fps in the -timedemo
+  printf; integer-ize). None are in the render or game-tick hot path.
+- **Trap found, then armed against:** on the LP64 host, `stdint.h` makes
+  `int64_t` = `long`, which the 32-bit machdep silently narrows to 32
+  bits — the first, kind-only census returned a false "none" (and the
+  merged m32 AST is arithmetically wrong for m_fixed). The census now
+  also matches typedef *names*; the real pipeline must preprocess against
+  the target mini-libc headers, where `int64_t` simply doesn't exist.
+  Value-shape checking deliberately does not descend through pointers —
+  otherwise glibc's `FILE` (carrying `__off64_t` fields) poisons every
+  function that touches stdio.
+- Enforcement: the backend hard-errors on `ILongLong`/`TFloat`; this
+  census is the standing pre-codegen gate, and the float list is the 1c
+  work list.
+
 ## What this buys (per DOOM.md §9, now unlocked)
 
 - Track 1c's "single-TU amalgamation + PureDOOM rename map" → a library
