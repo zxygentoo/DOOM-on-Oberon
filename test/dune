@@ -1,0 +1,8 @@
+; Backend bring-up smoke test: prove the vendored plumbing end-to-end — construct a
+; Risc5_isa.instr, encode it, run it in the emulator, read the result register. This is
+; the execution half of the §7 differential jig, which will grow to compile random C
+; snippets through our backend and diff the result against host gcc.
+
+(test
+ (name jig_smoke)
+ (libraries emu))
