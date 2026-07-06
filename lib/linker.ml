@@ -12,6 +12,7 @@ type frag =
   | Bcc of R.cond * bool * int
   | Jmp of int
   | Call of string
+  | Addr of R.reg * string
 
 type obj =
   { name : string
@@ -21,16 +22,25 @@ type obj =
 type image =
   { code : R.instr list
   ; symbols : (string * int) list
+  ; code_base : int
   }
 
 let frag_width = function
   | Label _ -> 0
   | Ins _ | Bcc _ | Jmp _ | Call _ -> 1
+  | Addr _ -> 2 (* MOV-high + IOR, fixed even for small addresses: deterministic layout *)
 ;;
 
 let code_size o = List.fold_left (fun a f -> a + frag_width f) 0 o.frags
 
-let link (objs : obj list) : image =
+let sym_addr (img : image) name =
+  match List.assoc_opt name img.symbols with
+  | Some off -> img.code_base + (4 * off)
+  | None ->
+    Check.unsupported "address of undefined function %s — 3b linker / mini-libc" name
+;;
+
+let link ~(code_base : int) (objs : obj list) : image =
   (* pass 1: base offset per function *)
   let _, rev_syms =
     List.fold_left
@@ -59,33 +69,48 @@ let link (objs : obj list) : image =
          base
          o.frags);
     let a = ref base in
-    List.filter_map
+    List.concat_map
       (fun f ->
          let here = !a in
+         a := !a + frag_width f;
          let branch cond neg target =
            R.Branch { cond; neg; link = false; target = R.To_off (target - here - 1) }
          in
          match f with
-         | Label _ -> None
-         | Ins i ->
-           incr a;
-           Some i
-         | Bcc (cond, neg, l) ->
-           incr a;
-           Some (branch cond neg (Hashtbl.find addr l))
-         | Jmp l ->
-           incr a;
-           Some (branch R.True false (Hashtbl.find addr l))
+         | Label _ -> []
+         | Ins i -> [ i ]
+         | Bcc (cond, neg, l) -> [ branch cond neg (Hashtbl.find addr l) ]
+         | Jmp l -> [ branch R.True false (Hashtbl.find addr l) ]
          | Call name ->
-           incr a;
-           Some
-             (R.Branch
-                { cond = R.True
-                ; neg = false
-                ; link = true
-                ; target = R.To_off (sym name - here - 1)
-                }))
+           [ R.Branch
+               { cond = R.True
+               ; neg = false
+               ; link = true
+               ; target = R.To_off (sym name - here - 1)
+               }
+           ]
+         | Addr (r, name) ->
+           (* the function's absolute byte address, as load_const builds any 32-bit
+              constant: MOV' the high halfword (u: imm lands <<16), IOR the low *)
+           let byte = code_base + (4 * sym name) in
+           [ R.Alu
+               { op = R.Mov
+               ; u = true
+               ; v = false
+               ; a = r
+               ; b = 0
+               ; operand = R.Imm ((byte lsr 16) land 0xFFFF)
+               }
+           ; R.Alu
+               { op = R.Ior
+               ; u = false
+               ; v = false
+               ; a = r
+               ; b = r
+               ; operand = R.Imm (byte land 0xFFFF)
+               }
+           ])
       o.frags
   in
-  { code = List.concat_map resolve_obj objs; symbols }
+  { code = List.concat_map resolve_obj objs; symbols; code_base }
 ;;

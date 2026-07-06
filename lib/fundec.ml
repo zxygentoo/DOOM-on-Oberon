@@ -402,6 +402,14 @@ let rec gen_expr ctx (e : C.exp) : reg =
     home
       ctx
       v (* a register local; a slotted one falls through to the memory load below *)
+  | (C.AddrOf (C.Var f, C.NoOffset) | C.Lval (C.Var f, C.NoOffset))
+    when C.isFunctionType (C.unrollType f.vtype) ->
+    (* a function used as a value (callback arg, fn-ptr assignment): its address exists
+       only once Linker.link fixes the layout, so it stays *symbolic* here — an Addr
+       frag, expanded at link to the load_const pair (3b.1, ABI §6) *)
+    let r = alloc_scratch ctx in
+    ctx.rev_frags <- L.Addr (r, f.vname) :: ctx.rev_frags;
+    r
   | C.Lval lv -> gen_load ctx lv
   | C.AddrOf lv | C.StartOf lv ->
     (* &lv, and array decay — the same address, materialized as a value. A slotted local or
@@ -832,7 +840,7 @@ let gen_instr ctx (i : C.instr) =
     gen_store ctx lv r;
     free_scratch ctx r
   | C.Call (lvopt, fexp, args, _, _) ->
-    (* Direct call to a named function; args 1-4 in R0-R3, args 5+ on the stack, scalar/void
+    (* Call, direct or indirect; args 1-4 in R0-R3, args 5+ on the stack, scalar/void
        return in R0 (ABI §3). Marshal through the outgoing area: evaluate each arg with the
        full scratch pool and STW it to SP+4i, then LDW R0-R3 from the first four slots.
        Evaluation and register placement decouple, so no half-loaded arg register is clobbered
@@ -840,15 +848,7 @@ let gen_instr ctx (i : C.instr) =
        the home area is left populated — what a ≤4-arg varargs callee expects. This function
        makes a call, so it is non-leaf: homes R6-R11, scratch R0-R5; [compile] sizes the
        outgoing area to the widest call it makes. *)
-    let callee =
-      match fexp with
-      | C.Lval (C.Var f, C.NoOffset)
-        when match C.unrollType f.vtype with
-             | C.TFun _ -> true
-             | _ -> false -> f
-      | _ -> unsupported "indirect call (through a function pointer) — later slice"
-    in
-    (match C.unrollType callee.vtype with
+    (match C.unrollType (C.typeOf fexp) with
      | C.TFun (rt, _, _, _) ->
        (match C.unrollType rt with
         | C.TComp _ | C.TArray _ ->
@@ -872,12 +872,36 @@ let gen_instr ctx (i : C.instr) =
          emit ctx (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i });
          free_scratch ctx r)
       args;
+    (* The target. Direct: a named function — a PC-relative BL the Linker resolves.
+       Indirect (3b.1): the *pointer value* (fexp is Lval(Mem e) — the function lvalue;
+       its value IS the address), evaluated HERE, after the arg stores but before the
+       R0-R3 loads, with R0-R3 claimed (the s9 trick, four wide) so the target register
+       sits above them and survives the loads. A division inside e saves/restores the
+       claimed registers harmlessly — the args live in memory until the loads. *)
+    let do_call =
+      match fexp with
+      | C.Lval (C.Var f, C.NoOffset)
+        when match C.unrollType f.vtype with
+             | C.TFun _ -> true
+             | _ -> false -> fun () -> call ctx f.vname
+      | C.Lval (C.Mem e, C.NoOffset) ->
+        List.iter (fun r -> ctx.scratch_free.(r) <- false) [ 0; 1; 2; 3 ];
+        let ft = gen_expr ctx e in
+        fun () ->
+          emit
+            ctx
+            (R.Branch { cond = R.True; neg = false; link = true; target = R.To_reg ft });
+          free_scratch ctx ft;
+          List.iter (fun r -> ctx.scratch_free.(r) <- true) [ 0; 1; 2; 3 ]
+      | _ ->
+        unsupported "call through a non-lval function expression — unexpected CIL shape"
+    in
     (* the first four slots become the register args; args 5+ stay on the stack at SP+16.. *)
     List.iteri
       (fun i _ ->
          if i < 4 then emit ctx (R.Load { size = R.W; a = i; base = sp_reg; off = 4 * i }))
       args;
-    call ctx callee.vname;
+    do_call ();
     (match lvopt with
      | None -> () (* void call / result discarded *)
      | Some (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)

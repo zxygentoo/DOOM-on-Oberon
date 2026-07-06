@@ -7,14 +7,19 @@
 module R = Emu.Risc5_isa
 
 (** One function's unresolved instruction stream. [Label]/[Bcc]/[Jmp] carry function-local
-    label ids; [Call] names a function resolved at link time. A [Label] is zero width; every
-    other frag is one word. *)
+    label ids; [Call] names a function resolved at link time (a PC-relative BL, so the code
+    base cancels); [Addr] materializes a function's *absolute byte address* into a register
+    — the code half of the pointer story (3b.1): a function has no address until layout is
+    fixed, so it stays symbolic in the frag stream. A [Label] is zero width; [Addr] is two
+    words (the load_const MOV-high/IOR pair, fixed-size even for small addresses so layout
+    stays deterministic); every other frag is one word. *)
 type frag =
   | Ins of R.instr
   | Label of int
   | Bcc of R.cond * bool * int
   | Jmp of int
   | Call of string
+  | Addr of R.reg * string
 
 type obj =
   { name : string
@@ -24,11 +29,18 @@ type obj =
 type image =
   { code : R.instr list (* the flat resolved code, functions in [link] order *)
   ; symbols : (string * int) list (* function name -> word offset within [code] *)
+  ; code_base : int (* the byte address the code is linked at (the [link] argument) *)
   }
 
-(** Word length of a function's resolved code (labels contribute 0). *)
+(** Word length of a function's resolved code (labels contribute 0, [Addr] two). *)
 val code_size : obj -> int
 
-(** [link objs] lays the functions out in order and resolves every branch and call to a
-    concrete offset. Raises {!Check.Unsupported} on a call to a name no object defines. *)
-val link : obj list -> image
+(** A linked function's absolute byte address — what an [Addr] frag loads, and what a
+    code-valued data reloc (a function-pointer initializer, {!Globals.reloc_target})
+    patches in. Raises {!Check.Unsupported} on a name no object defines. *)
+val sym_addr : image -> string -> int
+
+(** [link ~code_base objs] lays the functions out in order starting at byte address
+    [code_base] and resolves every branch, call, and address to a concrete value. Raises
+    {!Check.Unsupported} on a call to (or address of) a name no object defines. *)
+val link : code_base:int -> obj list -> image

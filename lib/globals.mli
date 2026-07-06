@@ -3,6 +3,14 @@
     initialized data is serialized little-endian into one zero-filled data+bss image
     the runner (jig) or stub (real machine) drops at the data base. *)
 
+(** What a pointer-valued initializer points at: [Data off] is a DB-relative byte offset
+    (a global, a string literal — patched to data base + off); [Code name] is a function,
+    whose address exists only after {!Linker.link} lays the code out (patched via
+    {!Linker.sym_addr}). *)
+type reloc_target =
+  | Data of int
+  | Code of string
+
 type t =
   { offsets : (int, int) Hashtbl.t (** [varinfo.vid] -> DB-relative byte offset *)
   ; skipped : (int, string) Hashtbl.t
@@ -12,11 +20,11 @@ type t =
     (** interned string-literal content -> DB-relative byte offset of its bytes (with a NUL
         terminator) in [image]; identical literals share one copy. {!Fundec} materializes a
         [CStr] as [DB + offset], the same address form a global gets. *)
-  ; relocs : (int * int) list
-    (** pointer-valued initializer slots, (image byte offset, DB-relative target): the
-        image holds 0 there, and the consumer patches in the absolute address DB + target
-        once the data base is fixed — the jig at its [Runner.data_base], the 3b linker at
-        the blob's data base (ABI §6, pointer initializers as absolute words) *)
+  ; relocs : (int * reloc_target) list
+    (** pointer-valued initializer slots, (image byte offset, target): the image holds 0
+        there, and the consumer patches in the absolute address once the bases are fixed
+        — the jig at [Runner.data_base]/[Runner.code_base], the 3b linker at the blob's
+        (ABI §6, pointer initializers as absolute words) *)
   ; image : bytes (** data+bss, little-endian, length padded to a word multiple *)
   }
 

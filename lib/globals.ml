@@ -15,15 +15,21 @@
 
 module C = GoblintCil
 
+(* What a pointer-valued initializer points at: data (a DB-relative offset — global or
+   interned string) or code (a function, whose address exists only after Linker.link).
+   The image holds 0 in the slot; the consumer patches the absolute address in. *)
+type reloc_target =
+  | Data of int
+  | Code of string
+
 type t =
   { offsets : (int, int) Hashtbl.t (* varinfo.vid -> DB-relative byte offset *)
   ; skipped : (int, string) Hashtbl.t (* vid -> why it has no offset (refusal message) *)
   ; strings :
       (string, int) Hashtbl.t (* string-literal content -> DB-relative byte offset *)
-  ; relocs : (int * int) list
-    (* pointer-valued initializer slots: (image byte offset, DB-relative target). The
-       image holds 0 there; the consumer writes DB + target once DB is fixed — the jig
-       at its data base, the 3b linker at the blob's (ABI §6 absolute pointer words) *)
+  ; relocs : (int * reloc_target) list
+    (* pointer-valued initializer slots: (image byte offset, target) — ABI §6's
+       "pointer-valued data initializers patched as absolute words" *)
   ; image : bytes (* data+bss, little-endian, length padded to a word multiple *)
   }
 
@@ -94,27 +100,30 @@ let word_of_init (e : C.exp) : int =
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
 
-(* A pointer-valued initializer whose target is *data*: a string literal (interned at a
-   known offset by the scan below) or &global / global-array decay, any constant
-   Field/Index chain folded in via bitsOffset. The image cannot hold the absolute
-   address — DB isn't fixed until load — so the slot is recorded as a reloc,
-   (image byte offset, DB-relative target), and the image's consumer patches it to
-   DB + target: the jig at its data_base, the 3b linker at the blob's (the "pointer-valued
-   data initializers as absolute words" of ABI §6). Function pointers fall through to
-   None: code addresses don't exist until the linker lays the code out. *)
-let ptr_target ~offsets ~strings (e : C.exp) : int option =
+(* A pointer-valued initializer: a string literal (interned at a known offset by the
+   scan below), &global / global-array decay with any constant Field/Index chain folded
+   in via bitsOffset — or, since 3b.1, a function (states[]'s actionf_t entries): a
+   function has no address until Linker.link fixes the layout, so the reloc carries the
+   *symbol* and the consumer patches it via Linker.sym_addr — an unknown name fails
+   loud there, at link. The image cannot hold any absolute address (neither base is
+   fixed at compile time), so every slot is a reloc the consumer patches: the jig at
+   Runner's bases, the 3b linker at the blob's (ABI §6, absolute pointer words). *)
+let ptr_target ~offsets ~strings (e : C.exp) : reloc_target option =
   let rec strip e =
     match e with
     | C.CastE (_, t, e') when C.isPointerType t -> strip e'
     | e -> e
   in
   match strip e with
-  | C.Const (C.CStr (s, _)) -> Hashtbl.find_opt strings s
+  | C.Const (C.CStr (s, _)) ->
+    Option.map (fun off -> Data off) (Hashtbl.find_opt strings s)
+  | (C.AddrOf (C.Var f, C.NoOffset) | C.StartOf (C.Var f, C.NoOffset))
+    when C.isFunctionType (C.unrollType f.vtype) -> Some (Code f.vname)
   | (C.AddrOf (C.Var g, off) | C.StartOf (C.Var g, off)) when g.vglob ->
     (match Hashtbl.find_opt offsets g.vid with
      | None -> None (* the host global is skipped or extern; the refusal names it *)
      | Some base ->
-       (try Some (base + (fst (C.bitsOffset g.vtype off) / 8)) with
+       (try Some (Data (base + (fst (C.bitsOffset g.vtype off) / 8))) with
         | C.SizeOfError _ -> None))
   | _ -> None
 ;;

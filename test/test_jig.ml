@@ -29,16 +29,22 @@ let dcc_compile ~src ~fname =
      helpers (ABI §5: __div &c.), linked into every program exactly as the real blob will *)
   let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) in
   let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
-  (* play loader for the pointer-initializer relocs (ABI §6): with the data base fixed
-     at Runner.data_base, each reloc slot becomes the absolute address DB + target *)
+  let image =
+    Linker.link ~code_base:(Runner.code_base * 4) (entry @ rest @ Runtime.objs)
+  in
+  (* play loader for the pointer-initializer relocs (ABI §6): with both bases now fixed,
+     each slot becomes an absolute address — data base + offset for a Data target, the
+     linked function address (sym_addr) for a Code target (fn-ptr initializers, 3b.1) *)
   List.iter
     (fun (off, target) ->
-       Bytes.set_int32_le
-         globals.Globals.image
-         off
-         (Int32.of_int (Runner.data_base + target)))
+       let v =
+         match target with
+         | Globals.Data t -> Runner.data_base + t
+         | Globals.Code name -> Linker.sym_addr image name
+       in
+       Bytes.set_int32_le globals.Globals.image off (Int32.of_int v))
     globals.Globals.relocs;
-  (Linker.link (entry @ rest @ Runtime.objs)).Linker.code, globals.Globals.image
+  image.Linker.code, globals.Globals.image
 ;;
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)
@@ -713,6 +719,38 @@ let samples =
        return v.c[3]; }"
     , "ulc"
     , 1 (* union LOCAL: slotted (aggregate), punned through the frame slot *) )
+    (* code addresses (3b.1): a function's address exists only at link time, so &f is an
+       Addr frag (expanded to the load_const pair at layout) and a fn-ptr initializer is
+       a Code reloc (patched via sym_addr). An indirect call is BL-to-register: the
+       pointer value evaluated between the arg stores and the R0-R3 loads, with R0-R3
+       claimed so the target register sits above them. *)
+  ; ( "int inc1(int x){ return x + 1; } int (*gf)(int) = inc1; int icall(int i){ return \
+       gf(i) * 2; }"
+    , "icall"
+    , 1 (* fn-ptr GLOBAL initializer (Code reloc) + call through it; retires usefp *) )
+  ; ( "int dbl2(int x){ return x * 2; } int lcall(int i){ int (*f)(int) = dbl2; return \
+       f(i) + 1; }"
+    , "lcall"
+    , 1 (* &f into a local (Addr frag), then the indirect call *) )
+  ; ( "int app(int (*fp)(int), int x){ return fp(x); } int neg1(int x){ return -x; } int \
+       cbk(int i){ return app(neg1, i); }"
+    , "cbk"
+    , 1
+      (* the callback pattern: fn passed as an arg, called indirectly in the callee — \
+           the DOOM action-function shape; retires callptr *)
+    )
+  ; ( "int aone(int x){ return x + 1; } int atwo(int x){ return x + 2; } int \
+       (*ftbl[2])(int) = { aone, atwo }; int tcall(int i){ return ftbl[i & 1](i); }"
+    , "tcall"
+    , 1
+      (* table dispatch — the states[] actionf_t shape: Code relocs in an array, \
+           indexed indirect call *)
+    )
+  ; ( "int s5f(int a,int b,int c,int d,int e){ return a + b*2 + c*3 + d*4 + e*5; } int \
+       (*g5)(int,int,int,int,int) = s5f; int ical5(int i){ return g5(i, i+1, i+2, i+3, \
+       i+4); }"
+    , "ical5"
+    , 1 (* indirect call with a 5th (stack) arg: marshalling + claimed R0-R3 + BL reg *) )
   ]
 ;;
 
@@ -723,16 +761,11 @@ let samples =
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
-  ; ( "int callptr(int (*fp)(int), int x){ return fp(x); }"
-    , "callptr" (* indirect call (function pointer) — later slice *) )
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
     , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
-  ; ( "int idf(int x){ return x; } int (*gfp)(int) = idf; int usefp(int x){ if (gfp) \
-       return 1; return x; }"
-    , "usefp" (* function-pointer initializer — 3b linker (code addresses) *) )
   ]
 ;;
 
