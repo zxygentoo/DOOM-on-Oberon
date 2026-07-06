@@ -21,9 +21,11 @@
    address-taken scalars, local or parameter (CIL's [vaddrof]) — get an SP-relative frame slot
    (the locals region, between the outgoing area and the saves) and route through the same
    memory calculus a global does, based at the slot instead of DB; an address-taken param keeps
-   its register home and the prologue spills it into the slot. Anything outside the supported subset
-   raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message names
-   the later slice that will handle it. *)
+   its register home and the prologue spills it into the slot. A whole-struct assignment (s4.4) is a
+   byte-wise memory copy — alignment-agnostic, since these structs are often sub-word-aligned; by-value
+   struct args and returns never occur in DOOM (census) and stay refused. Anything outside the
+   supported subset raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message
+   names the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
@@ -153,7 +155,10 @@ let classify_access (lv : C.lval) : access =
   | C.TInt (ik, _) when C.bitsSizeOf t = 8 -> Byte (C.isSigned ik)
   | C.TInt (ik, _) when C.bitsSizeOf t = 16 -> Half (C.isSigned ik)
   | C.TComp _ | C.TArray _ ->
-    unsupported "aggregate load/store (struct copy) — later slice"
+    (* a whole aggregate never loads/stores as a scalar: a struct copy is intercepted in
+       gen_instr (s4.4), by-value struct args/returns are refused at the call boundary. So
+       reaching here is an aggregate used as a value in some other shape — unexpected. *)
+    unsupported "aggregate used as a scalar value — unexpected CIL shape"
   | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
   | _ -> unsupported "memory access of unsupported type"
 ;;
@@ -546,9 +551,43 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
   free_scratch ctx base
 ;;
 
+(* Whole-aggregate copy (s4.4): [dst = src] for struct-typed lvals — CIL keeps [a = b] a single
+   struct-typed Set with an lval RHS. Byte-wise memory copy, unrolled over the compile-time
+   size: alignment-agnostic on purpose, because these structs are often sub-word-aligned
+   (mapthing_t is 5 shorts → align 2 and a 10-byte size; struct color is 4 chars → align 1) and
+   LDW/STW would mask a non-4-aligned address. Cold in DOOM (census: 16 sites, none in the
+   render path), so the naive 2-ops-per-byte is fine; word-copy when provably ≥4-aligned is a
+   later optimization. Both ends go through materialize_addr, so [a=b], [*dp=*sp] and [arr[i]=s]
+   all reduce to two base addresses + a byte shuttle — and every offset stays in [0, size). *)
+let gen_struct_copy ctx (dst : C.lval) (src : C.lval) (size : int) : unit =
+  let sptr = materialize_addr ctx src in
+  let dptr = materialize_addr ctx dst in
+  let tmp = alloc_scratch ctx in
+  for k = 0 to size - 1 do
+    emit ctx (R.Load { size = R.B; a = tmp; base = sptr; off = k });
+    emit ctx (R.Store { size = R.B; a = tmp; base = dptr; off = k })
+  done;
+  free_scratch ctx tmp;
+  free_scratch ctx sptr;
+  free_scratch ctx dptr
+;;
+
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
   match i with
+  | C.Set (dst, e, _, _)
+    when match C.unrollType (C.typeOfLval dst) with
+         | C.TComp _ | C.TArray _ -> true
+         | _ -> false ->
+    (* whole-aggregate copy (s4.4): dst is struct-typed, so this is [dst = src] by value. CIL's
+       RHS is the source lval (a=b, *dp=*sp, arr[i]=s); any other struct-typed RHS would be a
+       by-value call return, which the call boundary already refuses (census: none in DOOM). *)
+    let src =
+      match e with
+      | C.Lval src -> src
+      | _ -> unsupported "aggregate assignment from a non-lval — unexpected CIL shape"
+    in
+    gen_struct_copy ctx dst src (C.bitsSizeOf (C.typeOfLval dst) / 8)
   | C.Set ((C.Var v, C.NoOffset), e, _, _)
     when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
     (* a register local: evaluate, then MOV into its home. A slotted local (aggregate or
@@ -585,7 +624,8 @@ let gen_instr ctx (i : C.instr) =
      | C.TFun (rt, _, _, _) ->
        (match C.unrollType rt with
         | C.TComp _ | C.TArray _ ->
-          unsupported "aggregate return (hidden pointer, ABI §3) — s4.4"
+          unsupported
+            "aggregate return (hidden pointer, ABI §3) — none in DOOM (census); deferred"
         | C.TFloat _ -> unsupported "float return (ABI §4: banned)"
         | _ -> ())
      | _ -> ());
@@ -593,7 +633,8 @@ let gen_instr ctx (i : C.instr) =
       (fun a ->
          match C.unrollType (C.typeOf a) with
          | C.TComp _ | C.TArray _ ->
-           unsupported "aggregate call arg (stack copy, ABI §3) — s4.4"
+           unsupported
+             "aggregate call arg (stack copy, ABI §3) — none in DOOM (census); deferred"
          | C.TFloat _ -> unsupported "float arg (ABI §4: banned)"
          | _ -> ())
       args;
@@ -772,13 +813,15 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
      sub-word int is narrowed to its declared width at entry (below). *)
   (match C.unrollType return_type with
    | C.TComp _ | C.TArray _ ->
-     unsupported "aggregate return (hidden pointer, ABI §3) — call slice"
+     unsupported
+       "aggregate return (hidden pointer, ABI §3) — none in DOOM (census); deferred"
    | _ -> ());
   List.iter
     (fun (v : C.varinfo) ->
        match C.unrollType v.vtype with
        | C.TComp _ | C.TArray _ ->
-         unsupported "aggregate param (stack copy, ABI §3) — call slice"
+         unsupported
+           "aggregate param (stack copy, ABI §3) — none in DOOM (census); deferred"
        | _ -> ())
     fd.sformals;
   let call_info = call_arity fd in

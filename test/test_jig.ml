@@ -338,6 +338,33 @@ let samples =
        return x; }"
     , "outparam"
     , 1 (* &param escaping to a callee (the real out-param pattern) → x+5 *) )
+    (* s4.4: whole-struct copy (a = b) — the only by-value aggregate op in DOOM (census: 0
+       struct args/returns, 16 copies). Byte-wise, so alignment-agnostic; each sample writes
+       fields, copies the struct, then reads fields back to prove the bytes landed. *)
+  ; ( "struct s2 { int a; int b; }; int cps(int x){ struct s2 p, q; p.a = x; p.b = x + \
+       1; q = p; return q.a * 10 + q.b; }"
+    , "cps"
+    , 1 (* local struct copy, both slotted (s4.3): 8 B, word-aligned → 11x+1 *) )
+  ; ( "struct s2 { int a; int b; }; int cpp(int x){ struct s2 p, q; struct s2 *sp = &p; \
+       struct s2 *dp = &q; p.a = x; p.b = x + 3; *dp = *sp; return q.a * 2 + q.b; }"
+    , "cpp"
+    , 1 (* copy through pointers: *dp = *sp, both addresses via deref → 3x+3 *) )
+  ; ( "struct sh { short x; short y; short z; }; int cpsh(int a){ struct sh p, q; p.x = \
+       a; p.y = a + 1; p.z = a + 2; q = p; return q.x + q.y * 100 + q.z * 10000; }"
+    , "cpsh"
+    , 1
+      (* the alignment case: 6 B, align 2 — byte-copy handles the non-word size and the
+         sub-word address that LDW/STW would mask; short fields truncate on both sides *)
+    )
+  ; ( "struct s2 { int a; int b; }; int cparr(int i){ i &= 1; struct s2 arr[2]; arr[0].a \
+       = 10; arr[0].b = 20; arr[1].a = 30; arr[1].b = 40; struct s2 t; t = arr[i]; \
+       return t.a + t.b; }"
+    , "cparr"
+    , 1 (* indexed source: t = arr[i], the real array-copy pattern → 30 or 70 *) )
+  ; ( "struct sc { int a; int b; }; struct sc s1 = {1, 2}; struct sc s2; int cpg(int x){ \
+       s2 = s1; return s2.a + x; }"
+    , "cpg"
+    , 1 (* global struct copy: both sides DB-relative → 1 + x (was a reject pre-s4.4) *) )
   ]
 ;;
 
@@ -352,10 +379,7 @@ let rejects =
     , "callptr" (* indirect call (function pointer) — later slice *) )
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
-    , "usemk" (* aggregate return (hidden pointer) — s4.4 *) )
-  ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \
-       s2 = s1; return s2.a + x; }"
-    , "cp" (* struct copy — later *) )
+    , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
   ; ( "struct s3 { int a; int b; int c; }; struct s3 sa[4]; int ppd(int i){ struct s3 *p \
        = sa + (i & 3); struct s3 *q = sa; return p - q; }"
     , "ppd" (* ptr−ptr, 12-byte elem: non-pow-2 → needs __div *) )
