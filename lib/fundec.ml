@@ -18,6 +18,7 @@
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
+module L = Linker (* the unresolved frag stream + instr-level linker (ABI §6) *)
 
 let unsupported = Check.unsupported
 
@@ -41,17 +42,11 @@ let db_reg = 13 (* DB, the data base: set by crt0 (runner, in the jig), never wr
 let sp_reg = 14 (* SP, full-descending, 4-aligned (ABI §2/§3) *)
 let lnk_reg = 15 (* LNK: BL writes it; a callee returns via [B LNK] (To_reg) *)
 
-(* Emission carries labels/branches, not raw instrs — a branch's target only gets a word
-   address once the whole body is laid out. [resolve] (below) turns frags into the final
-   [instr list]: the intra-function baby form of 3b's instr-level linker. *)
-type frag =
-  | Ins of R.instr (* one real instruction (width 1) *)
-  | Label of int (* a branch target — zero width *)
-  | Bcc of R.cond * bool * int (* conditional branch (cond, neg) to a label *)
-  | Jmp of int (* unconditional branch to a label *)
-
+(* Emission builds an unresolved {!Linker.frag} stream, not raw instrs — a branch's target
+   only gets a word address once the whole *program* is laid out, so [compile] hands the frags
+   to {!Linker.link} (labels/branches resolve there, alongside cross-function calls). *)
 type ctx =
-  { mutable rev_frags : frag list (* emitted frags, reversed *)
+  { mutable rev_frags : L.frag list (* emitted frags, reversed *)
   ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register *)
   ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
   ; base_scratch : reg (* first register above the homes *)
@@ -64,7 +59,7 @@ type ctx =
                               save set is R[first_callee_saved..max_used] (ABI §2/§3) *)
   }
 
-let emit ctx i = ctx.rev_frags <- Ins i :: ctx.rev_frags
+let emit ctx i = ctx.rev_frags <- L.Ins i :: ctx.rev_frags
 
 let new_label ctx =
   let l = ctx.next_label in
@@ -72,9 +67,9 @@ let new_label ctx =
   l
 ;;
 
-let place ctx l = ctx.rev_frags <- Label l :: ctx.rev_frags
-let bcc ctx cond neg l = ctx.rev_frags <- Bcc (cond, neg, l) :: ctx.rev_frags
-let jmp ctx l = ctx.rev_frags <- Jmp l :: ctx.rev_frags
+let place ctx l = ctx.rev_frags <- L.Label l :: ctx.rev_frags
+let bcc ctx cond neg l = ctx.rev_frags <- L.Bcc (cond, neg, l) :: ctx.rev_frags
+let jmp ctx l = ctx.rev_frags <- L.Jmp l :: ctx.rev_frags
 
 let alloc_scratch ctx =
   let rec find r =
@@ -644,46 +639,9 @@ let rec gen_stmt ctx (s : C.stmt) =
   | C.Switch _ -> unsupported "switch — later slice"
 ;;
 
-(* ---- resolve: frags -> instr list. Pass 1 assigns each frag a word address (labels are
-   zero width); pass 2 rewrites branches to PC-relative offsets. A RISC5 PC-relative branch at
-   word A lands at A+1+off (risc.ml), so off = target - A - 1. Intra-function only, no
-   relocation — 3b's linker generalizes this across the whole blob. ---- *)
-let resolve (frags : frag list) : R.instr list =
-  let addr = Hashtbl.create 16 in
-  ignore
-    (List.fold_left
-       (fun a f ->
-          match f with
-          | Label l ->
-            Hashtbl.replace addr l a;
-            a
-          | Ins _ | Bcc _ | Jmp _ -> a + 1)
-       0
-       frags);
-  let branch cond neg l a =
-    R.Branch { cond; neg; link = false; target = R.To_off (Hashtbl.find addr l - a - 1) }
-  in
-  let out = ref []
-  and a = ref 0 in
-  List.iter
-    (fun f ->
-       match f with
-       | Label _ -> ()
-       | Ins i ->
-         out := i :: !out;
-         incr a
-       | Bcc (cond, neg, l) ->
-         out := branch cond neg l !a :: !out;
-         incr a
-       | Jmp l ->
-         out := branch R.True false l !a :: !out;
-         incr a)
-    frags;
-  List.rev !out
-;;
-
-(* ---- entry: an integer leaf -> its instr list (args in R0.., return R0) ---- *)
-let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
+(* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
+   [Linker.link] lays this out with any callees and resolves branches and calls. ---- *)
+let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   let return_type =
     match fd.svar.vtype with
     | C.TFun (rt, _, _, _) -> rt
@@ -770,10 +728,10 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
     if frame = 0
     then []
     else
-      Ins (alu R.Sub sp_reg sp_reg (R.Imm frame))
+      L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame))
       :: List.mapi
-           (fun i r -> Ins (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i }))
+           (fun i r -> L.Ins (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i }))
            saved
   in
-  resolve (prologue @ List.rev ctx.rev_frags)
+  { L.name = fd.svar.vname; frags = prologue @ List.rev ctx.rev_frags }
 ;;

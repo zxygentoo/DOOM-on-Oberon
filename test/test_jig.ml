@@ -25,7 +25,8 @@ let dcc_compile ~src ~fname =
   let file = Frontend.parse_string ~name:fname src in
   let globals = Globals.from_file file in
   let fd = Frontend.find_fundec file fname in
-  Fundec.compile ~globals fd, globals.Globals.image
+  let obj = Fundec.compile ~globals fd in
+  (Linker.link [ obj ]).Linker.code, globals.Globals.image
 ;;
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)

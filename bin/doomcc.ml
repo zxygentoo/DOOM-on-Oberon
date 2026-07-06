@@ -60,9 +60,9 @@ let () =
     | C.GFun (fd, _) ->
       incr total;
       (match Fundec.compile ~globals fd with
-       | instrs ->
+       | obj ->
          incr ok;
-         n_instr := !n_instr + List.length instrs
+         n_instr := !n_instr + Linker.code_size obj
        | exception Check.Unsupported msg ->
          incr rejected;
          bump msg
