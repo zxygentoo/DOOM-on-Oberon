@@ -6,11 +6,12 @@
    same contract, small scale; the real 3b linker splits bss out only to keep the
    blob *file* short.
 
-   Deliberately *tolerant*: a global the current slice can't place (aggregate,
-   sub-word, float ban) is recorded in [skipped] with its reason instead of raised —
-   so Fundec attributes the refusal to the functions that actually touch it, and
-   every other function keeps compiling (the doomcc-histogram semantics). Slice 3.1
-   places 32-bit scalars only; aggregates are s3.2, char/short globals s3.3. *)
+   Deliberately *tolerant*: a global the current slice can't place (sub-word, union,
+   float ban, link-time-address initializer) is recorded in [skipped] with its reason
+   instead of raised — so Fundec attributes the refusal to the functions that
+   actually touch it, and every other function keeps compiling (the doomcc-histogram
+   semantics). Slice 3.2 places any type whose leaves are all 32-bit scalars
+   (arrays/structs included); char/short leaves are s3.3. *)
 
 module C = GoblintCil
 
@@ -48,6 +49,45 @@ let word_of_init (e : C.exp) : int =
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
 
+(* A type places iff every leaf is a 32-bit scalar — arrays and structs of words
+   included (natural alignment ≤ 4, ABI §4, so layout can't diverge from gcc -m32;
+   the spike verified identical struct metrics under our machdep). *)
+let rec check_placeable (t : C.typ) =
+  match C.unrollType t with
+  | (C.TInt _ | C.TEnum _ | C.TPtr _) as t' ->
+    if C.bitsSizeOf t' <> 32
+    then Check.unsupported "sub-word global (char/short) — memory slice s3.3"
+  | C.TArray (elem, _, _) -> check_placeable elem
+  | C.TComp (ci, _) when ci.cstruct ->
+    List.iter (fun (f : C.fieldinfo) -> check_placeable f.ftype) ci.cfields
+  | C.TComp _ -> Check.unsupported "union global — later slice"
+  | _ -> Check.unsupported "global of unsupported type — later slice"
+;;
+
+(* Serialize [init] at byte [off] into the writes list. CompoundInit offsets are
+   single-level (Field/Index with NoOffset — CIL's documented shape); nested
+   aggregates recurse; absent entries stay zero because the image is pre-zeroed —
+   C's partial-initializer semantics for free. *)
+let rec serialize_init writes (off : int) (init : C.init) =
+  match init with
+  | C.SingleInit e -> writes := (off, word_of_init e) :: !writes
+  | C.CompoundInit (ct, initl) ->
+    List.iter
+      (fun ((o, sub) : C.offset * C.init) ->
+         let delta =
+           match o with
+           | C.Field (_, C.NoOffset) -> fst (C.bitsOffset ct o) / 8
+           | C.Index (e, C.NoOffset) ->
+             (match C.getInteger (C.constFold true e), C.unrollType ct with
+              | Some i, C.TArray (elem, _, _) ->
+                C.Cilint.int_of_cilint i * (C.bitsSizeOf elem / 8)
+              | _ -> Check.unsupported "initializer index — unexpected CIL shape")
+           | _ -> Check.unsupported "initializer offset — unexpected CIL shape"
+         in
+         serialize_init writes (off + delta) sub)
+      initl
+;;
+
 let from_file (file : C.file) : t =
   let offsets = Hashtbl.create 64
   and skipped = Hashtbl.create 64 in
@@ -55,12 +95,7 @@ let from_file (file : C.file) : t =
   and writes = ref [] in
   let place (v : C.varinfo) (init : C.init option) =
     Check.check_unsupported_types v.vtype;
-    (match C.unrollType v.vtype with
-     | (C.TInt _ | C.TEnum _ | C.TPtr _) when C.bitsSizeOf v.vtype = 32 -> ()
-     | C.TInt _ -> Check.unsupported "sub-word global (char/short) — memory slice s3.3"
-     | C.TArray _ | C.TComp _ ->
-       Check.unsupported "global aggregate (array/struct) — memory slice s3.2"
-     | _ -> Check.unsupported "global of unsupported type — later slice");
+    check_placeable v.vtype;
     let size = C.bitsSizeOf v.vtype / 8
     and align = C.alignOf_int v.vtype in
     let off = (!cursor + align - 1) / align * align in
@@ -68,9 +103,7 @@ let from_file (file : C.file) : t =
     then Check.unsupported "data+bss image exceeds DB's +512 KB mem-op reach";
     (match init with
      | None -> () (* tentative definition: bss-style, stays zero *)
-     | Some (C.SingleInit e) -> writes := (off, word_of_init e) :: !writes
-     | Some (C.CompoundInit _) ->
-       Check.unsupported "aggregate initializer — memory slice s3.2");
+     | Some i -> serialize_init writes off i);
     Hashtbl.replace offsets v.vid off;
     cursor := off + size
   in

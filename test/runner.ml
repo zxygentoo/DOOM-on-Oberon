@@ -21,7 +21,7 @@ let data_base = 0x80000
    program — fail loud rather than spin forever. *)
 let max_steps = 1_000_000
 
-let run_leaf ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
+let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
   let m = M.make () in
   let ram = M.For_tests.ram m in
   List.iteri (fun i instr -> ram.(code_base + i) <- Isa.encode instr) body;
@@ -43,7 +43,7 @@ let run_leaf ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : i
     else if n >= max_steps
     then
       failwith
-        "Runner.run_leaf: step cap exceeded (mis-resolved branch / non-terminating body?)"
+        "Runner.run: step cap exceeded (mis-resolved branch / non-terminating body?)"
     else (
       M.For_tests.single_step m;
       loop (n + 1))

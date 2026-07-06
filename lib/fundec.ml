@@ -1,11 +1,13 @@
 (* Per-function compilation (AGENT.md 1b): one CIL fundec -> its Risc5_isa.instr list,
    for integer *leaf* functions — straight-line code, if/while/for control flow
    (comparisons lower to SUB + a conditional branch; [resolve] lays the branches out to
-   PC-relative offsets), and 32-bit scalar globals/statics (DB-relative one-instr
-   LDW/STW off a [Globals.t], ABI §2/§6). The minimal vertical the differential jig
-   exercises. Naive register allocation (ABI §2: a leaf may use R0-R11 freely; args and
-   return in R0..) — every variable keeps a fixed home register, so control-flow merge
-   points need no reconciliation. Anything outside the supported subset raises
+   PC-relative offsets), and word-sized memory through the s3.2 address calculus
+   ([gen_addr]): globals/statics off DB (ABI §2/§6), array indexing, struct fields,
+   deref chains, &global and array decay, and pointer arithmetic ([gen_ptr_arith] —
+   ptr±int scaled by the pointee size, pow-2 ptr−ptr). The minimal vertical the
+   differential jig exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
+   freely; args and return in R0..) — every variable keeps a fixed home register, so
+   control-flow merge points need no reconciliation. Anything outside the supported subset raises
    [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the
    later slice that will handle it. *)
 
@@ -75,7 +77,10 @@ let alloc_scratch ctx =
   find ctx.base_scratch
 ;;
 
-let is_scratch ctx r = r >= ctx.base_scratch
+(* Only R[base_scratch..max_reg] are scratches — the homes below and DB (R13) must
+   never be freed; DB would even index past scratch_free. The upper bound lets every
+   consumer of an address uniformly "free the base" (a no-op for DB and homes). *)
+let is_scratch ctx r = r >= ctx.base_scratch && r <= max_reg
 let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 
 let home ctx (v : C.varinfo) =
@@ -94,6 +99,18 @@ let global_offset ctx (v : C.varinfo) =
     (match Hashtbl.find_opt ctx.globals.Globals.skipped v.vid with
      | Some why -> unsupported "%s" why
      | None -> unsupported "extern global without a definition — 3b linker / mini-libc")
+;;
+
+(* s3.2 loads/stores words only: the accessed type must be a 32-bit scalar. Sub-word
+   (char/short) access is s3.3; aggregate assignment (struct copy) is later. *)
+let check_word_access (lv : C.lval) =
+  match C.unrollType (C.typeOfLval lv) with
+  | (C.TInt _ | C.TEnum _ | C.TPtr _) as t when C.bitsSizeOf t = 32 -> ()
+  | C.TInt _ -> unsupported "sub-word memory access (char/short) — memory slice s3.3"
+  | C.TComp _ | C.TArray _ ->
+    unsupported "aggregate load/store (struct copy) — later slice"
+  | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
+  | _ -> unsupported "memory access of unsupported type"
 ;;
 
 (* ---- instruction builders ---- *)
@@ -116,6 +133,67 @@ let load_const ctx d n =
     emit ctx (alu R.Ior d d (R.Imm lo)))
 ;;
 
+(* [pow2_log n] is [Some k] iff n = 2^k — the strength-reduction test. *)
+let pow2_log n =
+  if n > 0 && n land (n - 1) = 0
+  then (
+    let k = ref 0 in
+    while 1 lsl !k < n do
+      incr k
+    done;
+    Some !k)
+  else None
+;;
+
+(* Scale the index in [r] by the element size: pow-2 sizes strength-reduce to LSL,
+   the rest MUL by immediate (built via load_const past 16 bits). Size 1 is free.
+   Frees [r] when a new register is produced. *)
+let scale_index ctx r size =
+  if size = 1
+  then r
+  else (
+    let d = alloc_scratch ctx in
+    (match pow2_log size with
+     | Some k -> emit ctx (alu R.Lsl d r (R.Imm k))
+     | None ->
+       if size <= 0xFFFF
+       then emit ctx (alu R.Mul d r (R.Imm size))
+       else (
+         let c = alloc_scratch ctx in
+         load_const ctx c size;
+         emit ctx (alu R.Mul d r (R.Reg c));
+         free_scratch ctx c));
+    free_scratch ctx r;
+    d)
+;;
+
+(* Element size behind a pointer-typed expression (for ptr±int scaling / ptr−ptr). *)
+let pointee_size (t : C.typ) =
+  match C.unrollType t with
+  | C.TPtr (elem, _) -> C.bitsSizeOf elem / 8
+  | _ -> unsupported "pointer arithmetic on a non-pointer — unexpected CIL shape"
+;;
+
+(* Fresh register <- [p] + [delta] (signed): one immediate ADD/SUB when [delta] fits the
+   16-bit field (the folded p[±k] / q = q+1 idiom — scale collapsed into the constant),
+   else build the constant and ADD. Frees [p] if it is a scratch. *)
+let add_const ctx p delta =
+  let rd = alloc_scratch ctx in
+  if delta = 0
+  then emit ctx (mov_reg rd p)
+  else if delta > 0 && delta <= 0xFFFF
+  then emit ctx (alu R.Add rd p (R.Imm delta))
+  else if delta < 0 && -delta <= 0xFFFF
+  then emit ctx (alu R.Sub rd p (R.Imm (-delta)))
+  else (
+    let c = alloc_scratch ctx in
+    load_const ctx c delta;
+    emit ctx (alu R.Add rd p (R.Reg c));
+    free_scratch ctx c);
+  free_scratch ctx p;
+  rd
+;;
+
 let binop_instr op rd b c : R.instr =
   let rr o = alu o rd b (R.Reg c) in
   match op with
@@ -134,7 +212,9 @@ let binop_instr op rd b c : R.instr =
        As an if/loop condition it never reaches here: gen_cond intercepts it. *)
     unsupported "comparison as a value (0/1 materialization) — later slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
-    unsupported "pointer arithmetic — memory slice s3.2"
+    (* pointer arithmetic needs the pointee size to scale — gen_expr intercepts it
+       (gen_ptr_arith) before this two-register builder is ever reached *)
+    unsupported "pointer arithmetic — internal error (should be intercepted upstream)"
 ;;
 
 (* ---- expressions: emit code computing [e], return the register holding its value ---- *)
@@ -148,17 +228,22 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r (Char.code ch);
     r
-  | C.Lval (C.Var v, C.NoOffset) when v.vglob ->
-    (* a 32-bit scalar global/static: one LDW off DB (ABI §2/§6) — layout admitted
-       word scalars only, so W is the right size by construction *)
+  | C.Lval (C.Var v, C.NoOffset) when not v.vglob -> home ctx v
+  | C.Lval lv ->
+    (* memory read — global scalar (one LDW off DB), aggregate element, deref chain:
+       all one Load off the folded (base, residual) address *)
+    check_word_access lv;
+    let base, off = gen_addr ctx lv in
+    free_scratch ctx base;
+    (* dest may reuse it: LDW Ra,Ra,off reads before writing *)
     let r = alloc_scratch ctx in
-    emit ctx (R.Load { size = R.W; a = r; base = db_reg; off = global_offset ctx v });
+    emit ctx (R.Load { size = R.W; a = r; base; off });
     r
-  | C.Lval (C.Var v, C.NoOffset) -> home ctx v
   | C.AddrOf (C.Var v, _) when not v.vglob ->
     unsupported "&local (needs a stack slot in the ABI §3 frame) — call slice"
-  | C.AddrOf _ | C.StartOf _ ->
-    unsupported "address-of / array-to-pointer decay — memory slice s3.2"
+  | C.AddrOf lv | C.StartOf lv ->
+    (* &lv, and array decay — the same address, materialized as a value *)
+    materialize_addr ctx lv
   | C.CastE (_, t, e') ->
     Check.check_unsupported_types t;
     if C.bitsSizeOf t < 32 then unsupported "narrowing cast to <32-bit — later slice";
@@ -168,6 +253,9 @@ let rec gen_expr ctx (e : C.exp) : reg =
     gen_unop ctx op e'
   | C.BinOp (C.Shiftrt, _, _, t) when is_unsigned_int t ->
     unsupported "unsigned >> (compiles to ROR + mask) — later slice"
+  | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
+    Check.check_unsupported_types t;
+    gen_ptr_arith ctx op e1 e2
   | C.BinOp (op, e1, e2, t) ->
     Check.check_unsupported_types t;
     let r1 = gen_expr ctx e1 in
@@ -177,8 +265,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     free_scratch ctx r1;
     free_scratch ctx r2;
     rd
-  | C.Lval _ -> unsupported "lvalue through memory/field/index — memory slice s3.2"
-  | _ -> unsupported "expression form not supported in slice 1"
+  | _ -> unsupported "expression form not supported yet — later slice"
 
 and gen_unop ctx op e' =
   match op with
@@ -203,22 +290,155 @@ and gen_unop ctx op e' =
     free_scratch ctx r;
     rd
   | C.LNot -> unsupported "logical ! (0/1 materialization) — later slice"
+
+(* ---- pointer arithmetic (s3.2b). ptr±int scales the integer by the pointee size
+   (LSL for pow-2, MUL otherwise) then ADD/SUB; a constant offset folds scale-and-add
+   into one immediate (add_const). ptr−ptr subtracts to a byte gap, then divides by the
+   pointee size — exact via ASR: C guarantees both pointers index one array, so the gap
+   is an exact multiple of the size, and ASR of an exact multiple floors to the true
+   quotient (negatives included). Non-pow-2 element sizes need __div (call slice). ---- *)
+and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
+  let size = pointee_size (C.typeOf e1) in
+  match op with
+  | C.PlusPI | C.IndexPI | C.MinusPI ->
+    let subtract = op = C.MinusPI in
+    let p = gen_expr ctx e1 in
+    (match C.getInteger (C.constFold true e2) with
+     | Some c ->
+       let mag = C.Cilint.int_of_cilint c * size in
+       add_const ctx p (if subtract then -mag else mag)
+     | None ->
+       let scaled = scale_index ctx (gen_expr ctx e2) size in
+       let rd = alloc_scratch ctx in
+       emit ctx (alu (if subtract then R.Sub else R.Add) rd p (R.Reg scaled));
+       free_scratch ctx scaled;
+       free_scratch ctx p;
+       rd)
+  | C.MinusPP ->
+    let p1 = gen_expr ctx e1 in
+    let p2 = gen_expr ctx e2 in
+    let d = alloc_scratch ctx in
+    emit ctx (alu R.Sub d p1 (R.Reg p2));
+    (* byte gap *)
+    free_scratch ctx p1;
+    free_scratch ctx p2;
+    (match pow2_log size with
+     | Some 0 -> d (* char*: byte gap already is the count *)
+     | Some k ->
+       emit ctx (alu R.Asr d d (R.Imm k));
+       d
+     | None ->
+       unsupported "ptr−ptr with non-pow-2 element size — needs __div (call slice)")
+  | _ -> unsupported "gen_ptr_arith: non-pointer op — internal error"
+
+(* ---- the s3.2 address calculus: fold an lval into (base register, residual const).
+   Constant hops — fields, constant indexes — accumulate in the residual, which rides
+   free in the mem-op's 20-bit offset field, so p->f and a[3] stay one instruction;
+   a dynamic index emits scale (LSL for pow-2 element sizes) + ADD. The caller does
+   the final Load/Store/address-ADD and then frees the returned base (free_scratch
+   no-ops on DB and homes). CIL guarantees every expression here is side-effect-free,
+   so evaluation order is unconstrained. ---- *)
+and gen_addr ctx ((host, off) : C.lval) : reg * int =
+  let rec fold base residual (t : C.typ) (o : C.offset) =
+    match o with
+    | C.NoOffset -> base, residual
+    | C.Field (fi, rest) ->
+      if fi.fbitfield <> None then unsupported "bitfield access (ABI §4: banned)";
+      let byte_off =
+        fst (C.bitsOffset (C.TComp (fi.fcomp, [])) (C.Field (fi, C.NoOffset))) / 8
+      in
+      fold base (residual + byte_off) fi.ftype rest
+    | C.Index (e, rest) ->
+      let elem =
+        match C.unrollType t with
+        | C.TArray (elem, _, _) -> elem
+        | _ -> unsupported "index into a non-array — unexpected CIL shape"
+      in
+      let esize = C.bitsSizeOf elem / 8 in
+      (match C.getInteger (C.constFold true e) with
+       | Some i -> fold base (residual + (C.Cilint.int_of_cilint i * esize)) elem rest
+       | None ->
+         let idx = gen_expr ctx e in
+         let scaled = scale_index ctx idx esize in
+         let nb = alloc_scratch ctx in
+         emit ctx (alu R.Add nb base (R.Reg scaled));
+         free_scratch ctx scaled;
+         free_scratch ctx base;
+         fold nb residual elem rest)
+  in
+  let base, residual, host_t =
+    match host with
+    | C.Var v when v.vglob -> db_reg, global_offset ctx v, v.vtype
+    | C.Var v ->
+      unsupported
+        "local %s used as memory (array/struct local needs a stack slot) — call slice"
+        v.vname
+    | C.Mem e ->
+      let pointee =
+        match C.unrollType (C.typeOf e) with
+        | C.TPtr (t, _) -> t
+        | _ -> unsupported "deref of a non-pointer — unexpected CIL shape"
+      in
+      gen_expr ctx e, 0, pointee
+  in
+  let base, residual = fold base residual host_t off in
+  if residual >= -0x80000 && residual <= 0x7FFFF
+  then base, residual
+  else (
+    (* a residual past the 20-bit mem-op range (giant constant index) folds into the
+       base instead; everything sane keeps its one-instruction access *)
+    let c = alloc_scratch ctx in
+    load_const ctx c residual;
+    let nb = alloc_scratch ctx in
+    emit ctx (alu R.Add nb base (R.Reg c));
+    free_scratch ctx c;
+    free_scratch ctx base;
+    nb, 0)
+
+(* &lv / array decay: the address as a *value*. The 16-bit ALU-immediate limit shows
+   the ISA asymmetry — *access* reaches ±512 KB through the 20-bit mem-op offset, but
+   *address formation* past 64 K must build the constant first. *)
+and materialize_addr ctx (lv : C.lval) : reg =
+  let base, off = gen_addr ctx lv in
+  if off = 0 && is_scratch ctx base
+  then base
+  else (
+    free_scratch ctx base;
+    let d = alloc_scratch ctx in
+    if off = 0
+    then emit ctx (mov_reg d base)
+    else if off >= 0 && off <= 0xFFFF
+    then emit ctx (alu R.Add d base (R.Imm off))
+    else (
+      let c = alloc_scratch ctx in
+      load_const ctx c off;
+      emit ctx (alu R.Add d base (R.Reg c));
+      free_scratch ctx c);
+    d)
 ;;
 
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
   match i with
-  | C.Set ((C.Var v, C.NoOffset), e, _, _) when v.vglob ->
-    (* global = e: evaluate, then one STW off DB — the mirror of the load above *)
-    let r = gen_expr ctx e in
-    emit ctx (R.Store { size = R.W; a = r; base = db_reg; off = global_offset ctx v });
-    free_scratch ctx r
-  | C.Set ((C.Var v, C.NoOffset), e, _, _) ->
+  | C.Set ((C.Var v, C.NoOffset), e, _, _) when not v.vglob ->
+    (match C.unrollType v.vtype with
+     | C.TComp _ | C.TArray _ ->
+       (* an aggregate "fits" in a register home only by accident — never emit the
+          bogus MOV, even though no supported construct could observe it yet *)
+       unsupported "aggregate assignment (struct copy) — later slice"
+     | _ -> ());
     let r = gen_expr ctx e in
     let h = home ctx v in
     if r <> h then emit ctx (mov_reg h r);
     free_scratch ctx r
-  | C.Set _ -> unsupported "store through memory/field/index lvalue — memory slice s3.2"
+  | C.Set (lv, e, _, _) ->
+    (* memory write: value, then address (CIL: both side-effect-free, order is free) *)
+    check_word_access lv;
+    let r = gen_expr ctx e in
+    let base, off = gen_addr ctx lv in
+    emit ctx (R.Store { size = R.W; a = r; base; off });
+    free_scratch ctx base;
+    free_scratch ctx r
   | C.Call _ -> unsupported "function call — call slice"
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
@@ -369,6 +589,22 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
   List.iter
     (fun (v : C.varinfo) -> Check.check_unsupported_types v.vtype)
     (fd.sformals @ fd.slocals);
+  (* ABI §3: aggregates travel by hidden pointer / stack copy — call-slice machinery.
+     Sub-word params would need entry narrowing (caller passes a full word); until
+     s3.3 masks them, a raw home register would diverge from gcc. *)
+  (match C.unrollType return_type with
+   | C.TComp _ | C.TArray _ ->
+     unsupported "aggregate return (hidden pointer, ABI §3) — call slice"
+   | _ -> ());
+  List.iter
+    (fun (v : C.varinfo) ->
+       match C.unrollType v.vtype with
+       | C.TComp _ | C.TArray _ ->
+         unsupported "aggregate param (stack copy, ABI §3) — call slice"
+       | t when C.bitsSizeOf t < 32 ->
+         unsupported "sub-word (char/short) param — needs entry narrowing, s3.3"
+       | _ -> ())
+    fd.sformals;
   if List.length fd.sformals > 4 then unsupported ">4 params (stack args — call slice)";
   let homes = Hashtbl.create 16 in
   let next = ref 0 in

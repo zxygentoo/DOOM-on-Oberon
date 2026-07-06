@@ -4,11 +4,16 @@
 
    This is the harness the backend grows against: each new codegen feature adds a sample and is
    trusted only once it matches gcc here. Covers straight-line integer ops, if/while/for
-   control flow, and 32-bit scalar globals (memory lives *inside* the samples, so the harness
-   stays int-in/int-out; both sides get fresh global state per run — ours by rewriting the
-   data image, gcc's by a fresh process). Loop samples mask their trip count so the full-range
-   args below can't spin. Parse+compile and gcc-compile both happen once per sample; only the
-   (fast) runs repeat per arg-tuple. *)
+   control flow, and memory — globals, arrays, structs, deref (memory lives *inside* the
+   samples, so the harness stays int-in/int-out; both sides get fresh global state per run —
+   ours by rewriting the data image, gcc's by a fresh process).
+
+   Sample-authorship rules: (1) loop samples mask their trip count so the full-range args
+   below can't spin; (2) NEVER let a raw pointer value reach a result or comparison — the
+   emulator and the host live in different address spaces (DB = 0x80000 vs wherever gcc's
+   data lands), so only *dereferenced values* and *pointer differences* are comparable.
+   Parse+compile and gcc-compile both happen once per sample; only the (fast) runs repeat
+   per arg-tuple. *)
 
 open Doomcc_core
 
@@ -124,19 +129,85 @@ let samples =
        acc = acc + i; } return acc; }"
     , "gacc"
     , 1 )
+    (* address calculus (s3.2a): arrays / structs / deref — see the pointer rule above *)
+  ; "int a1[8] = {3,1,4,1,5,9,2,6}; int geti(int i){ return a1[i & 7]; }", "geti", 1
+  ; ( "int a2[8] = {3,1,4,1,5,9,2,6}; int getc3(int x){ return a2[3] + x; }"
+    , "getc3"
+    , 1 (* const index folds to one LDW *) )
+  ; ( "int a3[8]; int setg(int i,int v){ a3[i & 7] = v; return a3[i & 7] + a3[(i + 1) & \
+       7]; }"
+    , "setg"
+    , 2 )
+  ; ( "int za[4] = {10, 20}; int zpart(int i){ return za[i & 3]; }"
+    , "zpart"
+    , 1 (* partial init zero-fills *) )
+  ; ( "int m[4][4] = {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}}; int mij(int i,int \
+       j){ return m[i & 3][j & 3]; }"
+    , "mij"
+    , 2 )
+  ; ( "int mm[4][4] = {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}}; int rowsum(int \
+       r){ r &= 3; int s = 0; int j = 0; for (j = 0; j < 4; j++) s += mm[r][j]; return \
+       s; }"
+    , "rowsum"
+    , 1 )
+  ; ( "struct pt { int x; int y; }; struct pt p0 = {7, 11}; int gety(int k){ return p0.y \
+       * k + p0.x; }"
+    , "gety"
+    , 1 )
+  ; ( "struct in { int a; int b; }; struct outer { int c; struct in i; }; struct outer \
+       o0 = {1, {2, 3}}; int nest(int k){ return o0.i.b + o0.c * k; }"
+    , "nest"
+    , 1 )
+  ; "int gv = 5; int drf(int i){ int *q = &gv; return *q + i; }", "drf", 1
+  ; ( "struct pt2 { int x; int y; }; struct pt2 pp = {20, 30}; int arrow(int k){ struct \
+       pt2 *q = &pp; return q->x + q->y * k; }"
+    , "arrow"
+    , 1 )
+    (* pointer arithmetic (s3.2b): ptr±int scaled, ptr−ptr; results derefed or differenced *)
+  ; ( "int a4[8] = {2,4,6,8,10,12,14,16}; int pa(int i){ int *q = a4 + (i & 7); return \
+       *q; }"
+    , "pa"
+    , 1 )
+  ; ( "int ae[8] = {2,4,6,8,10,12,14,16}; int pm(int i){ int *q = ae + 7; return *(q - \
+       (i & 7)); }"
+    , "pm"
+    , 1 (* MinusPI, dynamic *) )
+  ; ( "int ad[8]; int pd(int i){ int *p = ad + (i & 7); int *q = ad + 2; return p - q; }"
+    , "pd"
+    , 1 (* ptr−ptr → count, pow-2 ASR *) )
+  ; ( "int aw[8] = {1,2,3,4,5,6,7,8}; int wsum(int n){ n &= 7; int *q = aw; int s = 0; \
+       int i = 0; for (i = 0; i < n; i++){ s += *q; q = q + 1; } return s; }"
+    , "wsum"
+    , 1 (* q = q+1 folds to ADD imm *) )
+  ; ( "int af[8] = {1,2,3,4,5,6,7,8}; int walkne(int n){ n &= 7; int *q = af; int *end = \
+       af + n; int s = 0; while (q != end){ s += *q; q = q + 1; } return s; }"
+    , "walkne"
+    , 1 (* walk to a sentinel: ptr != is sign-agnostic (ordered ptr < waits for s5) *) )
   ]
 ;;
 
 (* The pre-codegen gate must REFUSE these (ABI §4 bans + not-yet-supported forms),
-   raising Unsupported rather than silently miscompiling. *)
+   raising Unsupported rather than silently miscompiling. Note `int k(int *p){ return *p; }`
+   COMPILES as of s3.2a but can't run here — the harness passes ints, and a random int is
+   not a valid pointer on either side; deref coverage comes from drf/arrow above. *)
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
-  ; "int k(int *p){ return *p; }", "k" (* deref through a pointer — s3.2 *)
-  ; ( "int ga[4]; int gidx(int i){ return ga[i & 3]; }"
-    , "gidx" (* aggregate global — s3.2 *) )
   ; ( "char gc; int rgc(int x){ return gc + x; }"
-    , "rgc" (* sub-word global: the Globals skip→attribute path — s3.3 *) )
+    , "rgc" (* sub-word global — s3.3 (sl below covers the Globals skip→attribute path) *)
+    )
+  ; ( "int la(int i){ int t[4]; t[0] = i; return t[0]; }"
+    , "la" (* local array — needs a stack slot, call slice *) )
+  ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \
+       s2 = s1; return s2.a + x; }"
+    , "cp" (* struct copy — later *) )
+  ; ( "int gw2 = 0x11223344; int cb(int i){ char *c = (char *)&gw2; return c[i & 3]; }"
+    , "cb" (* sub-word deref — s3.3 *) )
+  ; ( "struct s3 { int a; int b; int c; }; struct s3 sa[4]; int ppd(int i){ struct s3 *p \
+       = sa + (i & 3); struct s3 *q = sa; return p - q; }"
+    , "ppd" (* ptr−ptr, 12-byte elem: non-pow-2 → needs __div *) )
+  ; ( "char *msg = \"hi\"; int sl(int x){ if (msg) return x; return 1; }"
+    , "sl" (* string-literal init — 3b linker *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
   ; ( "int al(int x){ int y = x; int *p = &y; return x; }"
@@ -173,7 +244,7 @@ let check_sample (src, fname, arity) : int * int =
   let sfails = ref 0 in
   List.iter
     (fun args ->
-       let ours = u32 (Runner.run_leaf ~data body args) in
+       let ours = u32 (Runner.run ~data body args) in
        let refv = gcc_run exe args in
        if ours <> refv
        then (

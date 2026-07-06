@@ -73,17 +73,12 @@ let check name args got want =
 let () =
   (* straight-line ADD, incl. 32-bit wrap *)
   List.iter
-    (fun (a, b) ->
-       check "ADD" [ a; b ] (Runner.run_leaf add [ a; b ]) (u32 (u32 a + u32 b)))
+    (fun (a, b) -> check "ADD" [ a; b ] (Runner.run add [ a; b ]) (u32 (u32 a + u32 b)))
     [ 2, 3; 0, 0; -1, 1; 0x7FFF_FFFF, 1; 0xFFFF_FFFF, 0xFFFF_FFFF; 123456, 654321 ];
   (* forward branches: signed select *)
   List.iter
     (fun (a, b) ->
-       check
-         "SELECT"
-         [ a; b ]
-         (Runner.run_leaf select [ a; b ])
-         (if a < b then 111 else 222))
+       check "SELECT" [ a; b ] (Runner.run select [ a; b ]) (if a < b then 111 else 222))
     [ 3, 5; 5, 3; 5, 5; -1, 0; 0, -1; -7, -3 ];
   (* backward branch: bounded loop, incl. n<=0 (immediate exit) *)
   List.iter
@@ -91,7 +86,7 @@ let () =
        check
          "LOOP"
          [ n ]
-         (Runner.run_leaf countdown [ n ])
+         (Runner.run countdown [ n ])
          (if n > 0 then n * (n + 1) / 2 else 0))
     [ 0; 1; 5; 10; 100; -3 ];
   Printf.printf

@@ -65,7 +65,10 @@ let () =
          n_instr := !n_instr + List.length instrs
        | exception Check.Unsupported msg ->
          incr rejected;
-         bump msg)
+         bump msg
+       | exception C.SizeOfError (why, _) ->
+         incr rejected;
+         bump ("sizeof failed (incomplete type?): " ^ why))
     | C.GVar _ | C.GVarDecl _ ->
       () (* handled by Globals above (GVarDecl-only = extern) *)
     | _ -> ());
