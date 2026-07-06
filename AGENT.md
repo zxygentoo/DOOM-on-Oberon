@@ -157,7 +157,8 @@ sectors past the FS partition remain the fallback if chunking ever chafes.
   same kind of value and mix freely in one blob. The DOOM-repo "assembler"
   is then not a parser but an **instr-level linker**: resolve labels/branches,
   expand `LEA` and the `FixedMul` intrinsic (`instr list → instr list`
-  passes), lay out code/data/bss, emit the header+checksum, dump a symbol
+  passes), lay out code/data/bss, patch pointer-valued data initializers
+  (absolute words, ABI §6), emit the header+checksum, dump a symbol
   map. The flat blob links at a fixed himem address (say `0x100000`), no
   relocation. Both text *views* — a parser (text→instr) and a mnemonic
   disassembler (instr→text) — are deferred/demand-driven; `[@@deriving show]`
@@ -272,7 +273,7 @@ proven end-to-end.
 | | Deliverable | Verify |
 |---|---|---|
 | **3a** | ABI spec (args R0–R3, return R0, FP + callee-saved set, varargs) · the assembler/linker contract (ABI §6) · blob header w/ version byte · the himem layout constants page | ✅ **`ABI.md` FROZEN v1 (2026-07-05)** — 6/6 register split, offsets 0–35, layout all locked; changes require a version bump |
-| **3b** ◐ | ◐ **`risc5_isa` module in hand** — instr ADT + `encode`/`decode` + `[@inline]` field accessors (stock OCaml, zero-dep; the single definition of the encoding). Landed via its first consumer — the vendored emulator's `single_step` now decodes through the accessor layer (ABI §6, zero-cost). **Remaining:** hoist to a standalone host-repo module (shared with the backend) + the DOOM-repo **instr-level linker** over it (label/branch resolution, `LEA` + `FixedMul` expansion, section layout, header+checksum, symbol map) + the 1a eDSL + `[@@deriving show]` listings; text parser and disassembler deferred | **module ✅:** round-trip invariants property-tested (`decode ∘ encode = id`; `encode ∘ decode = id` for canonical words — `test_risc5_isa.ml`) + decode/accessor path anchored to silicon (emulator-on-`risc5_isa` ≡ HardCaml core, 250k+-case lockstep; boot + visual goldens green on host `develop`, vendor pin `e36fcf0`, 2026-07-06). **Remaining:** (i) encode-side **typed lockstep** — `encode i` → core performs `i` (Phase-4 harness); (ii) **label torture** — random branch skeletons, every label lands on its tag; (iii) jig blobs **emulator ≡ Cyclesim ≡ silicon** from hello blob on |
+| **3b** ◐ | ◐ **`risc5_isa` module in hand** — instr ADT + `encode`/`decode` + `[@inline]` field accessors (stock OCaml, zero-dep; the single definition of the encoding). Landed via its first consumer — the vendored emulator's `single_step` now decodes through the accessor layer (ABI §6, zero-cost). **Remaining:** hoist to a standalone host-repo module (shared with the backend) + the DOOM-repo **instr-level linker** over it (label/branch resolution, `LEA` + `FixedMul` expansion, section layout, header+checksum, symbol map, pointer-valued global initializers patched as absolute data words — ABI §6; s3.1's `Globals` census shows the DOOM tree needs them) + the 1a eDSL + `[@@deriving show]` listings; text parser and disassembler deferred | **module ✅:** round-trip invariants property-tested (`decode ∘ encode = id`; `encode ∘ decode = id` for canonical words — `test_risc5_isa.ml`) + decode/accessor path anchored to silicon (emulator-on-`risc5_isa` ≡ HardCaml core, 250k+-case lockstep; boot + visual goldens green on host `develop`, vendor pin `e36fcf0`, 2026-07-06). **Remaining:** (i) encode-side **typed lockstep** — `encode i` → core performs `i` (Phase-4 harness); (ii) **label torture** — random branch skeletons, every label lands on its tag; (iii) jig blobs **emulator ≡ Cyclesim ≡ silicon** from hello blob on |
 
 **Track 2 — the machine** (2a/2b start immediately; 2c needs 3a)
 
@@ -305,13 +306,17 @@ naive → local → linear-scan ladder (§4) is the *later* perf pass, whose fir
 spilling (the ">12 live values" refusals). The live worklist is `doomcc` itself —
 `dune exec bin/doomcc.exe -- spikes/cil/out/i/*.i` prints, per merged program, how many
 functions compile and a histogram of *why* the rest don't, each bucket a pending slice.
+The code: library `doomcc_core` (`lib/`: `Check` — the refusal channel + ABI §4 type bans ·
+`Frontend` — CIL parse/machdep/merge · `Globals` — static-storage placement + data/bss
+image · `Fundec` — per-function compilation); the differential jig lives in `test/`
+(`runner` = exec half, `test_jig` = the diff), the driver in `bin/doomcc.ml`.
 
 | slice | constructs | status |
 |---|---|---|
 | **s1** | straight-line integer leaves — arithmetic, bitwise, shifts, casts, unary neg/not | ✅ `79bc806` |
 | **s2** | control flow — if/else, while, for, && / \|\| short-circuits (CIL → nested if), multiple returns | ✅ `bed04e4` |
-| **s3** | memory — globals/statics, loads/stores, address-of, array/field/deref lvalues, pointer arith | next |
-| **s4** | calls — the ABI frame (arg regs + stack args, callee-saved, return), over the 3b instr-level linker | pending |
+| **s3** ◐ | memory, in three sub-slices: **s3.1** scalar int globals/statics — `Globals` placement (DB-relative offsets, natural alignment, LE data+bss image, *tolerant per-global skip* so one bad global refuses only the functions touching it) + one-instr `LDW`/`STW` off DB + runner data segment/R13 (crt0-in-miniature) · **s3.2** the address calculus — `gen_addr` folding lval chains (deref / index / field) into base reg + residual constant (rides free in the 20-bit mem-op offset), `&global`, array decay, `ptr±int`, `ptr−ptr` (pow-2 sizes), const-index folding, `CompoundInit` · **s3.3** sub-word — `char` via `LDB`/`STB` (the ABI §1 char-unsigned payoff), `short` composed from 2×`LDB` (no halfword mem-ops exist), narrowing-cast masks | ◐ **s3.1 ✅ `9d24263`** (2026-07-06) — jig 26 samples / 1300 cases green; real tree 155→175 fns, 695 globals placed (2 780 B image), 287 skipped. Initializer census: enum consts + NULL casts serialize now; link-time-address initializers wait for 3b. **s3.2 next** |
+| **s4** | calls — the ABI frame (arg regs + stack args, callee-saved, return), over the 3b instr-level linker; stack slots for address-taken locals (`vaddrof` — `&local` deferred here from s3: a leaf has no frame to point into) | pending |
 | **s5** | the odds — `!` / compare as a 0/1 value, unsigned ordered compares, `switch`, `continue` (CIL → goto) | pending |
 
 **Later** (each optional, independently landable): v2 viewer + task; Option A
