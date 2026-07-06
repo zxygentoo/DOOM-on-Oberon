@@ -294,9 +294,25 @@ is content, not infrastructure.
 | | Deliverable | Verify |
 |---|---|---|
 | **1a** | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` | each runs in the jig in Cyclesim vs host reference — before the backend exists |
-| **1b** | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; ABI; allocator ladder naive → local → linear-scan | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
+| **1b** ◐ | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; ABI. Built on **two axes** — feature coverage (the *slice ladder* below) and allocation quality (naive → local → linear-scan, the *later* perf pass, §4) | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig |
 | **1c** | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only) | host build plays E1M1; pieces unit-tested in the jig |
 | **1d** | first frame of E1M1 **in simulation** — harness preloads blob+WAD straight into the PSRAM model; pixel-exact framebuffer dumps via the visual-golden harness, a bring-up luxury no DOOM port ever had. (0.39 M cyc/s ≈ 10 s/frame is *steady-state*; `D_DoomMain` init is hundreds of M cycles ≈ tens of sim-minutes — don't debug a "hang" that is `R_InitTextures`.) Then v1 stub on hardware | sim framebuffer golden ≡ host-reference frame (same dither code, bit-identical); demo desync check; on-hardware E1M1 |
+
+**1b slice ladder** — the *coverage* axis: which C constructs compile, built one
+reviewable vertical at a time under the naive allocator, each trusted only once it matches
+gcc in the differential jig (§9). Allocation stays naive across all of these; the
+naive → local → linear-scan ladder (§4) is the *later* perf pass, whose first rung is
+spilling (the ">12 live values" refusals). The live worklist is `doomcc` itself —
+`dune exec bin/doomcc.exe -- spikes/cil/out/i/*.i` prints, per merged program, how many
+functions compile and a histogram of *why* the rest don't, each bucket a pending slice.
+
+| slice | constructs | status |
+|---|---|---|
+| **s1** | straight-line integer leaves — arithmetic, bitwise, shifts, casts, unary neg/not | ✅ `79bc806` |
+| **s2** | control flow — if/else, while, for, && / \|\| short-circuits (CIL → nested if), multiple returns | ✅ `bed04e4` |
+| **s3** | memory — globals/statics, loads/stores, address-of, array/field/deref lvalues, pointer arith | next |
+| **s4** | calls — the ABI frame (arg regs + stack args, callee-saved, return), over the 3b instr-level linker | pending |
+| **s5** | the odds — `!` / compare as a 0/1 value, unsigned ordered compares, `switch`, `continue` (CIL → goto) | pending |
 
 **Later** (each optional, independently landable): v2 viewer + task; Option A
 `.rsc` envelope; PS/2 Pmod keys; mouse burst-turn; PWM audio; **allocator
