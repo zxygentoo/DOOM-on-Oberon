@@ -1,9 +1,11 @@
-(* Slice 1 of the RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr list, for
-   straight-line integer *leaf* functions — the minimal vertical the differential jig
-   exercises. Naive register allocation (ABI §2: a leaf may use R0-R11 freely; args and
-   return sit in R0..). Anything outside the supported subset raises [Unsupported] — the
-   pre-codegen gate (ABI §4 + the spikes/cil census) refuses to miscompile rather than
-   guess. Each unsupported message names the later slice that will handle it. *)
+(* The RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr list, for integer *leaf*
+   functions — straight-line code plus if/while/for control flow (comparisons lower to SUB +
+   a conditional branch; [resolve] lays the branches out to PC-relative offsets). The minimal
+   vertical the differential jig exercises. Naive register allocation (ABI §2: a leaf may use
+   R0-R11 freely; args and return in R0..) — every variable keeps a fixed home register, so
+   control-flow merge points need no reconciliation. Anything outside the supported subset
+   raises [Unsupported] — the pre-codegen gate (ABI §4 + the spikes/cil census) refuses to
+   miscompile rather than guess. Each message names the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
@@ -33,20 +35,36 @@ let is_unsigned_int (t : C.typ) =
   | C.TInt (ik, _) -> not (C.isSigned ik)
   | _ -> false
 
-(* ---- registers (ABI §2). Leaf + straight-line ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
+(* ---- registers (ABI §2). Leaf ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
 type reg = int
 
 let return_reg = 0
 let max_reg = 11
 
+(* Emission carries labels/branches, not raw instrs — a branch's target only gets a word
+   address once the whole body is laid out. [resolve] (below) turns frags into the final
+   [instr list]: the intra-function baby form of 3b's instr-level linker. *)
+type frag =
+  | Ins of R.instr (* one real instruction (width 1) *)
+  | Label of int (* a branch target — zero width *)
+  | Bcc of R.cond * bool * int (* conditional branch (cond, neg) to a label *)
+  | Jmp of int (* unconditional branch to a label *)
+
 type ctx =
-  { mutable rev : R.instr list (* emitted instrs, reversed *)
+  { mutable rev : frag list (* emitted frags, reversed *)
   ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register *)
   ; base_scratch : reg (* first register above the homes *)
   ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
+  ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
+  ; mutable loops : (int * int) list (* enclosing loops: (continue=top, break) targets *)
+  ; func_end : int (* shared epilogue label every [return] branches to *)
   }
 
-let emit ctx i = ctx.rev <- i :: ctx.rev
+let emit ctx i = ctx.rev <- Ins i :: ctx.rev
+let new_label ctx = let l = ctx.next_label in ctx.next_label <- l + 1; l
+let place ctx l = ctx.rev <- Label l :: ctx.rev
+let bcc ctx cond neg l = ctx.rev <- Bcc (cond, neg, l) :: ctx.rev
+let jmp ctx l = ctx.rev <- Jmp l :: ctx.rev
 
 let alloc_scratch ctx =
   let rec find r =
@@ -109,7 +127,9 @@ let binop_instr op rd b c : R.instr =
   | C.Div | C.Mod ->
     unsupported "/ and %% lower to __div/__mod calls (ABI §5) — call slice"
   | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne | C.LAnd | C.LOr ->
-    unsupported "comparison/logical op needs flags + branch — control-flow slice"
+    (* a comparison used as a *value* (x = a < b) needs 0/1 materialization — later slice.
+       As an if/loop condition it never reaches here: gen_cond intercepts it. *)
+    unsupported "comparison as a value (0/1 materialization) — later slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
     unsupported "pointer arithmetic — memory slice"
 
@@ -169,7 +189,7 @@ and gen_unop ctx op e' =
     free_scratch ctx m;
     free_scratch ctx r;
     rd
-  | C.LNot -> unsupported "logical ! needs a compare — control-flow slice"
+  | C.LNot -> unsupported "logical ! (0/1 materialization) — later slice"
 
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
@@ -184,6 +204,52 @@ let gen_instr ctx (i : C.instr) =
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
 
+(* ---- conditions: branch to [false_label] when [cond] is false, else fall through ---- *)
+
+(* A C relational op -> the RISC5 (cond, neg) that HOLDS iff [a op b] is true, given the flags
+   from SUB a,b. Signed: Lt = N≠V, Le = (N≠V)|Z, Eq = Z. Ordered ops are signed-only for now
+   (unsigned < / <= need the carry conditions — a later slice); ==/!= are sign-agnostic. *)
+let rel_cond (op : C.binop) : (R.cond * bool) option =
+  match op with
+  | C.Eq -> Some (R.Eq, false)
+  | C.Ne -> Some (R.Eq, true)
+  | C.Lt -> Some (R.Lt, false)
+  | C.Ge -> Some (R.Lt, true)
+  | C.Le -> Some (R.Le, false)
+  | C.Gt -> Some (R.Le, true)
+  | _ -> None
+
+let gen_cond ctx (cond : C.exp) ~(false_label : int) =
+  (* fallback: treat [cond] as a value, false iff zero (the register write sets Z) *)
+  let truthy () =
+    let r = gen_expr ctx cond in
+    let d = alloc_scratch ctx in
+    emit ctx (mov_reg d r);
+    free_scratch ctx d;
+    free_scratch ctx r;
+    bcc ctx R.Eq false false_label
+  in
+  match cond with
+  | C.BinOp (op, e1, e2, _) ->
+    (match rel_cond op with
+     | None -> truthy ()
+     | Some (tcond, tneg) ->
+       (match op with
+        | C.Lt | C.Gt | C.Le | C.Ge when is_unsigned_int (C.typeOf e1) ->
+          unsupported "unsigned ordered comparison — needs carry conditions, later slice"
+        | _ -> ());
+       let r1 = gen_expr ctx e1 in
+       let r2 = gen_expr ctx e2 in
+       let s = alloc_scratch ctx in
+       emit ctx (alu R.Sub s r1 (R.Reg r2)); (* flags = e1 - e2; s is dead *)
+       free_scratch ctx s;
+       free_scratch ctx r1;
+       free_scratch ctx r2;
+       (* jump when the comparison is FALSE: {tcond, not tneg} *)
+       bcc ctx tcond (not tneg) false_label)
+  | _ -> truthy ()
+
+(* ---- statements ---- *)
 let rec gen_stmt ctx (s : C.stmt) =
   match s.skind with
   | C.Instr instrs -> List.iter (gen_instr ctx) instrs
@@ -191,12 +257,76 @@ let rec gen_stmt ctx (s : C.stmt) =
   | C.Return (Some e, _, _) ->
     let r = gen_expr ctx e in
     if r <> return_reg then emit ctx (mov_reg return_reg r);
-    free_scratch ctx r
-  | C.Return (None, _, _) -> ()
-  | C.If _ | C.Loop _ | C.Switch _ | C.Goto _ | C.ComputedGoto _ | C.Break _ | C.Continue _
-    -> unsupported "control flow — later slice"
+    free_scratch ctx r;
+    jmp ctx ctx.func_end
+  | C.Return (None, _, _) -> jmp ctx ctx.func_end
+  | C.If (cond, then_b, else_b, _, _) ->
+    if else_b.bstmts = []
+    then begin
+      let l_end = new_label ctx in
+      gen_cond ctx cond ~false_label:l_end;
+      List.iter (gen_stmt ctx) then_b.bstmts;
+      place ctx l_end
+    end
+    else begin
+      let l_else = new_label ctx in
+      let l_end = new_label ctx in
+      gen_cond ctx cond ~false_label:l_else;
+      List.iter (gen_stmt ctx) then_b.bstmts;
+      jmp ctx l_end;
+      place ctx l_else;
+      List.iter (gen_stmt ctx) else_b.bstmts;
+      place ctx l_end
+    end
+  | C.Loop (body, _, _, _, _) ->
+    (* CIL loops are infinite with the guard [if (c) {} else break] as the first body stmt;
+       break/continue resolve against the loop stack. *)
+    let l_top = new_label ctx in
+    let l_break = new_label ctx in
+    place ctx l_top;
+    ctx.loops <- (l_top, l_break) :: ctx.loops;
+    List.iter (gen_stmt ctx) body.bstmts;
+    ctx.loops <- List.tl ctx.loops;
+    jmp ctx l_top;
+    place ctx l_break
+  | C.Break _ ->
+    (match ctx.loops with
+     | (_, l_break) :: _ -> jmp ctx l_break
+     | [] -> unsupported "break outside a loop — unexpected CIL shape")
+  | C.Continue _ ->
+    unsupported "continue — later slice (needs the for-loop increment continuation point)"
+  | C.Goto _ | C.ComputedGoto _ -> unsupported "goto — later slice"
+  | C.Switch _ -> unsupported "switch — later slice"
 
-(* ---- entry: a straight-line integer leaf -> its instr list (args in R0.., return R0) ---- *)
+(* ---- resolve: frags -> instr list. Pass 1 assigns each frag a word address (labels are
+   zero width); pass 2 rewrites branches to PC-relative offsets. A RISC5 PC-relative branch at
+   word A lands at A+1+off (risc.ml), so off = target - A - 1. Intra-function only, no
+   relocation — 3b's linker generalizes this across the whole blob. ---- *)
+let resolve (frags : frag list) : R.instr list =
+  let addr = Hashtbl.create 16 in
+  ignore
+    (List.fold_left
+       (fun a f ->
+         match f with
+         | Label l -> Hashtbl.replace addr l a; a
+         | Ins _ | Bcc _ | Jmp _ -> a + 1)
+       0
+       frags);
+  let branch cond neg l a =
+    R.Branch { cond; neg; link = false; target = R.To_off (Hashtbl.find addr l - a - 1) }
+  in
+  let out = ref [] and a = ref 0 in
+  List.iter
+    (fun f ->
+      match f with
+      | Label _ -> ()
+      | Ins i -> out := i :: !out; incr a
+      | Bcc (cond, neg, l) -> out := branch cond neg l !a :: !out; incr a
+      | Jmp l -> out := branch R.True false l !a :: !out; incr a)
+    frags;
+  List.rev !out
+
+(* ---- entry: an integer leaf -> its instr list (args in R0.., return R0) ---- *)
 let compile_fundec (fd : C.fundec) : R.instr list =
   let return_type =
     match fd.svar.vtype with
@@ -221,7 +351,11 @@ let compile_fundec (fd : C.fundec) : R.instr list =
     ; homes
     ; base_scratch = !next
     ; scratch_free = Array.make (max_reg + 1) true
+    ; next_label = 1 (* label 0 is func_end *)
+    ; loops = []
+    ; func_end = 0
     }
   in
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
-  List.rev ctx.rev
+  place ctx ctx.func_end;
+  resolve (List.rev ctx.rev)
