@@ -384,6 +384,30 @@ let samples =
     , 2
       (* materialized bools as arithmetic operands; trichotomy → exactly 100, 10, or 1 *)
     )
+    (* s5.2: unsigned ordered compares — same SUB + materialize/branch as s5.1, but the ordered
+       ops read the *carry* (Cs = below, Ls = below-or-same) instead of the signed N≠V. The
+       equal-pair edges can't tell signed from unsigned; the 40 full-range random tuples do, and
+       uhi pins it deterministically (a < 2^31 is 1 for small a unsigned, 0 if wrongly signed —
+       the a=1 edge catches that). *)
+  ; "int ultv(unsigned a,unsigned b){ return a < b; }", "ultv", 2
+  ; "int ulev(unsigned a,unsigned b){ return a <= b; }", "ulev", 2 (* Ls = C|Z *)
+  ; "int ugtv(unsigned a,unsigned b){ return a > b; }", "ugtv", 2
+  ; "int ugev(unsigned a,unsigned b){ return a >= b; }", "ugev", 2
+  ; ( "int uhi(unsigned a){ return a < 0x80000000u; }"
+    , "uhi"
+    , 1
+      (* deterministic signed/unsigned distinguisher: a=1 → 1 unsigned, 0 if wrongly signed *)
+    )
+  ; ( "int uc(unsigned a,unsigned b){ if (a < b) return 1; return 0; }"
+    , "uc"
+    , 2 (* unsigned compare as a *condition* (gen_cond path); was a reject pre-s5.2 *) )
+  ; ( "int pcmp(int i,int j){ int a[8]; int *p = &a[i & 7]; int *q = &a[j & 7]; return p \
+       < q; }"
+    , "pcmp"
+    , 2
+      (* pointer < (CIL lowers to unsigned; the pointer-walk payoff): both point into one local
+         array, so p < q iff (i&7) < (j&7) — jig-safe, only the 0/1 escapes *)
+    )
   ]
 ;;
 
@@ -407,8 +431,6 @@ let rejects =
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
   ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
-  ; ( "int uc(unsigned a,unsigned b){ if (a < b) return 1; return 0; }"
-    , "uc" (* unsigned ordered — later *) )
   ; ( "int cn(int n){ n&=7; int s=0,i=0; for(i=0;i<n;i++){ if(i==2) continue; s+=i; } \
        return s; }"
     , "cn" (* continue → CIL lowers it to a goto — later *) )

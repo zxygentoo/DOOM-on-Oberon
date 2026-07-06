@@ -25,7 +25,8 @@
    byte-wise memory copy — alignment-agnostic, since these structs are often sub-word-aligned; by-value
    struct args and returns never occur in DOOM (census) and stay refused. A comparison or [!] used
    as a value (s5.1) materializes 0/1 by branching over two immediate loads — RISC5 has no
-   set-on-condition. Anything outside the supported subset raises [Check.Unsupported] — refuse to
+   set-on-condition; signed compares read the overflow-aware N≠V, unsigned and pointer compares
+   the carry (s5.2). Anything outside the supported subset raises [Check.Unsupported] — refuse to
    miscompile rather than guess. Each message names the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
@@ -298,18 +299,32 @@ let narrow_home ctx h ~bits ~signed =
   else emit ctx (alu R.And h h (R.Imm ((1 lsl bits) - 1)))
 ;;
 
+(* Signedness of a comparison (s5.2): unsigned if an operand is an unsigned integer or a
+   pointer. CIL lowers pointer </> to unsigned compares — and since our addresses are 24-bit the
+   sign bit is never set, so the unsigned condition is exact (this is what unblocks pointer-walk
+   [while (q < end)]). CIL's usual arithmetic conversions already unified the operand types, so
+   one side decides. *)
+let compare_unsigned (e : C.exp) : bool =
+  match C.unrollType (C.typeOf e) with
+  | C.TInt (ik, _) -> not (C.isSigned ik)
+  | C.TPtr _ -> true
+  | _ -> false
+;;
+
 (* A C relational op -> the RISC5 (cond, neg) that HOLDS iff [a op b] is true, given the flags
-   from SUB a,b. Signed: Lt = N≠V, Le = (N≠V)|Z, Eq = Z. Ordered ops are signed-only for now
-   (unsigned < / <= need the carry conditions — s5.2); ==/!= are sign-agnostic. Shared by the
+   from SUB a,b (a = first operand = minuend). ==/!= are sign-agnostic. Ordered ops split by
+   signedness: signed uses the overflow-aware N≠V (Lt) / (N≠V)|Z (Le); unsigned uses the carry
+   conditions — after SUB, RISC5 sets C on borrow, i.e. C iff a<b unsigned (verified in the
+   emulator: flag_c = result > minuend), so below = Cs, below-or-same = Ls (C|Z). Shared by the
    value form (bool_from_flags, below) and the branch form (gen_cond). *)
-let rel_cond (op : C.binop) : (R.cond * bool) option =
+let rel_cond ~(signed : bool) (op : C.binop) : (R.cond * bool) option =
   match op with
   | C.Eq -> Some (R.Eq, false)
   | C.Ne -> Some (R.Eq, true)
-  | C.Lt -> Some (R.Lt, false)
-  | C.Ge -> Some (R.Lt, true)
-  | C.Le -> Some (R.Le, false)
-  | C.Gt -> Some (R.Le, true)
+  | C.Lt -> Some ((if signed then R.Lt else R.Cs), false)
+  | C.Ge -> Some ((if signed then R.Lt else R.Cs), true)
+  | C.Le -> Some ((if signed then R.Le else R.Ls), false)
+  | C.Gt -> Some ((if signed then R.Le else R.Ls), true)
   | _ -> None
 ;;
 
@@ -367,16 +382,12 @@ let rec gen_expr ctx (e : C.exp) : reg =
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
   | C.BinOp (((C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne) as op), e1, e2, t) ->
-    (* a comparison as a *value* (s5.1): x = a < b, return a == b, !!p (CIL: p != 0), … — SUB
-       for the flags, then materialize 0/1. As an if/loop condition it goes through gen_cond
-       instead. Ordered unsigned compares defer to s5.2 (same guard as gen_cond). *)
+    (* a comparison as a *value* (s5.1; unsigned/pointer s5.2): x = a < b, return a == b, p < q
+       (CIL: unsigned), … — SUB for the flags, then materialize 0/1. As an if/loop condition it
+       goes through gen_cond instead. *)
     Check.check_unsupported_types t;
-    (match op with
-     | (C.Lt | C.Gt | C.Le | C.Ge) when is_unsigned_int (C.typeOf e1) ->
-       unsupported "unsigned ordered comparison — needs carry conditions, later slice"
-     | _ -> ());
     let tcond, tneg =
-      match rel_cond op with
+      match rel_cond ~signed:(not (compare_unsigned e1)) op with
       | Some c -> c
       | None -> assert false (* the six relational ops all map *)
     in
@@ -748,13 +759,9 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   in
   match cond with
   | C.BinOp (op, e1, e2, _) ->
-    (match rel_cond op with
+    (match rel_cond ~signed:(not (compare_unsigned e1)) op with
      | None -> truthy ()
      | Some (tcond, tneg) ->
-       (match op with
-        | (C.Lt | C.Gt | C.Le | C.Ge) when is_unsigned_int (C.typeOf e1) ->
-          unsupported "unsigned ordered comparison — needs carry conditions, later slice"
-        | _ -> ());
        let r1 = gen_expr ctx e1 in
        let r2 = gen_expr ctx e2 in
        let s = alloc_scratch ctx in
