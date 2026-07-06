@@ -17,10 +17,11 @@
    R0.. (a zero-cost frame when it touches only R0-R5). Stack args (s4.2): a callee with >4
    params sets FP = entry SP and loads args 5+ from FP+16.. into their homes; a caller with >4
    args stages them past the home area (SP+16..) and sizes its outgoing area to the widest call
-   it makes (ABI §3). Locals that can't be a register (s4.3) — aggregates and address-taken
-   scalars (CIL's [vaddrof]) — get an SP-relative frame slot (the locals region, between the
-   outgoing area and the saves) and route through the same memory calculus a global does, based
-   at the slot instead of DB. Anything outside the supported subset
+   it makes (ABI §3). Variables that can't be a register (s4.3) — aggregate locals and
+   address-taken scalars, local or parameter (CIL's [vaddrof]) — get an SP-relative frame slot
+   (the locals region, between the outgoing area and the saves) and route through the same
+   memory calculus a global does, based at the slot instead of DB; an address-taken param keeps
+   its register home and the prologue spills it into the slot. Anything outside the supported subset
    raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message names
    the later slice that will handle it. *)
 
@@ -304,11 +305,10 @@ let rec gen_expr ctx (e : C.exp) : reg =
       ctx
       v (* a register local; a slotted one falls through to the memory load below *)
   | C.Lval lv -> gen_load ctx lv
-  | C.AddrOf (C.Var v, _) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
-    (* a non-slotted &-taken var is a parameter (an &-taken local is always slotted) — step 2 *)
-    unsupported "&param (address-taken parameter → stack slot) — s4.3 step 2"
   | C.AddrOf lv | C.StartOf lv ->
-    (* &lv, and array decay — the same address, materialized as a value *)
+    (* &lv, and array decay — the same address, materialized as a value. A slotted local or
+       param resolves to its frame slot (s4.3); a register var can't be address-taken (that
+       would have slotted it), so a non-slotted local reaching gen_addr is an internal error. *)
     materialize_addr ctx lv
   | C.CastE (_, t, e') ->
     Check.check_unsupported_types t;
@@ -791,11 +791,12 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     | None -> 0
     | Some n -> 4 * max 4 n
   in
-  (* s4.3: a local that can't live in a register — an aggregate, or a scalar whose address is
-     taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
+  (* s4.3: a variable that can't live in a register — an aggregate, or a scalar whose address
+     is taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
      above the outgoing area. Addressed SP-relative: the offset ([slots_base]+off) is known
      here, before body codegen fixes the save set — which an FP-relative offset couldn't be
-     (it subtracts the frame size). An address-taken *param* is step 2. *)
+     (it subtracts the frame size). Params as well as locals (step 2): an address-taken param
+     keeps its register home (where it arrives) and the prologue spills it into its slot. *)
   let slots = Hashtbl.create 8 in
   let locals_size = ref 0 in
   let needs_slot (v : C.varinfo) =
@@ -805,19 +806,15 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     | C.TComp _ | C.TArray _ -> true
     | _ -> false
   in
-  List.iter
-    (fun (v : C.varinfo) ->
-       if needs_slot v
-       then (
-         Hashtbl.replace slots v.vid !locals_size;
-         (* round each slot up to a word so the next stays 4-aligned (ABI §4) *)
-         locals_size := !locals_size + (((C.bitsSizeOf v.vtype / 8) + 3) land lnot 3)))
-    fd.slocals;
-  List.iter
-    (fun (v : C.varinfo) ->
-       if v.vaddrof
-       then unsupported "address-taken parameter %s — stack slot (s4.3 step 2)" v.vname)
-    fd.sformals;
+  let alloc_slot (v : C.varinfo) =
+    if needs_slot v
+    then (
+      Hashtbl.replace slots v.vid !locals_size;
+      (* round each slot up to a word so the next stays 4-aligned (ABI §4) *)
+      locals_size := !locals_size + (((C.bitsSizeOf v.vtype / 8) + 3) land lnot 3))
+  in
+  List.iter alloc_slot fd.sformals;
+  List.iter alloc_slot fd.slocals;
   (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
      R0-R5. Leaf: today's model — homes R0.., scratch above them. *)
   let home_base = if leaf then 0 else first_callee_saved in
@@ -859,11 +856,13 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   (* entry narrowing (s3.3): a sub-word param arrives as a full word; narrow its home to
      the declared width so it holds the C-correct value from the first use (the jig's gcc
      oracle narrows at the call site — we get the raw int). Unsigned masks, signed
-     sign-extends; the home register IS the canonical location, so rewrite it in place. *)
+     sign-extends; the home register IS the canonical location, so rewrite it in place. A
+     slotted param (s4.3 step 2) is skipped: its home is transient — the prologue spills it to
+     the slot, and the slot's own sub-word load narrows on read. *)
   List.iter
     (fun (v : C.varinfo) ->
        match C.unrollType v.vtype with
-       | C.TInt (ik, _) when C.bitsSizeOf v.vtype < 32 ->
+       | C.TInt (ik, _) when C.bitsSizeOf v.vtype < 32 && not (Hashtbl.mem slots v.vid) ->
          narrow_home
            ctx
            (Hashtbl.find homes v.vid)
@@ -937,9 +936,25 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
           (List.mapi
              (fun i (v : C.varinfo) ->
                 let h = Hashtbl.find homes v.vid in
-                if i < 4
-                then if leaf then [] else [ L.Ins (mov_reg h i) ]
-                else [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ])
+                let place =
+                  if i < 4
+                  then if leaf then [] else [ L.Ins (mov_reg h i) ]
+                  else
+                    [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ]
+                in
+                (* an address-taken param (s4.3 step 2): once it lands in its home, spill the
+                   home into its slot — the slot is its canonical location for body access. The
+                   home carries it whether it arrived in a register (i<4) or on the stack. *)
+                let spill =
+                  match Hashtbl.find_opt slots v.vid with
+                  | Some off ->
+                    [ L.Ins
+                        (R.Store
+                           { size = R.W; a = h; base = sp_reg; off = outgoing_area + off })
+                    ]
+                  | None -> []
+                in
+                place @ spill)
              fd.sformals)
       in
       (L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame)) :: saves)

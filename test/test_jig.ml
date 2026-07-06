@@ -322,6 +322,22 @@ let samples =
     , "outp"
     , 1 (* &local escaping to a callee (out-param): slot + outgoing area coexist → x+1 *)
     )
+    (* s4.3 step 2: an address-taken *param* — vaddrof, like a local, but it arrives with a
+       value. It keeps its register home (so leaf positional placement isn't disturbed) and the
+       prologue spills that home into the slot; body access is the slot, as for a local. *)
+  ; ( "int aptr(int x){ int *p = &x; *p = *p + 5; return x; }"
+    , "aptr"
+    , 1 (* address-taken scalar param: prologue spills R0 → slot; x aliases *p → x+5 *) )
+  ; ( "int amid(int a,int b,int c){ int *p = &b; return a + *p * 10 + c * 100; }"
+    , "amid"
+    , 3
+      (* the *middle* param is slotted: a,c keep their homes, b spills; b read via *p →
+         a + b*10 + c*100, position-weighted so a disturbed placement would surface *)
+    )
+  ; ( "int addfive(int *p){ *p = *p + 5; return 0; } int outparam(int x){ addfive(&x); \
+       return x; }"
+    , "outparam"
+    , 1 (* &param escaping to a callee (the real out-param pattern) → x+5 *) )
   ]
 ;;
 
