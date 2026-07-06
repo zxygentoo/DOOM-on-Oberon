@@ -454,6 +454,22 @@ let rec gen_expr ctx (e : C.exp) : reg =
     free_scratch ctx r1;
     free_scratch ctx r2;
     rd
+  | (C.SizeOf _ | C.SizeOfE _ | C.SizeOfStr _) as e ->
+    (* sizeof folds to a compile-time constant of type size_t (unsigned int, ABI §1). CIL leaves
+       it unfolded on purpose (a later type-changing pass might rewrite the type), so the backend
+       folds it — bitsSizeOf is exact since every C type is a whole number of bytes. sizeof's
+       operand is unevaluated (no VLAs in DOOM — census), so SizeOfE takes only the *type*, never
+       codegen'd. No type check: sizeof of a banned type is still a valid number, not a use. *)
+    let n =
+      match e with
+      | C.SizeOf t -> C.bitsSizeOf t / 8
+      | C.SizeOfE e' -> C.bitsSizeOf (C.typeOf e') / 8
+      | C.SizeOfStr s -> String.length s + 1 (* array size: interpreted bytes + NUL *)
+      | _ -> assert false (* the outer pattern admits only the three sizeof forms *)
+    in
+    let r = alloc_scratch ctx in
+    load_const ctx r n;
+    r
   | _ -> unsupported "expression form not supported yet — later slice"
 
 and gen_unop ctx op e' =

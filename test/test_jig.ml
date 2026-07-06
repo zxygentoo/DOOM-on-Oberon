@@ -47,12 +47,15 @@ let gcc_compile ~src ~fname ~arity : string =
     fname
     (String.concat "," params);
   close_out oc;
-  (* -funsigned-char: the oracle must model *our* target, and ABI §1 makes char unsigned
-     (LDB zero-extends). Without it gcc's x86-64 default (signed char) sign-extends on
-     widening reads and the diff is apples-to-oranges — the jig flagged exactly this. *)
+  (* The oracle must model *our* target's data model, not the x86-64 host's:
+     -m32: RISC5 is ILP32 (int/long/pointer all 32-bit), so on the host build them 32-bit too.
+       Without it sizeof(ptr)/sizeof(long) are 8, not 4 — the jig flagged exactly this at sizeof.
+     -funsigned-char: ABI §1 makes char unsigned (LDB zero-extends); the host default (signed)
+       would sign-extend on widening reads and the diff would be apples-to-oranges.
+     Both keep [int] 32-bit either way — the base case that made int-only samples agree. *)
   let cmd =
     Printf.sprintf
-      "gcc -std=gnu99 -funsigned-char -w -O0 %s -o %s"
+      "gcc -std=gnu99 -m32 -funsigned-char -w -O0 %s -o %s"
       (Filename.quote cfile)
       (Filename.quote exe)
   in
@@ -478,6 +481,23 @@ let samples =
     , 2
       (* an address-taken slot (box, s4.3) and spilled-local slots share the locals region *)
     )
+    (* sizeof folds to a compile-time constant (size_t). Each result folds in [x] so the varying
+       arg confirms the fold is a real value, not a fluke; the host returns [int], so its 64-bit
+       size_t truncates to the same 32 bits we compute. Covers SizeOf(scalar/pointer/struct
+       type), SizeOfE (sizeof of an *expression* — an array lvalue), and SizeOfStr. *)
+  ; "int szint(int x){ return sizeof(int) + x; }", "szint", 1 (* SizeOf: 4 + x *)
+  ; ( "int szptr(int x){ return sizeof(int *) + x; }"
+    , "szptr"
+    , 1 (* pointer is 4 B (ABI §1): 4 + x *) )
+  ; ( "struct pt3 { int a; int b; }; int szst(int x){ return sizeof(struct pt3) + x; }"
+    , "szst"
+    , 1 (* SizeOf an aggregate type: 8 + x *) )
+  ; ( "int szarr(int x){ int a[10]; return sizeof(a) + x; }"
+    , "szarr"
+    , 1 (* SizeOfE: sizeof of an array lvalue, operand unevaluated → 40 + x *) )
+  ; ( "int szstr(int x){ return sizeof(\"hello\") + x; }"
+    , "szstr"
+    , 1 (* SizeOfStr: 5 bytes + NUL → 6 + x *) )
   ]
 ;;
 
