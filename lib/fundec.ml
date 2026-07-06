@@ -9,7 +9,10 @@
    with sign/zero extension on loads, casts, and param entry). The minimal vertical the
    differential jig exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
    freely; args and return in R0..) — every variable keeps a fixed home register, so
-   control-flow merge points need no reconciliation. Anything outside the supported subset raises
+   control-flow merge points need no reconciliation. Each function is a well-formed ABI
+   callee (s4.1a): a prologue/epilogue saves and restores the callee-saved regs (R6-R11)
+   it writes and returns through [B LNK] (ABI §3); a pure leaf touching only R0-R5 keeps a
+   zero-cost frame (no SUB/ADD SP). Anything outside the supported subset raises
    [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the
    later slice that will handle it. *)
 
@@ -29,7 +32,14 @@ type reg = int
 
 let return_reg = 0
 let max_reg = 11
+
+let first_callee_saved =
+  6 (* R6-R11 are callee-saved (ABI §2): save exactly what we write *)
+;;
+
 let db_reg = 13 (* DB, the data base: set by crt0 (runner, in the jig), never written *)
+let sp_reg = 14 (* SP, full-descending, 4-aligned (ABI §2/§3) *)
+let lnk_reg = 15 (* LNK: BL writes it; a callee returns via [B LNK] (To_reg) *)
 
 (* Emission carries labels/branches, not raw instrs — a branch's target only gets a word
    address once the whole body is laid out. [resolve] (below) turns frags into the final
@@ -49,6 +59,9 @@ type ctx =
   ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
   ; mutable loops : (int * int) list (* enclosing loops: (continue=top, break) targets *)
   ; func_end : int (* shared epilogue label every [return] branches to *)
+  ; mutable max_used : reg
+    (* highest register written (homes + scratch); the callee-saved
+                              save set is R[first_callee_saved..max_used] (ABI §2/§3) *)
   }
 
 let emit ctx i = ctx.rev_frags <- Ins i :: ctx.rev_frags
@@ -76,7 +89,9 @@ let alloc_scratch ctx =
       r)
     else find (r + 1)
   in
-  find ctx.base_scratch
+  let r = find ctx.base_scratch in
+  if r > ctx.max_used then ctx.max_used <- r;
+  r
 ;;
 
 (* Only R[base_scratch..max_reg] are scratches — the homes below and DB (R13) must
@@ -712,6 +727,7 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
     ; next_label = 1 (* label 0 is func_end *)
     ; loops = []
     ; func_end = 0
+    ; max_used = !next - 1 (* homes R0..!next-1 are all written; scratch grows this *)
     }
   in
   (* entry narrowing (s3.3): a sub-word param arrives as a full word; narrow its home to
@@ -730,6 +746,34 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
        | _ -> ())
     fd.sformals;
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
+  (* The frame (ABI §3). The callee-saved regs actually written are R[6..max_used] —
+     contiguous, since homes start at R0 and scratch fills upward from base_scratch. Each
+     needs a word slot; s4.1a has no calls, so no LNK save / FP / outgoing home area yet
+     (s4.1b). A pure leaf touching only R0-R5 gets frame = 0: no SUB/ADD SP, just [B LNK]. *)
+  let saved =
+    List.init
+      (max 0 (ctx.max_used - first_callee_saved + 1))
+      (fun i -> first_callee_saved + i)
+  in
+  let frame = 4 * List.length saved in
+  (* epilogue at func_end: restore the saves, drop the frame, return to the caller (B LNK) *)
   place ctx ctx.func_end;
-  resolve (List.rev ctx.rev_frags)
+  List.iteri
+    (fun i r -> emit ctx (R.Load { size = R.W; a = r; base = sp_reg; off = 4 * i }))
+    saved;
+  if frame > 0 then emit ctx (alu R.Add sp_reg sp_reg (R.Imm frame));
+  emit
+    ctx
+    (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg lnk_reg });
+  (* prologue: open the frame and save the callee-saved regs we will clobber *)
+  let prologue =
+    if frame = 0
+    then []
+    else
+      Ins (alu R.Sub sp_reg sp_reg (R.Imm frame))
+      :: List.mapi
+           (fun i r -> Ins (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i }))
+           saved
+  in
+  resolve (prologue @ List.rev ctx.rev_frags)
 ;;

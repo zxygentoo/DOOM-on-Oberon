@@ -235,6 +235,13 @@ let samples =
   ; ( "int scast(int x){ short s = x; return s; }"
     , "scast"
     , 1 (* (short) narrowing cast as a value: gen_narrow signed path *) )
+    (* s4.1a: the callee frame — enough live values to reach callee-saved R6-R9, so the
+       prologue/epilogue save+restore them; the Runner's sentinel check (R6-R11 preserved,
+       SP balanced) verifies the frame that a bare R0-result comparison can't yet see. *)
+  ; ( "int regpress(int x){ int a=x+1,b=x+2,c=x+3,d=x+4,e=x+5,f=x+6; return a*b + c*d + \
+       e*f + a - f; }"
+    , "regpress"
+    , 1 )
   ]
 ;;
 

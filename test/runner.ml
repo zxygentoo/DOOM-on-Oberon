@@ -1,8 +1,14 @@
-(* Execute a leaf body (a Risc5_isa.instr list) in the vendored emulator — the execution
-   half of the differential jig (AGENT.md §7). Place [args] in R0.., load the encoded instrs
-   at [code_base], run until control falls off the end of the body (intra-body branches may loop
-   or skip), read R0. Intra-body branches only — no calls; the prologue/epilogue and the
-   register-target return branch arrive with the call slice. *)
+(* Execute one compiled function (a Risc5_isa.instr list) in the vendored emulator — the
+   execution half of the differential jig (AGENT.md §7). Place [args] in R0.., load the
+   encoded instrs at [code_base], run until the function returns, read R0.
+
+   As of s4.1a the function is a proper ABI callee: it opens a frame, saves the callee-saved
+   regs it clobbers, and returns via [B LNK] (register-target branch). So the Runner plays the
+   *caller* — it sets SP, seeds LNK with a sentinel that lands one past the code (so [B LNK]
+   halts exactly where fall-off-the-end used to), and — the point — seeds R6-R11 with known
+   values and checks after return that they, and SP, came back untouched. That turns every
+   sample into a callee-saved-contract + frame-balance test without needing a real call yet
+   (a broken save/restore can't show up in R0 alone — no caller observes R6-R11 otherwise). *)
 
 module Isa = Emu.Risc5_isa
 module M = Emu.Risc
@@ -16,7 +22,16 @@ let code_base = 0x1000
    (byte 0x4000) and the display shadow (0xE7F00) inside the emulator's 1 MB RAM. *)
 let data_base = 0x80000
 
-(* Runaway guard: any correct leaf over the jig's bounded inputs halts well within this, so
+(* Top of the C stack (SP, R14; full-descending, ABI §2). Byte 0x70000 sits below the data
+   segment (0x80000) and well above the code — the frame grows down into the gap. *)
+let stack_top = 0x70000
+
+(* Callee-saved registers R6-R11 (ABI §2) seeded with recognizable sentinels; a correct
+   callee saves and restores exactly the ones it writes, so all six must survive the call. *)
+let callee_saved = [ 6; 7; 8; 9; 10; 11 ]
+let sentinel r = 0xCAFE_0000 lor r land 0xFFFF_FFFF
+
+(* Runaway guard: any correct function over the jig's bounded inputs halts well within this, so
    hitting it means a codegen bug (mis-resolved branch / non-terminating loop), not a slow
    program — fail loud rather than spin forever. *)
 let max_steps = 1_000_000
@@ -32,11 +47,14 @@ let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
   done;
   let regs = M.For_tests.regs m in
   regs.(13) <- data_base;
+  regs.(14) <- stack_top;
+  (* [B LNK] sets PC = R15/4 (emulator, risc.ml); a sentinel one past the body lands the
+     return exactly on the stop word below, so returning halts like fall-off-the-end did. *)
+  let stop = code_base + List.length body in
+  regs.(15) <- stop * 4;
+  List.iter (fun r -> regs.(r) <- sentinel r) callee_saved;
   List.iteri (fun i v -> regs.(i) <- v land 0xFFFF_FFFF) args;
   M.For_tests.set_pc m code_base;
-  (* "Done" = control reached the word just past the body — fell through the last instr, or
-     a return-branch jumped there. Every intra-body branch lands inside [code_base, stop). *)
-  let stop = code_base + List.length body in
   let rec loop n =
     if M.For_tests.pc m >= stop
     then ()
@@ -49,5 +67,26 @@ let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
       loop (n + 1))
   in
   loop 0;
-  (M.For_tests.regs m).(0)
+  let regs = M.For_tests.regs m in
+  (* the ABI callee contract: SP restored, every callee-saved register preserved *)
+  if regs.(14) <> stack_top
+  then
+    failwith
+      (Printf.sprintf
+         "Runner.run: SP not restored (frame imbalance): got 0x%X want 0x%X"
+         regs.(14)
+         stack_top);
+  List.iter
+    (fun r ->
+       if regs.(r) <> sentinel r
+       then
+         failwith
+           (Printf.sprintf
+              "Runner.run: callee-saved R%d clobbered: got 0x%X want 0x%X (missing \
+               save/restore)"
+              r
+              regs.(r)
+              (sentinel r)))
+    callee_saved;
+  regs.(0)
 ;;
