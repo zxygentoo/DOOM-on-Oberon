@@ -27,7 +27,8 @@ let run_leaf ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : i
   List.iteri (fun i instr -> ram.(code_base + i) <- Isa.encode instr) body;
   (* fresh data segment per run (mutating bodies stay deterministic) + DB, crt0-style *)
   for i = 0 to (Bytes.length data / 4) - 1 do
-    ram.((data_base / 4) + i) <- Int32.to_int (Bytes.get_int32_le data (i * 4)) land 0xFFFF_FFFF
+    ram.((data_base / 4) + i)
+    <- Int32.to_int (Bytes.get_int32_le data (i * 4)) land 0xFFFF_FFFF
   done;
   let regs = M.For_tests.regs m in
   regs.(13) <- data_base;
@@ -40,11 +41,13 @@ let run_leaf ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : i
     if M.For_tests.pc m >= stop
     then ()
     else if n >= max_steps
-    then failwith "Runner.run_leaf: step cap exceeded (mis-resolved branch / non-terminating body?)"
-    else begin
+    then
+      failwith
+        "Runner.run_leaf: step cap exceeded (mis-resolved branch / non-terminating body?)"
+    else (
       M.For_tests.single_step m;
-      loop (n + 1)
-    end
+      loop (n + 1))
   in
   loop 0;
   (M.For_tests.regs m).(0)
+;;

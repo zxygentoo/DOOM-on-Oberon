@@ -29,10 +29,9 @@ let () =
   parse_args (List.tl (Array.to_list Sys.argv));
   let inputs = List.rev !inputs in
   if inputs = []
-  then begin
+  then (
     prerr_endline "usage: doomcc <unit.i> [unit2.i ...] [-o out.blob]";
-    exit 2
-  end;
+    exit 2);
   (* ---- (1) front end: parse each TU, amalgamate to one unit (the PureDOOM rename step) ---- *)
   let units = List.map Frontend.parse_file inputs in
   let merged = Frontend.merge units ~name:"doom" in
@@ -67,7 +66,8 @@ let () =
        | exception Check.Unsupported msg ->
          incr rejected;
          bump msg)
-    | C.GVar _ | C.GVarDecl _ -> () (* handled by Globals above (GVarDecl-only = extern) *)
+    | C.GVar _ | C.GVarDecl _ ->
+      () (* handled by Globals above (GVarDecl-only = extern) *)
     | _ -> ());
   Printf.printf
     "codegen: %d functions — %d compiled (%d instrs), %d gate-refused\n"
@@ -76,14 +76,14 @@ let () =
     !n_instr
     !rejected;
   if !rejected > 0
-  then begin
+  then (
     Printf.printf "         why the rest don't compile yet (the slice worklist):\n";
     Hashtbl.fold (fun k n acc -> (n, k) :: acc) reasons []
     |> List.sort (fun a b -> compare (fst b) (fst a))
-    |> List.iter (fun (n, k) -> Printf.printf "         %5d  %s\n" n k)
-  end;
+    |> List.iter (fun (n, k) -> Printf.printf "         %5d  %s\n" n k));
   (* ---- (4) back end — STUB (ABI §6 / track 3b) ----
      The instr-level linker (label/branch resolution, LEA + FixedMul expansion, section
      layout, header + checksum, symbol map) turns the per-function instr lists + data/bss
      into the flat blob at 0x100000. Not built yet. *)
   Printf.printf "link:    TODO (ABI §6 / 3b) — would emit %s @ 0x100000\n" !out
+;;

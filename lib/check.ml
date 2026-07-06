@@ -20,8 +20,9 @@ let rec check_unsupported_types (t : C.typ) =
   | C.TComp (ci, _) ->
     List.iter
       (fun (f : C.fieldinfo) ->
-        if f.fbitfield <> None then unsupported "bitfield (ABI §4: banned)";
-        check_unsupported_types f.ftype)
+         if f.fbitfield <> None then unsupported "bitfield (ABI §4: banned)";
+         check_unsupported_types f.ftype)
       ci.cfields
   | C.TArray (t', _, _) -> check_unsupported_types t'
   | _ -> ()
+;;

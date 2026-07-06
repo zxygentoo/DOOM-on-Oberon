@@ -20,7 +20,9 @@ type t =
   ; image : bytes (* data+bss, little-endian, length padded to a word multiple *)
   }
 
-let no_globals = { offsets = Hashtbl.create 1; skipped = Hashtbl.create 1; image = Bytes.empty }
+let no_globals =
+  { offsets = Hashtbl.create 1; skipped = Hashtbl.create 1; image = Bytes.empty }
+;;
 
 (* Mem-op offsets are 20-bit signed (ABI §1): DB reaches +512 KB — the whole image
    must sit inside (DOOM's data 62 K + bss 245 K ≈ 307 K does, spike-measured). *)
@@ -43,8 +45,8 @@ let word_of_init (e : C.exp) : int =
   in
   match value with
   | Some n -> n
-  | None ->
-    Check.unsupported "global initializer needs a link-time address — 3b linker"
+  | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
+;;
 
 let from_file (file : C.file) : t =
   let offsets = Hashtbl.create 64
@@ -83,3 +85,4 @@ let from_file (file : C.file) : t =
   let image = Bytes.make ((!cursor + 3) / 4 * 4) '\000' in
   List.iter (fun (off, w) -> Bytes.set_int32_le image off (Int32.of_int w)) !writes;
   { offsets; skipped; image }
+;;

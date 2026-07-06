@@ -10,16 +10,17 @@ let risc5_mach : Machdep.mach =
   match Machdep.gcc32 with
   | Some m -> { m with char_is_unsigned = true; little_endian = true }
   | None -> failwith "goblint-cil built without a gcc32 machdep probe"
+;;
 
 let initialized = ref false
 
 let ensure_init () =
   if not !initialized
-  then begin
+  then (
     envMachine := Some risc5_mach;
     initCIL ();
-    initialized := true
-  end
+    initialized := true)
+;;
 
 (* Parse one preprocessed translation unit (.i). *)
 let parse_file (path : string) : file =
@@ -28,6 +29,7 @@ let parse_file (path : string) : file =
   let file = Frontc.parse path () in
   if !Errormsg.hadErrors then failwith ("CIL parse errors in " ^ path);
   file
+;;
 
 (* Parse a self-contained C snippet (no #include / no macros — headerless int code is
    already "preprocessed") into a Cil.file. *)
@@ -36,10 +38,11 @@ let parse_string ~(name : string) (src : string) : file =
   Fun.protect
     ~finally:(fun () -> Sys.remove tmp)
     (fun () ->
-      let oc = open_out tmp in
-      output_string oc src;
-      close_out oc;
-      parse_file tmp)
+       let oc = open_out tmp in
+       output_string oc src;
+       close_out oc;
+       parse_file tmp)
+;;
 
 (* Amalgamate parsed units into one (Mergecil.merge — the single-TU / PureDOOM rename step,
    spike-proven at full scale in spikes/cil/). *)
@@ -48,6 +51,7 @@ let merge (units : file list) ~(name : string) : file =
   let m = Mergecil.merge units name in
   if !Errormsg.hadErrors then failwith "CIL merge errors";
   m
+;;
 
 (* The (single) function definition named [fname] in [file]. *)
 let find_fundec (file : file) (fname : string) : fundec =
@@ -58,3 +62,4 @@ let find_fundec (file : file) (fname : string) : fundec =
   match !found with
   | Some fd -> fd
   | None -> failwith (Printf.sprintf "function %s not found in parsed unit" fname)
+;;

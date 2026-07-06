@@ -18,6 +18,7 @@ let is_unsigned_int (t : C.typ) =
   match C.unrollType t with
   | C.TInt (ik, _) -> not (C.isSigned ik)
   | _ -> false
+;;
 
 (* ---- registers (ABI §2). Leaf ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
 type reg = int
@@ -47,7 +48,13 @@ type ctx =
   }
 
 let emit ctx i = ctx.rev_frags <- Ins i :: ctx.rev_frags
-let new_label ctx = let l = ctx.next_label in ctx.next_label <- l + 1; l
+
+let new_label ctx =
+  let l = ctx.next_label in
+  ctx.next_label <- l + 1;
+  l
+;;
+
 let place ctx l = ctx.rev_frags <- Label l :: ctx.rev_frags
 let bcc ctx cond neg l = ctx.rev_frags <- Bcc (cond, neg, l) :: ctx.rev_frags
 let jmp ctx l = ctx.rev_frags <- Jmp l :: ctx.rev_frags
@@ -66,6 +73,7 @@ let alloc_scratch ctx =
     else find (r + 1)
   in
   find ctx.base_scratch
+;;
 
 let is_scratch ctx r = r >= ctx.base_scratch
 let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
@@ -74,6 +82,7 @@ let home ctx (v : C.varinfo) =
   match Hashtbl.find_opt ctx.homes v.vid with
   | Some r -> r
   | None -> unsupported "unmapped local %s — internal error" v.vname
+;;
 
 (* A global's DB-relative offset. A [Globals]-skipped global re-raises its skip reason
    here, attributing the refusal to each function that touches it; a vid the layout
@@ -85,10 +94,12 @@ let global_offset ctx (v : C.varinfo) =
     (match Hashtbl.find_opt ctx.globals.Globals.skipped v.vid with
      | Some why -> unsupported "%s" why
      | None -> unsupported "extern global without a definition — 3b linker / mini-libc")
+;;
 
 (* ---- instruction builders ---- *)
 let alu ?(u = false) ?(v = false) op a b operand : R.instr =
   R.Alu { op; u; v; a; b; operand }
+;;
 
 let mov_reg d s = alu R.Mov d 0 (R.Reg s) (* R[d] <- R[s] *)
 
@@ -100,10 +111,10 @@ let load_const ctx d n =
   and hi = (n lsr 16) land 0xFFFF in
   if hi = 0
   then emit ctx (alu R.Mov d 0 (R.Imm lo))
-  else begin
+  else (
     emit ctx (alu ~u:true R.Mov d 0 (R.Imm hi));
-    emit ctx (alu R.Ior d d (R.Imm lo))
-  end
+    emit ctx (alu R.Ior d d (R.Imm lo)))
+;;
 
 let binop_instr op rd b c : R.instr =
   let rr o = alu o rd b (R.Reg c) in
@@ -124,6 +135,7 @@ let binop_instr op rd b c : R.instr =
     unsupported "comparison as a value (0/1 materialization) — later slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
     unsupported "pointer arithmetic — memory slice s3.2"
+;;
 
 (* ---- expressions: emit code computing [e], return the register holding its value ---- *)
 let rec gen_expr ctx (e : C.exp) : reg =
@@ -165,8 +177,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     free_scratch ctx r1;
     free_scratch ctx r2;
     rd
-  | C.Lval _ ->
-    unsupported "lvalue through memory/field/index — memory slice s3.2"
+  | C.Lval _ -> unsupported "lvalue through memory/field/index — memory slice s3.2"
   | _ -> unsupported "expression form not supported in slice 1"
 
 and gen_unop ctx op e' =
@@ -192,6 +203,7 @@ and gen_unop ctx op e' =
     free_scratch ctx r;
     rd
   | C.LNot -> unsupported "logical ! (0/1 materialization) — later slice"
+;;
 
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
@@ -210,6 +222,7 @@ let gen_instr ctx (i : C.instr) =
   | C.Call _ -> unsupported "function call — call slice"
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
+;;
 
 (* ---- conditions: branch to [false_label] when [cond] is false, else fall through ---- *)
 
@@ -225,6 +238,7 @@ let rel_cond (op : C.binop) : (R.cond * bool) option =
   | C.Le -> Some (R.Le, false)
   | C.Gt -> Some (R.Le, true)
   | _ -> None
+;;
 
 let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   (* fallback: treat [cond] as a value, false iff zero (the register write sets Z) *)
@@ -242,19 +256,21 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
      | None -> truthy ()
      | Some (tcond, tneg) ->
        (match op with
-        | C.Lt | C.Gt | C.Le | C.Ge when is_unsigned_int (C.typeOf e1) ->
+        | (C.Lt | C.Gt | C.Le | C.Ge) when is_unsigned_int (C.typeOf e1) ->
           unsupported "unsigned ordered comparison — needs carry conditions, later slice"
         | _ -> ());
        let r1 = gen_expr ctx e1 in
        let r2 = gen_expr ctx e2 in
        let s = alloc_scratch ctx in
-       emit ctx (alu R.Sub s r1 (R.Reg r2)); (* flags = e1 - e2; s is dead *)
+       emit ctx (alu R.Sub s r1 (R.Reg r2));
+       (* flags = e1 - e2; s is dead *)
        free_scratch ctx s;
        free_scratch ctx r1;
        free_scratch ctx r2;
        (* jump when the comparison is FALSE: {tcond, not tneg} *)
        bcc ctx tcond (not tneg) false_label)
   | _ -> truthy ()
+;;
 
 (* ---- statements ---- *)
 let rec gen_stmt ctx (s : C.stmt) =
@@ -269,13 +285,12 @@ let rec gen_stmt ctx (s : C.stmt) =
   | C.Return (None, _, _) -> jmp ctx ctx.func_end
   | C.If (cond, then_b, else_b, _, _) ->
     if else_b.bstmts = []
-    then begin
+    then (
       let l_end = new_label ctx in
       gen_cond ctx cond ~false_label:l_end;
       List.iter (gen_stmt ctx) then_b.bstmts;
-      place ctx l_end
-    end
-    else begin
+      place ctx l_end)
+    else (
       let l_else = new_label ctx in
       let l_end = new_label ctx in
       gen_cond ctx cond ~false_label:l_else;
@@ -283,8 +298,7 @@ let rec gen_stmt ctx (s : C.stmt) =
       jmp ctx l_end;
       place ctx l_else;
       List.iter (gen_stmt ctx) else_b.bstmts;
-      place ctx l_end
-    end
+      place ctx l_end)
   | C.Loop (body, _, _, _, _) ->
     (* CIL loops are infinite with the guard [if (c) {} else break] as the first body stmt;
        break/continue resolve against the loop stack. *)
@@ -304,6 +318,7 @@ let rec gen_stmt ctx (s : C.stmt) =
     unsupported "continue — later slice (needs the for-loop increment continuation point)"
   | C.Goto _ | C.ComputedGoto _ -> unsupported "goto — later slice"
   | C.Switch _ -> unsupported "switch — later slice"
+;;
 
 (* ---- resolve: frags -> instr list. Pass 1 assigns each frag a word address (labels are
    zero width); pass 2 rewrites branches to PC-relative offsets. A RISC5 PC-relative branch at
@@ -314,24 +329,34 @@ let resolve (frags : frag list) : R.instr list =
   ignore
     (List.fold_left
        (fun a f ->
-         match f with
-         | Label l -> Hashtbl.replace addr l a; a
-         | Ins _ | Bcc _ | Jmp _ -> a + 1)
+          match f with
+          | Label l ->
+            Hashtbl.replace addr l a;
+            a
+          | Ins _ | Bcc _ | Jmp _ -> a + 1)
        0
        frags);
   let branch cond neg l a =
     R.Branch { cond; neg; link = false; target = R.To_off (Hashtbl.find addr l - a - 1) }
   in
-  let out = ref [] and a = ref 0 in
+  let out = ref []
+  and a = ref 0 in
   List.iter
     (fun f ->
-      match f with
-      | Label _ -> ()
-      | Ins i -> out := i :: !out; incr a
-      | Bcc (cond, neg, l) -> out := branch cond neg l !a :: !out; incr a
-      | Jmp l -> out := branch R.True false l !a :: !out; incr a)
+       match f with
+       | Label _ -> ()
+       | Ins i ->
+         out := i :: !out;
+         incr a
+       | Bcc (cond, neg, l) ->
+         out := branch cond neg l !a :: !out;
+         incr a
+       | Jmp l ->
+         out := branch R.True false l !a :: !out;
+         incr a)
     frags;
   List.rev !out
+;;
 
 (* ---- entry: an integer leaf -> its instr list (args in R0.., return R0) ---- *)
 let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
@@ -369,3 +394,4 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
   place ctx ctx.func_end;
   resolve (List.rev ctx.rev_frags)
+;;

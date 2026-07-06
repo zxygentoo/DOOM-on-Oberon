@@ -18,6 +18,7 @@ let risc5_mach : Machdep.mach =
   match Machdep.gcc32 with
   | Some m -> { m with char_is_unsigned = true; little_endian = true }
   | None -> failwith "goblint-cil was built without a gcc32 machdep probe"
+;;
 
 let () =
   let args = List.tl (Array.to_list Sys.argv) in
@@ -40,18 +41,18 @@ let () =
   let parsed =
     List.filter_map
       (fun f ->
-        (* Errormsg.hadErrors is global and sticky: a file can "succeed" while
+         (* Errormsg.hadErrors is global and sticky: a file can "succeed" while
            having logged errors, and the stale flag then aborts every later
            parse. Reset per file; treat errors-with-a-result as failure. *)
-        Errormsg.hadErrors := false;
-        match Frontc.parse f () with
-        | file when not !Errormsg.hadErrors -> Some file
-        | _ ->
-          failed := (f, "Errormsg errors (see stderr)") :: !failed;
-          None
-        | exception e ->
-          failed := (f, Printexc.to_string e) :: !failed;
-          None)
+         Errormsg.hadErrors := false;
+         match Frontc.parse f () with
+         | file when not !Errormsg.hadErrors -> Some file
+         | _ ->
+           failed := (f, "Errormsg errors (see stderr)") :: !failed;
+           None
+         | exception e ->
+           failed := (f, Printexc.to_string e) :: !failed;
+           None)
       inputs
   in
   Errormsg.hadErrors := false;
@@ -99,13 +100,19 @@ let () =
     end
   in
   visitCilFileSameGlobals counter merged;
-  Printf.printf "function defs: %d   gvar defs: %d   extern decls: %d\n" !funs !gvars !decls;
+  Printf.printf
+    "function defs: %d   gvar defs: %d   extern decls: %d\n"
+    !funs
+    !gvars
+    !decls;
   Printf.printf "CIL instrs: %d   stmts: %d\n" !instrs !stmts;
   (* classify: "__"-prefixed renames are glibc per-TU static-inline dups
      (byteswap/uint-identity etc.) — pure host-header noise, absent once the
      target mini-libc headers replace glibc. The rest are DOOM's own
      file-scope collisions (what PureDOOM renamed by hand). *)
-  let doom_renames = List.filter (fun n -> not (String.length n >= 2 && String.sub n 0 2 = "__")) !renamed in
+  let doom_renames =
+    List.filter (fun n -> not (String.length n >= 2 && String.sub n 0 2 = "__")) !renamed
+  in
   Printf.printf
     "alpha-renamed globals: %d total (%d glibc-header dups, %d DOOM-real)\n"
     (List.length !renamed)
@@ -157,7 +164,8 @@ let () =
   let in_doom (l : location) =
     (* merged locations point back at original sources via #line markers *)
     let f = l.file in
-    let n = String.length f and p = "doomgeneric/" in
+    let n = String.length f
+    and p = "doomgeneric/" in
     let pl = String.length p in
     let rec go i = i + pl <= n && (String.sub f i pl = p || go (i + 1)) in
     go 0
@@ -186,7 +194,8 @@ let () =
         inherit nopCilVisitor
 
         method! vexpr e =
-          (try note (typeOf e) with _ -> ());
+          (try note (typeOf e) with
+           | _ -> ());
           DoChildren
 
         (* bitfield *accesses*: the thing the backend would actually have
@@ -257,10 +266,10 @@ let () =
                   ", "
                   (List.map
                      (fun f ->
-                       Printf.sprintf
-                         "%s:%d"
-                         f.fname
-                         (Option.value ~default:(-1) f.fbitfield))
+                        Printf.sprintf
+                          "%s:%d"
+                          f.fname
+                          (Option.value ~default:(-1) f.fbitfield))
                      bfs))
              :: !doombf
         else incr libcbf
@@ -280,3 +289,4 @@ let () =
   dumpFile defaultCilPrinter oc out merged;
   close_out oc;
   Printf.printf "wrote %s\n%!" out
+;;

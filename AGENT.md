@@ -40,6 +40,11 @@ Concretely, as the agent on this project you should:
 - **Verify each step.** No slice is "done" until it passes the differential
   jig — our backend in the emulator vs host gcc (§7, 1b). Green tests are the
   unit of progress, not lines written.
+- **Format is a pre-commit gate.** `.ocamlformat` (profile `janestreet`,
+  copied from the host repo) sits at the repo root. Before staging any commit,
+  run `dune fmt` on the `default` switch; never commit a tree that isn't
+  fmt-clean — `dune build @fmt` is the check (green = clean). The vendored
+  emulator formats itself behind its own project boundary — leave it pristine.
 - **It's fine to go slow and re-explain.** If a concept needs more grounding,
   give it.
 
