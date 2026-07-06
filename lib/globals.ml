@@ -20,6 +20,10 @@ type t =
   ; skipped : (int, string) Hashtbl.t (* vid -> why it has no offset (refusal message) *)
   ; strings :
       (string, int) Hashtbl.t (* string-literal content -> DB-relative byte offset *)
+  ; relocs : (int * int) list
+    (* pointer-valued initializer slots: (image byte offset, DB-relative target). The
+       image holds 0 there; the consumer writes DB + target once DB is fixed — the jig
+       at its data base, the 3b linker at the blob's (ABI §6 absolute pointer words) *)
   ; image : bytes (* data+bss, little-endian, length padded to a word multiple *)
   }
 
@@ -27,6 +31,7 @@ let no_globals =
   { offsets = Hashtbl.create 1
   ; skipped = Hashtbl.create 1
   ; strings = Hashtbl.create 1
+  ; relocs = []
   ; image = Bytes.empty
   }
 ;;
@@ -35,24 +40,83 @@ let no_globals =
    must sit inside (DOOM's data 62 K + bss 245 K ≈ 307 K does, spike-measured). *)
 let max_db_offset = 0x7FFFF
 
-(* An initializer we can serialize today: a compile-time integer constant — including
-   enum constants (CEnum) and integer-constant pointer casts (NULL), which getInteger's
-   CInt-and-friends coverage plus the explicit CastE case pick up. Anything needing a
-   link-time address (&global, string literal, function pointer) is the 3b linker's job. *)
+(* An initializer we can serialize as a plain value today: a compile-time integer
+   constant reached through any stack of pointer/integer casts — NULL macro-expands to
+   a typed pointer cast wrapped around the void-pointer cast of 0, a cast OF a cast,
+   which a one-level peek missed (the census found it under most of the tree's = NULL
+   inits) — or a constant *double* expression under a
+   cast to an integer type: DOOM's automap arrow tables are (fixed_t)(.867 * 65536)-shaped,
+   folded here at compile time with C's truncate-toward-zero cast (OCaml's int_of_float),
+   so no float ever reaches the blob. Address-shaped initializers are the caller's job
+   (ptr_target / relocs below); what neither takes — function pointers, &extern — waits
+   for the 3b linker's code addresses. *)
+let rec int_core (e : C.exp) : int option =
+  match C.getInteger e with
+  | Some n -> Some (C.Cilint.int_of_cilint n)
+  | None ->
+    (match e with
+     | C.CastE (_, t, e') when C.isPointerType t || C.isIntegralType t ->
+       (match int_core e' with
+        | Some _ as n -> n
+        | None ->
+          if C.isIntegralType t then Option.map int_of_float (float_const e') else None)
+     | _ -> None)
+
+(* the double-expression evaluator behind the fixed-point fold; mirrors what gcc's own
+   compile-time folding computes, so the jig's oracle agrees bit-for-bit *)
+and float_const (e : C.exp) : float option =
+  match e with
+  | C.Const (C.CReal (f, _, _)) -> Some f
+  | C.UnOp (C.Neg, e', _) -> Option.map Float.neg (float_const e')
+  | C.CastE (_, t, e')
+    when match C.unrollType t with
+         | C.TFloat _ -> true
+         | _ -> false ->
+    (match float_const e' with
+     | Some _ as f -> f
+     | None -> Option.map float_of_int (int_core e') (* (double)65536 *))
+  | C.BinOp (op, a, b, _) ->
+    (match float_const a, float_const b with
+     | Some x, Some y ->
+       (match op with
+        | C.Mult -> Some (x *. y)
+        | C.PlusA -> Some (x +. y)
+        | C.MinusA -> Some (x -. y)
+        | C.Div -> Some (x /. y)
+        | _ -> None)
+     | _ -> None)
+  | _ -> None
+;;
+
 let word_of_init (e : C.exp) : int =
-  let as_int e' = Option.map C.Cilint.int_of_cilint (C.getInteger e') in
-  let folded = C.constFold true e in
-  let value =
-    match as_int folded with
-    | Some _ as n -> n
-    | None ->
-      (match folded with
-       | C.CastE (_, t, e') when C.isPointerType t -> as_int e' (* NULL and kin *)
-       | _ -> None)
-  in
-  match value with
+  match int_core (C.constFold true e) with
   | Some n -> n
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
+;;
+
+(* A pointer-valued initializer whose target is *data*: a string literal (interned at a
+   known offset by the scan below) or &global / global-array decay, any constant
+   Field/Index chain folded in via bitsOffset. The image cannot hold the absolute
+   address — DB isn't fixed until load — so the slot is recorded as a reloc,
+   (image byte offset, DB-relative target), and the image's consumer patches it to
+   DB + target: the jig at its data_base, the 3b linker at the blob's (the "pointer-valued
+   data initializers as absolute words" of ABI §6). Function pointers fall through to
+   None: code addresses don't exist until the linker lays the code out. *)
+let ptr_target ~offsets ~strings (e : C.exp) : int option =
+  let rec strip e =
+    match e with
+    | C.CastE (_, t, e') when C.isPointerType t -> strip e'
+    | e -> e
+  in
+  match strip e with
+  | C.Const (C.CStr (s, _)) -> Hashtbl.find_opt strings s
+  | (C.AddrOf (C.Var g, off) | C.StartOf (C.Var g, off)) when g.vglob ->
+    (match Hashtbl.find_opt offsets g.vid with
+     | None -> None (* the host global is skipped or extern; the refusal names it *)
+     | Some base ->
+       (try Some (base + (fst (C.bitsOffset g.vtype off) / 8)) with
+        | C.SizeOfError _ -> None))
+  | _ -> None
 ;;
 
 (* A type places iff every leaf is an integer scalar (word / short / char) or pointer —
@@ -72,13 +136,18 @@ let rec check_placeable (t : C.typ) =
 
 (* Serialize [init] (whose slot has type [t]) at byte [off] into the writes list as
    (offset, value, byte-width) triples — the width comes from the *slot* type, not the
-   initializer expression (a char slot with an int-literal init is still one byte).
-   CompoundInit offsets are single-level (Field/Index with NoOffset — CIL's documented
-   shape); nested aggregates recurse; absent entries stay zero because the image is
-   pre-zeroed — C's partial-initializer semantics for free. *)
-let rec serialize_init writes (off : int) (t : C.typ) (init : C.init) =
+   initializer expression (a char slot with an int-literal init is still one byte) —
+   or, for an address-shaped leaf, into the relocs list (a pointer slot is always a
+   4-byte word). CompoundInit offsets are single-level (Field/Index with NoOffset —
+   CIL's documented shape); nested aggregates recurse; absent entries stay zero because
+   the image is pre-zeroed — C's partial-initializer semantics for free. *)
+let rec serialize_init ~writes ~relocs ~offsets ~strings (off : int) (t : C.typ) init =
   match init with
-  | C.SingleInit e -> writes := (off, word_of_init e, C.bitsSizeOf t / 8) :: !writes
+  | C.SingleInit e ->
+    let folded = C.constFold true e in
+    (match ptr_target ~offsets ~strings folded with
+     | Some target -> relocs := (off, target) :: !relocs
+     | None -> writes := (off, word_of_init folded, C.bitsSizeOf t / 8) :: !writes)
   | C.CompoundInit (ct, initl) ->
     List.iter
       (fun ((o, sub) : C.offset * C.init) ->
@@ -92,7 +161,7 @@ let rec serialize_init writes (off : int) (t : C.typ) (init : C.init) =
               | _ -> Check.unsupported "initializer index — unexpected CIL shape")
            | _ -> Check.unsupported "initializer offset — unexpected CIL shape"
          in
-         serialize_init writes (off + delta) subt sub)
+         serialize_init ~writes ~relocs ~offsets ~strings (off + delta) subt sub)
       initl
 ;;
 
@@ -102,7 +171,13 @@ let from_file (file : C.file) : t =
   and strings = Hashtbl.create 64 in
   let cursor = ref 0
   and writes = ref []
-  and string_blits = ref [] in
+  and relocs = ref []
+  and string_blits = ref []
+  and pending = ref [] in
+  (* Pass 1 — placement only: assign every global its offset, defer initializer
+     serialization to pass 3. Split because an initializer may reference the address of
+     a global defined *later* (int *p = &x; ... int x;) or a string literal (interned in
+     pass 2) — serialization needs the finished offset and string tables. *)
   let place (v : C.varinfo) (init : C.init option) =
     Check.check_unsupported_types v.vtype;
     check_placeable v.vtype;
@@ -113,7 +188,7 @@ let from_file (file : C.file) : t =
     then Check.unsupported "data+bss image exceeds DB's +512 KB mem-op reach";
     (match init with
      | None -> () (* tentative definition: bss-style, stays zero *)
-     | Some i -> serialize_init writes off v.vtype i);
+     | Some i -> pending := (v, off, i) :: !pending);
     Hashtbl.replace offsets v.vid off;
     cursor := off + size
   in
@@ -152,6 +227,44 @@ let from_file (file : C.file) : t =
     end
   in
   C.visitCilFileSameGlobals collector file;
+  (* Pass 3 — serialize, to a FIXED POINT. A global can place (pass 1) yet fail here (a
+     function-pointer table, say): it must be un-placed and skipped. But another global's
+     initializer may hold its address — and if that reloc resolved before the failure, it
+     would silently point at a zeroed gap (a miscompile, not a refusal). Dry-run rounds
+     catch the cascade: each failure removes the vid from [offsets], so a referrer's
+     ptr_target misses on the next round and the referrer fails too — honestly, by
+     refusal. Then the survivors serialize for real. *)
+  let skip (v : C.varinfo) why =
+    Hashtbl.remove offsets v.vid;
+    Hashtbl.replace skipped v.vid why
+  in
+  let survivors = ref (List.rev !pending)
+  and changed = ref true in
+  while !changed do
+    changed := false;
+    survivors
+    := List.filter
+         (fun ((v : C.varinfo), off, i) ->
+            try
+              let w = ref []
+              and r = ref [] in
+              serialize_init ~writes:w ~relocs:r ~offsets ~strings off v.vtype i;
+              true
+            with
+            | Check.Unsupported why ->
+              skip v why;
+              changed := true;
+              false
+            | C.SizeOfError (why, _) ->
+              skip v ("initializer sizing failed (" ^ why ^ ")");
+              changed := true;
+              false)
+         !survivors
+  done;
+  List.iter
+    (fun ((v : C.varinfo), off, i) ->
+       serialize_init ~writes ~relocs ~offsets ~strings off v.vtype i)
+    !survivors;
   let image = Bytes.make ((!cursor + 3) / 4 * 4) '\000' in
   List.iter
     (fun (off, w, width) ->
@@ -164,5 +277,5 @@ let from_file (file : C.file) : t =
   List.iter
     (fun (off, s) -> Bytes.blit_string s 0 image off (String.length s))
     !string_blits;
-  { offsets; skipped; strings; image }
+  { offsets; skipped; strings; relocs = !relocs; image }
 ;;

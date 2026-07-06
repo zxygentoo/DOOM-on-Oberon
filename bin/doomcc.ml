@@ -40,9 +40,11 @@ let () =
      unplaceable ones are skipped-with-reason and refuse per touching function ---- *)
   let globals = Globals.from_file merged in
   Printf.printf
-    "data:    %d globals placed, %d B data+bss image (DB-relative), %d skipped\n"
+    "data:    %d globals placed, %d B data+bss image (DB-relative), %d ptr relocs, %d \
+     skipped\n"
     (Hashtbl.length globals.Globals.offsets)
     (Bytes.length globals.Globals.image)
+    (List.length globals.Globals.relocs)
     (Hashtbl.length globals.Globals.skipped);
   (* ---- (3) walk the merged unit: compile each function ----
      Fundec.compile covers the landed slices (straight-line, control flow, scalar

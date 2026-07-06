@@ -12,6 +12,11 @@ type t =
     (** interned string-literal content -> DB-relative byte offset of its bytes (with a NUL
         terminator) in [image]; identical literals share one copy. {!Fundec} materializes a
         [CStr] as [DB + offset], the same address form a global gets. *)
+  ; relocs : (int * int) list
+    (** pointer-valued initializer slots, (image byte offset, DB-relative target): the
+        image holds 0 there, and the consumer patches in the absolute address DB + target
+        once the data base is fixed — the jig at its [Runner.data_base], the 3b linker at
+        the blob's data base (ABI §6, pointer initializers as absolute words) *)
   ; image : bytes (** data+bss, little-endian, length padded to a word multiple *)
   }
 

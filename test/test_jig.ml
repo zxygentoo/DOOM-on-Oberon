@@ -29,6 +29,15 @@ let dcc_compile ~src ~fname =
      helpers (ABI §5: __div &c.), linked into every program exactly as the real blob will *)
   let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) in
   let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
+  (* play loader for the pointer-initializer relocs (ABI §6): with the data base fixed
+     at Runner.data_base, each reloc slot becomes the absolute address DB + target *)
+  List.iter
+    (fun (off, target) ->
+       Bytes.set_int32_le
+         globals.Globals.image
+         off
+         (Int32.of_int (Runner.data_base + target)))
+    globals.Globals.relocs;
   (Linker.link (entry @ rest @ Runtime.objs)).Linker.code, globals.Globals.image
 ;;
 
@@ -607,6 +616,50 @@ let samples =
       (* nested divisions: the inner call's use of the div area completes before the \
            outer's begins *)
     )
+    (* global initializers with link-time addresses: pointer-valued inits become relocs —
+       (image offset, DB-relative target) — patched to absolute DB + target by the image
+       consumer (here dcc_compile, playing loader at Runner.data_base; later the 3b linker).
+       Typed NULL — a cast of a cast — and compile-time double expressions under an int cast
+       (DOOM's (fixed_t)(.867 * 65536) automap tables) fold to plain words. *)
+  ; ( "char *msg = \"hey\"; int spi(int i){ return msg[i & 2]; }"
+    , "spi"
+    , 1 (* string-pointer init: the s6 intern + a reloc; read through the pointer *) )
+  ; ( "char *msg2 = \"hi\"; int sl(int x){ if (msg2) return x; return 1; }"
+    , "sl"
+    , 1 (* promoted from the retired reject: the reloc'd pointer is non-null *) )
+  ; ( "int gx = 7; int *gp = &gx; int rp(int i){ return *gp + i; }"
+    , "rp"
+    , 1 (* &global init: read through *) )
+  ; ( "int gx2 = 1; int *gp2 = &gx2; int wp(int i){ *gp2 = i * 3; return gx2; }"
+    , "wp"
+    , 1 (* write through the reloc'd pointer, read the target — real aliasing *) )
+  ; ( "int garr[4] = {10,20,30,40}; int *gpa = garr; int ra(int i){ return gpa[i & 3]; }"
+    , "ra"
+    , 1 (* array-decay init (StartOf) *) )
+  ; ( "int garr2[4] = {10,20,30,40}; int *gpm = &garr2[2]; int rm(int i){ return gpm[i & \
+       1]; }"
+    , "rm"
+    , 1 (* &arr[2]: a constant-index addend folded into the reloc target *) )
+  ; ( "int ga = 5; int gb = 9; int *tbl[4] = { &ga, 0, &gb, 0 }; int rt(int i){ int *q = \
+       tbl[i & 3]; if (q) return *q; return -1; }"
+    , "rt"
+    , 1 (* relocs and typed NULLs coexisting in one CompoundInit *) )
+  ; ( "struct ent { int v; int *link; }; int tgt = 3; struct ent e0 = { 5, &tgt }; int \
+       sptr(int i){ return *e0.link + e0.v + i; }"
+    , "sptr"
+    , 1 (* a reloc inside a struct initializer *) )
+  ; ( "char *np = (void *)0; int nul(int i){ if (np) return 0; return i; }"
+    , "nul"
+    , 1 (* typed NULL — the cast-of-a-cast the one-level peek missed *) )
+  ; ( "typedef int fixed_t; fixed_t sc = (fixed_t)(.867 * (double)65536); int fxc(int \
+       i){ return sc + i; }"
+    , "fxc"
+    , 1 (* the automap-table shape: compile-time double math, C-truncating cast → 56819 *)
+    )
+  ; ( "typedef int fixed_t; fixed_t nsc = (fixed_t)(-.7 * (double)65536); int fxn(int \
+       i){ return nsc + i; }"
+    , "fxn"
+    , 1 (* negative: -45875.2 truncates toward zero → -45875, not floor's -45876 *) )
   ]
 ;;
 
@@ -622,10 +675,11 @@ let rejects =
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
     , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
-  ; ( "char *msg = \"hi\"; int sl(int x){ if (msg) return x; return 1; }"
-    , "sl" (* string-literal init — 3b linker *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
+  ; ( "int idf(int x){ return x; } int (*gfp)(int) = idf; int usefp(int x){ if (gfp) \
+       return 1; return x; }"
+    , "usefp" (* function-pointer initializer — 3b linker (code addresses) *) )
   ]
 ;;
 
