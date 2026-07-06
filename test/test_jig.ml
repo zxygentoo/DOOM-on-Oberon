@@ -3,18 +3,24 @@
    x86-64, matching RISC5, so int-only samples must agree bit-for-bit.
 
    This is the harness the backend grows against: each new codegen feature adds a sample and is
-   trusted only once it matches gcc here. Covers straight-line integer ops and if/while/for
-   control flow; loop samples mask their trip count so the full-range args below can't spin.
-   Parse+codegen and gcc-compile both happen once per sample; only the (fast) runs repeat per
-   arg-tuple. *)
+   trusted only once it matches gcc here. Covers straight-line integer ops, if/while/for
+   control flow, and 32-bit scalar globals (memory lives *inside* the samples, so the harness
+   stays int-in/int-out; both sides get fresh global state per run — ours by rewriting the
+   data image, gcc's by a fresh process). Loop samples mask their trip count so the full-range
+   args below can't spin. Parse+compile and gcc-compile both happen once per sample; only the
+   (fast) runs repeat per arg-tuple. *)
+
+open Doomcc_core
 
 let u32 x = x land 0xFFFF_FFFF
 
-(* ---- doomcc side: parse -> codegen (once per sample) ---- *)
+(* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
+   body plus the data/bss image the runner drops at DB before each run ---- *)
 let dcc_compile ~src ~fname =
-  let file = Backend.Frontend.parse_string ~name:fname src in
-  let fd = Backend.Frontend.find_fundec file fname in
-  Backend.Codegen.compile_fundec fd
+  let file = Frontend.parse_string ~name:fname src in
+  let globals = Globals.from_file file in
+  let fd = Frontend.find_fundec file fname in
+  Fundec.compile ~globals fd, globals.Globals.image
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)
 let gcc_compile ~src ~fname ~arity : string =
@@ -70,6 +76,13 @@ let samples =
   ; "int tri(int n){ n &= 15; int s = 0; while (n > 0){ s += n; n--; } return s; }", "tri", 1
   ; "int po2(int k){ k &= 7; int r = 1; int i = 0; for (i = 0; i < k; i++){ r = r * 2; } return r; }", "po2", 1
   ; "int loopsum(int a,int b){ b &= 7; int s = a; int i = 0; for (i = 0; i < b; i++) s = s + a; return s; }", "loopsum", 2
+    (* globals (s3.1): DB-relative scalar LDW/STW; state is fresh per run on both sides *)
+  ; "int gi = 42; int grd(int x){ return gi + x; }", "grd", 1
+  ; "int gz; int rz(int x){ return gz + x; }", "rz", 1 (* no init: the zero-filled (bss) half *)
+  ; "int gw; int gwr(int x){ gw = x * 2; return gw + 1; }", "gwr", 1 (* store, then load back *)
+  ; "int g0 = 3; int g1 = 5; int g2 = -7; int sumg(int x){ return g0 + g1 * x + g2; }", "sumg", 1
+  ; "int s0 = 11; int s1 = 22; int swp(int x){ int t = s0; s0 = s1; s1 = t + x; return s0 * 1000 + s1; }", "swp", 1
+  ; "static int acc = 5; int gacc(int n){ n &= 7; int i = 0; for (i = 0; i < n; i++){ acc = acc + i; } return acc; }", "gacc", 1
   ]
 
 (* The pre-codegen gate must REFUSE these (ABI §4 bans + not-yet-supported forms),
@@ -77,7 +90,11 @@ let samples =
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
-  ; "int k(int *p){ return *p; }", "k" (* memory — later slice *)
+  ; "int k(int *p){ return *p; }", "k" (* deref through a pointer — s3.2 *)
+  ; "int ga[4]; int gidx(int i){ return ga[i & 3]; }", "gidx" (* aggregate global — s3.2 *)
+  ; "char gc; int rgc(int x){ return gc + x; }", "rgc" (* sub-word global: the Globals skip→attribute path — s3.3 *)
+  ; "extern int ext; int rex(int x){ return ext + x; }", "rex" (* declared, never defined — 3b linker *)
+  ; "int al(int x){ int y = x; int *p = &y; return x; }", "al" (* &local needs a stack slot — call slice *)
   ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
   ; "int cv(int a,int b){ return a < b; }", "cv" (* compare as a value — later slice *)
   ; "int uc(unsigned a,unsigned b){ if (a < b) return 1; return 0; }", "uc" (* unsigned ordered — later *)
@@ -96,7 +113,7 @@ let nrand = 40
 (* one sample: compile with both backends, diff R0 over edge + random arg-tuples;
    returns (run cases, mismatches) for the caller to total up *)
 let check_sample (src, fname, arity) : int * int =
-  let body = dcc_compile ~src ~fname in
+  let body, data = dcc_compile ~src ~fname in
   let exe = gcc_compile ~src ~fname ~arity in
   let tuples =
     List.map (fun v -> List.init arity (fun _ -> v)) edges
@@ -105,7 +122,7 @@ let check_sample (src, fname, arity) : int * int =
   let sfails = ref 0 in
   List.iter
     (fun args ->
-      let ours = u32 (Backend.Runner.run_leaf body args) in
+      let ours = u32 (Runner.run_leaf ~data body args) in
       let refv = gcc_run exe args in
       if ours <> refv
       then begin
@@ -130,7 +147,7 @@ let check_sample (src, fname, arity) : int * int =
 (* one reject: the gate must raise Unsupported rather than miscompile; returns 1 if it leaked *)
 let check_reject (src, fname) : int =
   match dcc_compile ~src ~fname with
-  | exception Backend.Codegen.Unsupported msg ->
+  | exception Check.Unsupported msg ->
     Printf.printf "  reject %-6s ✓ (%s)\n" fname msg;
     0
   | _ ->

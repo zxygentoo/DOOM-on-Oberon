@@ -1,9 +1,11 @@
-; Slice 1 of the RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr.
+; doomcc_core — the compiler (AGENT.md 1b): preprocessed C -> risc5_isa instrs.
+;   Check    : the shared refusal channel (Unsupported) + ABI §4 banned-type checks
 ;   Frontend : goblint-cil parse + the RISC5 machdep (ABI §4, ILP32/LE/char-unsigned)
-;   Codegen  : the translation + the pre-codegen gate (float / 64-bit / bitfield bans)
-;   Runner   : execute a straight-line leaf body in the vendored emulator (jig exec half)
-; Depends on goblint-cil (front end) and emu (Risc5_isa to emit, Risc to run).
+;   Globals  : static-storage placement + the data/bss image (3b data-layout embryo)
+;   Fundec   : per-function compilation (leaves: straight-line, control flow, scalar globals)
+; Depends on goblint-cil (the front end) and emu (Risc5_isa, the instr type we emit).
+; The jig that exercises all of this lives in test/ (runner + test_jig).
 
 (library
- (name backend)
+ (name doomcc_core)
  (libraries goblint-cil emu))

@@ -1,34 +1,18 @@
-(* The RISC5 backend (AGENT.md 1b): CIL typed AST -> Risc5_isa.instr list, for integer *leaf*
-   functions — straight-line code plus if/while/for control flow (comparisons lower to SUB +
-   a conditional branch; [resolve] lays the branches out to PC-relative offsets). The minimal
-   vertical the differential jig exercises. Naive register allocation (ABI §2: a leaf may use
-   R0-R11 freely; args and return in R0..) — every variable keeps a fixed home register, so
-   control-flow merge points need no reconciliation. Anything outside the supported subset
-   raises [Unsupported] — the pre-codegen gate (ABI §4 + the spikes/cil census) refuses to
-   miscompile rather than guess. Each message names the later slice that will handle it. *)
+(* Per-function compilation (AGENT.md 1b): one CIL fundec -> its Risc5_isa.instr list,
+   for integer *leaf* functions — straight-line code, if/while/for control flow
+   (comparisons lower to SUB + a conditional branch; [resolve] lays the branches out to
+   PC-relative offsets), and 32-bit scalar globals/statics (DB-relative one-instr
+   LDW/STW off a [Globals.t], ABI §2/§6). The minimal vertical the differential jig
+   exercises. Naive register allocation (ABI §2: a leaf may use R0-R11 freely; args and
+   return in R0..) — every variable keeps a fixed home register, so control-flow merge
+   points need no reconciliation. Anything outside the supported subset raises
+   [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the
+   later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
 
-exception Unsupported of string
-
-let unsupported fmt = Printf.ksprintf (fun s -> raise (Unsupported s)) fmt
-
-(* ---- the ABI §4 gate: reject banned types (float / 64-bit / bitfield) up front ---- *)
-let rec check_type (t : C.typ) =
-  match t with
-  | C.TInt ((C.ILongLong | C.IULongLong), _) ->
-    unsupported "64-bit integer (ABI §4: no long long in the blob)"
-  | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
-  | C.TNamed (ti, _) -> check_type ti.ttype
-  | C.TComp (ci, _) ->
-    List.iter
-      (fun (f : C.fieldinfo) ->
-        if f.fbitfield <> None then unsupported "bitfield (ABI §4: banned)";
-        check_type f.ftype)
-      ci.cfields
-  | C.TArray (t', _, _) -> check_type t'
-  | _ -> ()
+let unsupported = Check.unsupported
 
 let is_unsigned_int (t : C.typ) =
   match C.unrollType t with
@@ -40,6 +24,7 @@ type reg = int
 
 let return_reg = 0
 let max_reg = 11
+let db_reg = 13 (* DB, the data base: set by crt0 (runner, in the jig), never written *)
 
 (* Emission carries labels/branches, not raw instrs — a branch's target only gets a word
    address once the whole body is laid out. [resolve] (below) turns frags into the final
@@ -51,8 +36,9 @@ type frag =
   | Jmp of int (* unconditional branch to a label *)
 
 type ctx =
-  { mutable rev : frag list (* emitted frags, reversed *)
+  { mutable rev_frags : frag list (* emitted frags, reversed *)
   ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register *)
+  ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
   ; base_scratch : reg (* first register above the homes *)
   ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
   ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
@@ -60,11 +46,11 @@ type ctx =
   ; func_end : int (* shared epilogue label every [return] branches to *)
   }
 
-let emit ctx i = ctx.rev <- Ins i :: ctx.rev
+let emit ctx i = ctx.rev_frags <- Ins i :: ctx.rev_frags
 let new_label ctx = let l = ctx.next_label in ctx.next_label <- l + 1; l
-let place ctx l = ctx.rev <- Label l :: ctx.rev
-let bcc ctx cond neg l = ctx.rev <- Bcc (cond, neg, l) :: ctx.rev
-let jmp ctx l = ctx.rev <- Jmp l :: ctx.rev
+let place ctx l = ctx.rev_frags <- Label l :: ctx.rev_frags
+let bcc ctx cond neg l = ctx.rev_frags <- Bcc (cond, neg, l) :: ctx.rev_frags
+let jmp ctx l = ctx.rev_frags <- Jmp l :: ctx.rev_frags
 
 let alloc_scratch ctx =
   let rec find r =
@@ -87,12 +73,18 @@ let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 let home ctx (v : C.varinfo) =
   match Hashtbl.find_opt ctx.homes v.vid with
   | Some r -> r
+  | None -> unsupported "unmapped local %s — internal error" v.vname
+
+(* A global's DB-relative offset. A [Globals]-skipped global re-raises its skip reason
+   here, attributing the refusal to each function that touches it; a vid the layout
+   never saw is a declaration with no definition anywhere — the linker/libc's problem. *)
+let global_offset ctx (v : C.varinfo) =
+  match Hashtbl.find_opt ctx.globals.Globals.offsets v.vid with
+  | Some off -> off
   | None ->
-    (* not a param/local ⇒ a global/static (CIL folds statics into globals): its home is a
-       data-section address, not a register — that's the memory slice. *)
-    if v.vglob
-    then unsupported "global/static variable access — memory slice"
-    else unsupported "unmapped local %s — internal error" v.vname
+    (match Hashtbl.find_opt ctx.globals.Globals.skipped v.vid with
+     | Some why -> unsupported "%s" why
+     | None -> unsupported "extern global without a definition — 3b linker / mini-libc")
 
 (* ---- instruction builders ---- *)
 let alu ?(u = false) ?(v = false) op a b operand : R.instr =
@@ -131,7 +123,7 @@ let binop_instr op rd b c : R.instr =
        As an if/loop condition it never reaches here: gen_cond intercepts it. *)
     unsupported "comparison as a value (0/1 materialization) — later slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
-    unsupported "pointer arithmetic — memory slice"
+    unsupported "pointer arithmetic — memory slice s3.2"
 
 (* ---- expressions: emit code computing [e], return the register holding its value ---- *)
 let rec gen_expr ctx (e : C.exp) : reg =
@@ -144,18 +136,28 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r (Char.code ch);
     r
+  | C.Lval (C.Var v, C.NoOffset) when v.vglob ->
+    (* a 32-bit scalar global/static: one LDW off DB (ABI §2/§6) — layout admitted
+       word scalars only, so W is the right size by construction *)
+    let r = alloc_scratch ctx in
+    emit ctx (R.Load { size = R.W; a = r; base = db_reg; off = global_offset ctx v });
+    r
   | C.Lval (C.Var v, C.NoOffset) -> home ctx v
+  | C.AddrOf (C.Var v, _) when not v.vglob ->
+    unsupported "&local (needs a stack slot in the ABI §3 frame) — call slice"
+  | C.AddrOf _ | C.StartOf _ ->
+    unsupported "address-of / array-to-pointer decay — memory slice s3.2"
   | C.CastE (_, t, e') ->
-    check_type t;
+    Check.check_unsupported_types t;
     if C.bitsSizeOf t < 32 then unsupported "narrowing cast to <32-bit — later slice";
     gen_expr ctx e' (* int<->int of the same width: the 32-bit value is unchanged *)
   | C.UnOp (op, e', t) ->
-    check_type t;
+    Check.check_unsupported_types t;
     gen_unop ctx op e'
   | C.BinOp (C.Shiftrt, _, _, t) when is_unsigned_int t ->
     unsupported "unsigned >> (compiles to ROR + mask) — later slice"
   | C.BinOp (op, e1, e2, t) ->
-    check_type t;
+    Check.check_unsupported_types t;
     let r1 = gen_expr ctx e1 in
     let r2 = gen_expr ctx e2 in
     let rd = alloc_scratch ctx in
@@ -164,7 +166,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     free_scratch ctx r2;
     rd
   | C.Lval _ ->
-    unsupported "lvalue: only local/param variables (no memory/fields) — memory slice"
+    unsupported "lvalue through memory/field/index — memory slice s3.2"
   | _ -> unsupported "expression form not supported in slice 1"
 
 and gen_unop ctx op e' =
@@ -194,12 +196,17 @@ and gen_unop ctx op e' =
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
   match i with
+  | C.Set ((C.Var v, C.NoOffset), e, _, _) when v.vglob ->
+    (* global = e: evaluate, then one STW off DB — the mirror of the load above *)
+    let r = gen_expr ctx e in
+    emit ctx (R.Store { size = R.W; a = r; base = db_reg; off = global_offset ctx v });
+    free_scratch ctx r
   | C.Set ((C.Var v, C.NoOffset), e, _, _) ->
     let r = gen_expr ctx e in
     let h = home ctx v in
     if r <> h then emit ctx (mov_reg h r);
     free_scratch ctx r
-  | C.Set _ -> unsupported "store to a non-variable lvalue — memory slice"
+  | C.Set _ -> unsupported "store through memory/field/index lvalue — memory slice s3.2"
   | C.Call _ -> unsupported "function call — call slice"
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
@@ -327,14 +334,16 @@ let resolve (frags : frag list) : R.instr list =
   List.rev !out
 
 (* ---- entry: an integer leaf -> its instr list (args in R0.., return R0) ---- *)
-let compile_fundec (fd : C.fundec) : R.instr list =
+let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
   let return_type =
     match fd.svar.vtype with
     | C.TFun (rt, _, _, _) -> rt
     | t -> t
   in
-  check_type return_type;
-  List.iter (fun (v : C.varinfo) -> check_type v.vtype) (fd.sformals @ fd.slocals);
+  Check.check_unsupported_types return_type;
+  List.iter
+    (fun (v : C.varinfo) -> Check.check_unsupported_types v.vtype)
+    (fd.sformals @ fd.slocals);
   if List.length fd.sformals > 4 then unsupported ">4 params (stack args — call slice)";
   let homes = Hashtbl.create 16 in
   let next = ref 0 in
@@ -347,8 +356,9 @@ let compile_fundec (fd : C.fundec) : R.instr list =
   List.iter assign fd.sformals;
   List.iter assign fd.slocals;
   let ctx =
-    { rev = []
+    { rev_frags = []
     ; homes
+    ; globals
     ; base_scratch = !next
     ; scratch_free = Array.make (max_reg + 1) true
     ; next_label = 1 (* label 0 is func_end *)
@@ -358,4 +368,4 @@ let compile_fundec (fd : C.fundec) : R.instr list =
   in
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
   place ctx ctx.func_end;
-  resolve (List.rev ctx.rev)
+  resolve (List.rev ctx.rev_frags)

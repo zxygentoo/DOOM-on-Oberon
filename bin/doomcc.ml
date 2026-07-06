@@ -1,8 +1,8 @@
 (* doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
 
    This is the *shape* of the full pipeline. The front (parse + amalgamate) and the middle
-   (per-function codegen, via Backend.Codegen) are real; the back (the ABI §6 instr-level
-   linker + blob emit, track 3b) is stubbed. Until the later codegen slices land (calls,
+   (Globals placement + per-function Fundec compilation) are real; the back (the ABI §6
+   instr-level linker + blob emit, track 3b) is stubbed. Until the later slices land (calls,
    control flow, memory), most functions gate-refuse — so for now doomcc doubles as a
    progress gauge: per merged program it reports how many functions compile and, for the
    rest, a histogram of *why* (each reason naming the slice that will unblock it).
@@ -11,21 +11,22 @@
    Preprocess first with spikes/cil/preprocess.sh (or gcc -E -std=gnu99). *)
 
 module C = GoblintCil
+open Doomcc_core
 
 let () =
   (* ---- args: preprocessed .i inputs, optional -o ---- *)
   let out = ref "doom.blob"
   and inputs = ref [] in
-  let rec args = function
+  let rec parse_args = function
     | "-o" :: o :: rest ->
       out := o;
-      args rest
+      parse_args rest
     | f :: rest ->
       inputs := f :: !inputs;
-      args rest
+      parse_args rest
     | [] -> ()
   in
-  args (List.tl (Array.to_list Sys.argv));
+  parse_args (List.tl (Array.to_list Sys.argv));
   let inputs = List.rev !inputs in
   if inputs = []
   then begin
@@ -33,12 +34,20 @@ let () =
     exit 2
   end;
   (* ---- (1) front end: parse each TU, amalgamate to one unit (the PureDOOM rename step) ---- *)
-  let units = List.map Backend.Frontend.parse_file inputs in
-  let merged = Backend.Frontend.merge units ~name:"doom" in
+  let units = List.map Frontend.parse_file inputs in
+  let merged = Frontend.merge units ~name:"doom" in
   Printf.printf "front:   merged %d translation unit(s)\n" (List.length units);
-  (* ---- (2)+(3) walk the merged unit: codegen each function; collect data/bss ----
-     compile_fundec is slice-1 (straight-line int leaves); the gate refuses the rest,
-     naming the slice that will handle it. (Globals: TODO 3b — data / bss / helpers.) *)
+  (* ---- (2) data/bss layout: every placeable global gets a DB-relative offset; the
+     unplaceable ones are skipped-with-reason and refuse per touching function ---- *)
+  let globals = Globals.from_file merged in
+  Printf.printf
+    "data:    %d globals placed, %d B data+bss image (DB-relative), %d skipped\n"
+    (Hashtbl.length globals.Globals.offsets)
+    (Bytes.length globals.Globals.image)
+    (Hashtbl.length globals.Globals.skipped);
+  (* ---- (3) walk the merged unit: compile each function ----
+     Fundec.compile covers the landed slices (straight-line, control flow, scalar
+     globals); Check refuses the rest, naming the slice that will handle it. *)
   let total = ref 0
   and ok = ref 0
   and rejected = ref 0
@@ -51,14 +60,14 @@ let () =
     match g with
     | C.GFun (fd, _) ->
       incr total;
-      (match Backend.Codegen.compile_fundec fd with
+      (match Fundec.compile ~globals fd with
        | instrs ->
          incr ok;
          n_instr := !n_instr + List.length instrs
-       | exception Backend.Codegen.Unsupported msg ->
+       | exception Check.Unsupported msg ->
          incr rejected;
          bump msg)
-    | C.GVar _ | C.GVarDecl _ -> () (* TODO(3b): data / bss / extern-helper resolution *)
+    | C.GVar _ | C.GVarDecl _ -> () (* handled by Globals above (GVarDecl-only = extern) *)
     | _ -> ());
   Printf.printf
     "codegen: %d functions — %d compiled (%d instrs), %d gate-refused\n"

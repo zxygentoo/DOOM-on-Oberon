@@ -1,12 +1,12 @@
 (* feat/cil-backend bring-up: emit -> encode -> run, through the vendored emulator.
 
    The plumbing proof: build Risc5_isa.instr lists by hand, encode them, and run them via
-   Backend.Runner (the shared emulator exec the differential jig also uses). Beyond the first
-   straight-line ADD, this pins — in isolation, before Backend.Codegen emits a single branch —
-   the branch mechanism the control-flow slice is built on: the PC-relative offset arithmetic
+   Runner (the jig's shared emulator exec, test-local). Beyond the first straight-line ADD,
+   this pins — in isolation, before Fundec emits a single branch — the branch mechanism the
+   control-flow slice is built on: the PC-relative offset arithmetic
    (off = target - branch - 1), signed-compare flags (Lt = N≠V, Le = (N≠V)|Z, from SUB), and
-   run-until-fall-off-the-end termination. The real CIL -> instr codegen lives in
-   Backend.Codegen and is exercised by test_codegen. *)
+   run-until-fall-off-the-end termination. The real CIL -> instr compilation lives in
+   doomcc_core's Fundec and is exercised by test_jig. *)
 
 module Isa = Emu.Risc5_isa
 
@@ -71,7 +71,7 @@ let () =
   (* straight-line ADD, incl. 32-bit wrap *)
   List.iter
     (fun (a, b) ->
-      check "ADD" [ a; b ] (Backend.Runner.run_leaf add [ a; b ]) (u32 (u32 a + u32 b)))
+      check "ADD" [ a; b ] (Runner.run_leaf add [ a; b ]) (u32 (u32 a + u32 b)))
     [ 2, 3; 0, 0; -1, 1; 0x7FFF_FFFF, 1; 0xFFFF_FFFF, 0xFFFF_FFFF; 123456, 654321 ];
   (* forward branches: signed select *)
   List.iter
@@ -79,7 +79,7 @@ let () =
       check
         "SELECT"
         [ a; b ]
-        (Backend.Runner.run_leaf select [ a; b ])
+        (Runner.run_leaf select [ a; b ])
         (if a < b then 111 else 222))
     [ 3, 5; 5, 3; 5, 5; -1, 0; 0, -1; -7, -3 ];
   (* backward branch: bounded loop, incl. n<=0 (immediate exit) *)
@@ -88,7 +88,7 @@ let () =
       check
         "LOOP"
         [ n ]
-        (Backend.Runner.run_leaf countdown [ n ])
+        (Runner.run_leaf countdown [ n ])
         (if n > 0 then n * (n + 1) / 2 else 0))
     [ 0; 1; 5; 10; 100; -3 ];
   Printf.printf

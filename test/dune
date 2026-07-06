@@ -1,6 +1,8 @@
-; Backend bring-up + the slice-1 differential jig.
-;   test_runner  : hand-built instr -> encode -> run (Backend.Runner plumbing proof, slice 0)
-;   test_codegen : compile small C leaves with OUR backend, run in the emulator, diff vs host gcc
+; The differential jig (AGENT.md §7/§9), both halves, + bring-up proofs.
+;   runner      : execution half — run a leaf body + data image in the vendored emulator
+;   test_runner : hand-built instr -> encode -> run (the runner's own plumbing proof)
+;   test_jig    : compile small C leaves with doomcc_core, run in the emulator, diff vs host gcc
+
 (tests
- (names test_runner test_codegen)
- (libraries emu backend unix))
+ (names test_runner test_jig)
+ (libraries emu doomcc_core unix))

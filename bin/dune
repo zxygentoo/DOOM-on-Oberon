@@ -4,4 +4,4 @@
 
 (executable
  (name doomcc)
- (libraries backend goblint-cil emu))
+ (libraries doomcc_core goblint-cil emu))
