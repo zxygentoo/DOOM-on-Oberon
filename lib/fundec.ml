@@ -27,7 +27,9 @@
    as a value (s5.1) materializes 0/1 by branching over two immediate loads — RISC5 has no
    set-on-condition; signed compares read the overflow-aware N≠V, unsigned and pointer compares
    the carry (s5.2). Unsigned [>>] (s5.2b) is ROR + mask — RISC5 has no logical shift right, so a
-   rotate then a mask of the low 32−n bits. Anything outside the supported subset raises
+   rotate then a mask of the low 32−n bits. switch / goto / break / continue (s5.3/s5.4) route
+   through per-statement backend labels: a switch is a compare-and-branch dispatch chain, goto and
+   continue a jump to a labeled statement. Anything outside the supported subset raises
    [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the later
    slice that will handle it. *)
 
@@ -77,7 +79,13 @@ type ctx =
   ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
   ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
   ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
-  ; mutable loops : (int * int) list (* enclosing loops: (continue=top, break) targets *)
+  ; mutable loops : (int option * int) list
+    (* enclosing loops/switches, innermost first: (continue target, break target). A loop has
+       both; a switch has only a break (its [None] continue passes through to the loop above).
+       [break] takes the nearest entry's break; [continue] the nearest with a continue. *)
+  ; stmt_labels : (int, int) Hashtbl.t
+    (* CIL stmt [sid] -> backend label, for statements that are jump targets (case/default in a
+       switch, or a goto/label). Find-or-create, so a forward jump and its target agree. *)
   ; func_end : int (* shared epilogue label every [return] branches to *)
   ; mutable max_used : reg
     (* highest register written (homes + scratch); the callee-saved
@@ -93,6 +101,18 @@ let new_label ctx =
 ;;
 
 let place ctx l = ctx.rev_frags <- L.Label l :: ctx.rev_frags
+
+(* The backend label for a CIL jump-target statement (case/default/goto target), keyed by its
+   stable [sid] so a forward jump and its later-placed target resolve to the same label. *)
+let label_of_stmt ctx (s : C.stmt) =
+  match Hashtbl.find_opt ctx.stmt_labels s.sid with
+  | Some l -> l
+  | None ->
+    let l = new_label ctx in
+    Hashtbl.replace ctx.stmt_labels s.sid l;
+    l
+;;
+
 let bcc ctx cond neg l = ctx.rev_frags <- L.Bcc (cond, neg, l) :: ctx.rev_frags
 let jmp ctx l = ctx.rev_frags <- L.Jmp l :: ctx.rev_frags
 let call ctx name = ctx.rev_frags <- L.Call name :: ctx.rev_frags
@@ -803,6 +823,10 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
 
 (* ---- statements ---- *)
 let rec gen_stmt ctx (s : C.stmt) =
+  (* a jump-target statement (a case/default in a switch, or a goto/label target) gets its
+     backend label placed here — once, ahead of its body. Dispatch and gotos reach it through
+     [label_of_stmt] on the same [sid], so forward references resolve (s5.3/s5.4). *)
+  if s.labels <> [] then place ctx (label_of_stmt ctx s);
   match s.skind with
   | C.Instr instrs -> List.iter (gen_instr ctx) instrs
   | C.Block b -> List.iter (gen_stmt ctx) b.bstmts
@@ -834,19 +858,72 @@ let rec gen_stmt ctx (s : C.stmt) =
     let l_top = new_label ctx in
     let l_break = new_label ctx in
     place ctx l_top;
-    ctx.loops <- (l_top, l_break) :: ctx.loops;
+    ctx.loops <- (Some l_top, l_break) :: ctx.loops;
     List.iter (gen_stmt ctx) body.bstmts;
     ctx.loops <- List.tl ctx.loops;
     jmp ctx l_top;
     place ctx l_break
+  | C.Switch (e, body, cases, _, _) ->
+    (* dispatch chain (a jump table is a later optimization): compare the switch value against
+       each case constant and branch to that case's statement label; then fall through to the
+       default (or past the switch). The case/default labels ride on the body statements and are
+       placed when the body is emitted, so fall-through is the natural statement order. break
+       exits to l_break; a switch offers no continue target — hence [None] on the stack. *)
+    let r = gen_expr ctx e in
+    let l_break = new_label ctx in
+    let default = ref None in
+    List.iter
+      (fun (cs : C.stmt) ->
+         let l = label_of_stmt ctx cs in
+         List.iter
+           (fun (lab : C.label) ->
+              match lab with
+              | C.Case (ve, _, _) ->
+                let v =
+                  match C.getInteger (C.constFold true ve) with
+                  | Some c -> C.Cilint.int_of_cilint c
+                  | None -> unsupported "non-constant case label — unexpected CIL shape"
+                in
+                let vr = alloc_scratch ctx in
+                load_const ctx vr v;
+                let s = alloc_scratch ctx in
+                emit ctx (alu R.Sub s r (R.Reg vr)) (* flags = switch - case; s is dead *);
+                free_scratch ctx s;
+                free_scratch ctx vr;
+                bcc ctx R.Eq false l (* switch == case -> that case *)
+              | C.Default _ -> default := Some l
+              | C.CaseRange _ -> unsupported "case ranges (GCC extension) — later slice"
+              | C.Label _ -> ())
+           cs.labels)
+      cases;
+    free_scratch ctx r;
+    (match !default with
+     | Some l -> jmp ctx l
+     | None -> jmp ctx l_break);
+    ctx.loops <- (None, l_break) :: ctx.loops;
+    List.iter (gen_stmt ctx) body.bstmts;
+    ctx.loops <- List.tl ctx.loops;
+    place ctx l_break
   | C.Break _ ->
     (match ctx.loops with
      | (_, l_break) :: _ -> jmp ctx l_break
-     | [] -> unsupported "break outside a loop — unexpected CIL shape")
+     | [] -> unsupported "break outside a loop/switch — unexpected CIL shape")
   | C.Continue _ ->
-    unsupported "continue — later slice (needs the for-loop increment continuation point)"
-  | C.Goto _ | C.ComputedGoto _ -> unsupported "goto — later slice"
-  | C.Switch _ -> unsupported "switch — later slice"
+    (* continue targets the nearest enclosing *loop* (a switch's [None] passes through). For a
+       CIL while/do loop that point is the loop top (re-test); a for-loop's continue was lowered
+       by CIL to a goto before the increment, so it arrives as Goto below, not here. *)
+    let rec loop_cont = function
+      | (Some c, _) :: _ -> jmp ctx c
+      | (None, _) :: rest -> loop_cont rest
+      | [] -> unsupported "continue outside a loop — unexpected CIL shape"
+    in
+    loop_cont ctx.loops
+  | C.Goto (target, _) ->
+    (* CIL Goto references its target statement; that statement's label is placed when it is
+       emitted (gen_stmt entry), so goto and target agree via [label_of_stmt] on the same sid —
+       forward or backward. This also carries CIL's lowered for-loop continue (goto the increment). *)
+    jmp ctx (label_of_stmt ctx !target)
+  | C.ComputedGoto _ -> unsupported "computed goto (GCC &&label) — later slice"
 ;;
 
 (* The call profile: [None] if the function is a leaf (makes no call), else [Some n] with n the
@@ -895,6 +972,24 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   List.iter
     (fun (v : C.varinfo) -> Check.check_unsupported_types v.vtype)
     (fd.sformals @ fd.slocals);
+  (* CIL leaves every stmt's [sid] at -1 until a CFG pass runs; we key jump-target labels
+     (case/default in a switch, goto targets) by sid, so number the statements ourselves. A
+     local numbering suffices — we don't need CIL's succs/preds. The switch [cases] list and
+     goto targets are the *same physical* statements as in the body, so numbering the body's
+     tree covers them, and a dispatch/goto sees the same sid the placement does. *)
+  let next_sid = ref 0 in
+  let rec number (s : C.stmt) =
+    s.sid <- !next_sid;
+    incr next_sid;
+    match s.skind with
+    | C.Block b | C.Loop (b, _, _, _, _) | C.Switch (_, b, _, _, _) ->
+      List.iter number b.bstmts
+    | C.If (_, t, e, _, _) ->
+      List.iter number t.bstmts;
+      List.iter number e.bstmts
+    | _ -> ()
+  in
+  List.iter number fd.sbody.bstmts;
   (* ABI §3: aggregates travel by hidden pointer / stack copy — call-slice machinery.
      A sub-word param arrives as a full word (caller / jig pass the raw int); every
      sub-word int is narrowed to its declared width at entry (below). *)
@@ -978,6 +1073,7 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     ; scratch_free = Array.make (max_reg + 1) true
     ; next_label = 1 (* label 0 is func_end *)
     ; loops = []
+    ; stmt_labels = Hashtbl.create 16
     ; func_end = 0
     ; max_used =
         !next - 1 (* the last home; scratch (and so the save set) grow from here *)

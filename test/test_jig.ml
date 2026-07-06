@@ -418,6 +418,43 @@ let samples =
   ; ( "unsigned usrmix(unsigned a){ return (a >> 8) & 0xFF; }"
     , "usrmix"
     , 1 (* the real byte-extract idiom: logical >> feeding a mask *) )
+    (* s5.3: switch — dispatch chain (compare vs each case, branch to its label), fall-through
+       as natural statement order, break exits, default catches the rest. x is masked so the
+       full-range args land on real cases / the default. *)
+  ; ( "int sw1(int x){ x &= 3; int r = 0; switch (x) { case 0: r = 10; break; case 1: r \
+       = 20; break; case 2: r = 30; break; default: r = 99; } return r; }"
+    , "sw1"
+    , 1 (* one case each + default → 10 / 20 / 30 / 99 *) )
+  ; ( "int swf(int x){ x &= 3; int r = 0; switch (x) { case 0: r += 1; case 1: r += 10; \
+       case 2: r += 100; break; default: r = 999; } return r; }"
+    , "swf"
+    , 1 (* fall-through (no break between cases): 111 / 110 / 100 / 999 *) )
+  ; ( "int swd(int x){ x &= 7; switch (x) { case 1: case 2: return 12; case 5: return 5; \
+       default: return 0; } }"
+    , "swd"
+    , 1 (* shared case labels + return inside the switch → 12 / 5 / 0 *) )
+  ; ( "int swnb(int x){ x &= 3; int r = 7; switch (x) { case 1: r = 100; break; case 2: \
+       r = 200; break; } return r; }"
+    , "swnb"
+    , 1 (* no default: unmatched values fall straight past to break → 7 *) )
+    (* s5.4: continue + goto, both jumps to a labeled statement (the s5.3 label map). CIL keeps
+       a while/do continue as C.Continue (→ loop top); it lowered the for-loop continue to a goto
+       before the increment; goto itself is forward or backward to any labeled statement. *)
+  ; ( "int wc(int n){ n &= 15; int s = 0, i = 0; while (i < n) { i++; if (i == 3) \
+       continue; s += i; } return s; }"
+    , "wc"
+    , 1 (* while continue (→ loop top): sum 1..n except 3 *) )
+  ; ( "int fc(int n){ n &= 7; int s = 0, i = 0; for (i = 0; i < n; i++) { if (i == 2) \
+       continue; s += i; } return s; }"
+    , "fc"
+    , 1 (* for continue: CIL lowered it to a goto before i++ → sum 0..n-1 except 2 *) )
+  ; ( "int gt(int x){ int s = 0; if (x < 0) goto done; s = x * 2; done: return s + 1; }"
+    , "gt"
+    , 1 (* forward goto skipping code → (x<0 ? 0 : 2x) + 1 *) )
+  ; ( "int gtb(int n){ n &= 7; int s = 0, i = 0; top: if (i < n) { s += i; i++; goto \
+       top; } return s; }"
+    , "gtb"
+    , 1 (* backward goto = a hand-rolled loop → sum 0..n-1 *) )
   ]
 ;;
 
@@ -441,9 +478,6 @@ let rejects =
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
   ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
-  ; ( "int cn(int n){ n&=7; int s=0,i=0; for(i=0;i<n;i++){ if(i==2) continue; s+=i; } \
-       return s; }"
-    , "cn" (* continue → CIL lowers it to a goto — later *) )
   ]
 ;;
 
