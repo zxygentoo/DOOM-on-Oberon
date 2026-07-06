@@ -1031,13 +1031,12 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     | C.TComp _ | C.TArray _ -> true
     | _ -> false
   in
-  let alloc_slot (v : C.varinfo) =
-    if needs_slot v
-    then (
-      Hashtbl.replace slots v.vid !locals_size;
-      (* round each slot up to a word so the next stays 4-aligned (ABI §4) *)
-      locals_size := !locals_size + (((C.bitsSizeOf v.vtype / 8) + 3) land lnot 3))
+  let add_slot (v : C.varinfo) =
+    Hashtbl.replace slots v.vid !locals_size;
+    (* round each slot up to a word so the next stays 4-aligned (ABI §4) *)
+    locals_size := !locals_size + (((C.bitsSizeOf v.vtype / 8) + 3) land lnot 3)
   in
+  let alloc_slot (v : C.varinfo) = if needs_slot v then add_slot v in
   List.iter alloc_slot fd.sformals;
   List.iter alloc_slot fd.slocals;
   (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
@@ -1046,18 +1045,39 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   let homes = Hashtbl.create 16 in
   let next = ref home_base in
   let assign (v : C.varinfo) =
-    if !next > max_reg
-    then
-      unsupported
-        "too many params+locals for naive alloc (>%d regs) — needs spilling"
-        (max_reg - home_base + 1);
     Hashtbl.replace homes v.vid !next;
     incr next
   in
-  List.iter assign fd.sformals;
-  (* slotted locals live in memory, not a register — skip them here *)
+  (* Params are always homed: a spilled param needs its incoming value stored to its slot in the
+     prologue (a prologue-store extension) — deferred. More params than homes still refuses. *)
   List.iter
-    (fun (v : C.varinfo) -> if not (Hashtbl.mem slots v.vid) then assign v)
+    (fun (v : C.varinfo) ->
+       if !next > max_reg
+       then
+         unsupported
+           "too many params (>%d homes) for naive alloc — param spilling deferred"
+           (max_reg - home_base + 1);
+       assign v)
+    fd.sformals;
+  (* Locals: a register home while they fit, else SPILL to a frame slot (naive local allocation,
+     §4 rung 1). A spilled local is just a slotted local — the s4.3 memory routing already
+     loads/stores it on use, and its slot is its single canonical location, so control-flow
+     merges need no reconciliation (exactly like a register home). Non-leaf only: its scratch
+     pool is fixed at R0-R5 regardless of how many homes we use, so spilling never starves
+     expression evaluation. A leaf grows scratch *above* its homes, so leaf spilling needs a
+     scratch reservation first — deferred (and only 10 functions). *)
+  List.iter
+    (fun (v : C.varinfo) ->
+       if not (Hashtbl.mem slots v.vid)
+       then
+         if !next <= max_reg
+         then assign v
+         else if leaf
+         then
+           unsupported
+             "too many params+locals (>%d regs) — leaf spilling deferred"
+             (max_reg - home_base + 1)
+         else add_slot v)
     fd.slocals;
   let scratch_lo, scratch_hi =
     if leaf then !next, max_reg else 0, first_callee_saved - 1

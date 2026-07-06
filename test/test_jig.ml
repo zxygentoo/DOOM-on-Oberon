@@ -455,6 +455,29 @@ let samples =
        top; } return s; }"
     , "gtb"
     , 1 (* backward goto = a hand-rolled loop → sum 0..n-1 *) )
+    (* spilling (§4 rung 1): a non-leaf with >6 register variables — the first 6 take the
+       callee-saved homes R6-R11, the rest spill to frame slots. The values are computed before
+       a call and read after, so each must survive it (a home is callee-saved, a slot is memory —
+       both do); the result folds all of them in, so a dropped or aliased spill shows in R0. Each
+       sample inlines its callee so the whole source is one translation unit (both sides). *)
+  ; ( "int addc(int x, int y){ return x + y; } int many(int a, int b){ int t0 = a, t1 = \
+       a + b, t2 = a - b, t3 = a * 2, t4 = b * 2, t5 = a + 1, t6 = b + 1, t7 = a ^ b, t8 \
+       = a & b, t9 = a | b; int s = addc(t0, t1); return s + t2 + t3 + t4 + t5 + t6 + t7 \
+       + t8 + t9; }"
+    , "many"
+    , 2 (* 2 params + 11 locals = 13 reg vars → 7 spill; all live across addc *) )
+  ; ( "int idc(int x){ return x; } int sloop(int n){ n &= 7; int a = 1, b = 2, c = 3, d \
+       = 4, e = 5, f = 6, g = 7, h = 8; int i = 0, s = 0; for (i = 0; i < n; i++){ s += \
+       idc(a + b + c + d + e + f + g + h) + i; } return s; }"
+    , "sloop"
+    , 1 (* spilled locals live across a call *inside a loop* → n*36 + sum(0..n-1) *) )
+  ; ( "int rd(int *p){ return *p; } int mixs(int a, int b){ int box = a * 3; int t0 = a, \
+       t1 = b, t2 = a + b, t3 = a - b, t4 = a | b, t5 = a & b, t6 = a ^ b, t7 = a + 1; \
+       int s = rd(&box); return s + t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7; }"
+    , "mixs"
+    , 2
+      (* an address-taken slot (box, s4.3) and spilled-local slots share the locals region *)
+    )
   ]
 ;;
 
