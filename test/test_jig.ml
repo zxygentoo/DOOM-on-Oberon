@@ -268,6 +268,38 @@ let samples =
     , "fib"
     , 1 (* recursion: each frame's n survives both self-calls; masked so it terminates *)
     )
+    (* s4.2: a callee with >4 params reads args 5+ off the frame — FP = entry SP (ABI §3), so
+       the Runner (caller) puts args 1-4 in R0-R3 and args 5+ on the stack at SP+16.., and the
+       callee loads them from FP+16.. into their homes. *)
+  ; ( "int sum6(int a,int b,int c,int d,int e,int f){ return a+b+c+d+e+f; }"
+    , "sum6"
+    , 6 (* leaf, 6 params: e,f arrive on the stack; leaf+FP frame *) )
+  ; ( "int side(int x){ return x; } int nl5(int a,int b,int c,int d,int e){ return \
+       side(a) + b + c + d + e; }"
+    , "nl5"
+    , 5
+      (* non-leaf, 5 params: e on the stack, homes R6-R11, FP+LNK frame, a <=4-arg call *)
+    )
+    (* s4.2 step 2: a caller with >4 args stages args 5+ past the home area (SP+16..) and BLs;
+       the callee reads them back at FP+16.. — a full round-trip through our own code, diffed
+       vs gcc. u5: one stack arg (add5 leaf callee); u6: two stack args, position-weighted so a
+       mis-ordered slot would show up. *)
+  ; ( "int add5(int a,int b,int c,int d,int e){ return a+b+c+d+e; } int u5(int x){ \
+       return add5(x, x+1, x+2, x+3, x+4); }"
+    , "u5"
+    , 1 (* 5-arg call: one stack arg at SP+16; add5 is a leaf+FP callee *) )
+  ; ( "int take6(int a,int b,int c,int d,int e,int f){ return a + b*2 + c*3 + d*4 + e*5 \
+       + f*6; } int u6(int x){ return take6(x, x+1, x+2, x+3, x+4, x+5); }"
+    , "u6"
+    , 1 (* 6-arg call: two stack args (SP+16, SP+20); outgoing area = 24 *) )
+  ; ( "int add5(int a,int b,int c,int d,int e){ return a+b+c+d+e; } int both5(int a,int \
+       b,int c,int d,int e){ return add5(e,d,c,b,a) + a; }"
+    , "both5"
+    , 5
+      (* both mechanisms in one frame: reads its own stack param e (FP+16) AND passes a stack
+         arg to add5 (SP+16) — incoming (above FP) and outgoing (near SP) areas are disjoint;
+         the reversed arg order would surface a misplaced slot *)
+    )
   ]
 ;;
 
@@ -280,8 +312,6 @@ let rejects =
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
   ; ( "int callptr(int (*fp)(int), int x){ return fp(x); }"
     , "callptr" (* indirect call (function pointer) — later slice *) )
-  ; ( "extern int va(int,int,int,int,int); int u5(int x){ return va(x,x,x,x,x); }"
-    , "u5" (* >4 call args (stack args) — s4.2 *) )
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
     , "usemk" (* aggregate return (hidden pointer) — s4.4 *) )

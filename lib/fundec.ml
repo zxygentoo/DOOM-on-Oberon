@@ -14,7 +14,10 @@
    writes and returns through [B LNK] (ABI §3). Calls (s4.1b): a caller marshals args through
    the home area into R0-R3 and BLs the named callee; a *non-leaf* keeps its homes in
    callee-saved R6-R11 (they survive the call) and scratch in R0-R5, while a leaf keeps homes
-   R0.. (a zero-cost frame when it touches only R0-R5). Anything outside the supported subset
+   R0.. (a zero-cost frame when it touches only R0-R5). Stack args (s4.2): a callee with >4
+   params sets FP = entry SP and loads args 5+ from FP+16.. into their homes; a caller with >4
+   args stages them past the home area (SP+16..) and sizes its outgoing area to the widest call
+   it makes (ABI §3). Anything outside the supported subset
    raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message names
    the later slice that will handle it. *)
 
@@ -38,6 +41,10 @@ let max_reg = 11
 
 let first_callee_saved =
   6 (* R6-R11 are callee-saved (ABI §2): save exactly what we write *)
+;;
+
+let fp_reg =
+  12 (* FP = entry SP; anchors incoming stack args at FP+16.. (ABI §2/§3, s4.2) *)
 ;;
 
 let db_reg = 13 (* DB, the data base: set by crt0 (runner, in the jig), never written *)
@@ -544,12 +551,14 @@ let gen_instr ctx (i : C.instr) =
     gen_store ctx lv r;
     free_scratch ctx r
   | C.Call (lvopt, fexp, args, _, _) ->
-    (* Direct call to a named function; ≤4 scalar args in R0-R3, scalar/void return in R0
-       (ABI §3). Marshal through the outgoing home area: evaluate each arg with the full
-       scratch pool, STW it to SP+4i, then LDW R0..R3 — evaluation and register placement
-       decouple, so no half-loaded arg register is clobbered mid-setup (and the home area
-       is left populated, which is exactly what a ≤4-arg varargs callee expects). This
-       function makes a call, so it is non-leaf: homes are R6-R11, scratch R0-R5. *)
+    (* Direct call to a named function; args 1-4 in R0-R3, args 5+ on the stack, scalar/void
+       return in R0 (ABI §3). Marshal through the outgoing area: evaluate each arg with the
+       full scratch pool and STW it to SP+4i, then LDW R0-R3 from the first four slots.
+       Evaluation and register placement decouple, so no half-loaded arg register is clobbered
+       mid-setup; args 5+ stay where the stores left them (SP+16.., the callee's FP+16..), and
+       the home area is left populated — what a ≤4-arg varargs callee expects. This function
+       makes a call, so it is non-leaf: homes R6-R11, scratch R0-R5; [compile] sizes the
+       outgoing area to the widest call it makes. *)
     let callee =
       match fexp with
       | C.Lval (C.Var f, C.NoOffset)
@@ -566,7 +575,6 @@ let gen_instr ctx (i : C.instr) =
         | C.TFloat _ -> unsupported "float return (ABI §4: banned)"
         | _ -> ())
      | _ -> ());
-    if List.length args > 4 then unsupported ">4 call args (stack args — s4.2)";
     List.iter
       (fun a ->
          match C.unrollType (C.typeOf a) with
@@ -581,8 +589,10 @@ let gen_instr ctx (i : C.instr) =
          emit ctx (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i });
          free_scratch ctx r)
       args;
+    (* the first four slots become the register args; args 5+ stay on the stack at SP+16.. *)
     List.iteri
-      (fun i _ -> emit ctx (R.Load { size = R.W; a = i; base = sp_reg; off = 4 * i }))
+      (fun i _ ->
+         if i < 4 then emit ctx (R.Load { size = R.W; a = i; base = sp_reg; off = 4 * i }))
       args;
     call ctx callee.vname;
     (match lvopt with
@@ -691,17 +701,26 @@ let rec gen_stmt ctx (s : C.stmt) =
   | C.Switch _ -> unsupported "switch — later slice"
 ;;
 
-(* Does the body contain a call? A non-leaf clobbers LNK (BL writes it) and needs its live
-   values to survive calls, so its homes move to callee-saved R6-R11 (ABI §2) and it saves
-   LNK. CIL statements nest only through these skinds. *)
-let makes_call (fd : C.fundec) : bool =
-  let found = ref false in
+(* The call profile: [None] if the function is a leaf (makes no call), else [Some n] with n the
+   widest argument count across its calls. A non-leaf clobbers LNK (BL writes it) and needs its
+   live values to survive calls, so its homes move to callee-saved R6-R11 (ABI §2), it saves
+   LNK, and it reserves a 4·max(4,n)-byte outgoing area — the 16-byte home area for R0-R3, plus
+   a slot per stack arg 5+ (ABI §3). CIL statements nest only through these skinds. *)
+let call_arity (fd : C.fundec) : int option =
+  let widest = ref None in
+  let note n =
+    widest
+    := Some
+         (match !widest with
+          | None -> n
+          | Some k -> max k n)
+  in
   let rec scan (s : C.stmt) =
     match s.skind with
     | C.Instr instrs ->
       List.iter
         (function
-          | C.Call _ -> found := true
+          | C.Call (_, _, args, _, _) -> note (List.length args)
           | _ -> ())
         instrs
     | C.Block b -> List.iter scan b.bstmts
@@ -713,7 +732,7 @@ let makes_call (fd : C.fundec) : bool =
     | _ -> ()
   in
   List.iter scan fd.sbody.bstmts;
-  !found
+  !widest
 ;;
 
 (* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
@@ -742,8 +761,11 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
          unsupported "aggregate param (stack copy, ABI §3) — call slice"
        | _ -> ())
     fd.sformals;
-  if List.length fd.sformals > 4 then unsupported ">4 params (stack args — call slice)";
-  let leaf = not (makes_call fd) in
+  let call_info = call_arity fd in
+  let leaf = call_info = None in
+  (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and reads
+     them at FP+16.. (below). The naive-alloc register ceiling still applies via [assign]. *)
+  let needs_fp = List.length fd.sformals > 4 in
   (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
      R0-R5. Leaf: today's model — homes R0.., scratch above them. *)
   let home_base = if leaf then 0 else first_callee_saved in
@@ -795,32 +817,46 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
   (* The frame (ABI §3). Callee-saved regs written = R[6..max_used] (contiguous: homes then,
      for a leaf, scratch — both fill upward). A non-leaf also saves LNK (BL clobbers it) and
-     reserves the 16-byte outgoing home area at SP+0 for the calls it makes; the saves sit
-     above that area, LNK topmost. A pure leaf touching only R0-R5 gets frame = 0 (no
-     SUB/ADD SP, just [B LNK]). *)
+     reserves an outgoing area at SP+0 for the calls it makes — the 16-byte home area for
+     R0-R3 plus a slot per outgoing stack arg 5+, sized to the widest call ([call_info]); the
+     saves sit above that area, LNK topmost. A pure leaf touching only R0-R5 gets frame = 0
+     (no SUB/ADD SP, just [B LNK]). *)
   let saved =
     List.init
       (max 0 (ctx.max_used - first_callee_saved + 1))
       (fun i -> first_callee_saved + i)
   in
-  let home_area = if leaf then 0 else 16 in
-  let lnk_off = home_area + (4 * List.length saved) in
+  let outgoing_area =
+    match call_info with
+    | None -> 0
+    | Some n -> 4 * max 4 n
+  in
+  let saves_end = outgoing_area + (4 * List.length saved) in
+  (* slots above the saves: FP (needs_fp), then LNK (non-leaf), matching the ABI §3 idiom *)
+  let fp_off = saves_end in
+  let lnk_off = saves_end + if needs_fp then 4 else 0 in
   let frame = lnk_off + if leaf then 0 else 4 in
   (* epilogue at func_end: restore saves (+ LNK for a non-leaf), drop the frame, B LNK *)
   place ctx ctx.func_end;
   List.iteri
     (fun i r ->
-       emit ctx (R.Load { size = R.W; a = r; base = sp_reg; off = home_area + (4 * i) }))
+       emit
+         ctx
+         (R.Load { size = R.W; a = r; base = sp_reg; off = outgoing_area + (4 * i) }))
     saved;
+  if needs_fp
+  then emit ctx (R.Load { size = R.W; a = fp_reg; base = sp_reg; off = fp_off });
   if not leaf
   then emit ctx (R.Load { size = R.W; a = lnk_reg; base = sp_reg; off = lnk_off });
   if frame > 0 then emit ctx (alu R.Add sp_reg sp_reg (R.Imm frame));
   emit
     ctx
     (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg lnk_reg });
-  (* prologue: open the frame, save callee-saved (+ LNK), then (non-leaf) move the incoming
-     args R0-R3 into their R6-R11 homes — after the saves, which preserve the caller's
-     R6-R11. Leaf params already sit in their homes (R0..). *)
+  (* prologue: open the frame; save callee-saved (+ FP if needs_fp, + LNK if non-leaf); set
+     FP = entry SP so incoming stack args land at FP+16..; then place params into their homes.
+     The saves run first, preserving the caller's R6-R11/FP before we overwrite them. Params:
+     args 1-4 move from R0-R3 (a non-leaf's homes; a leaf's already sit there), args 5+ (s4.2)
+     load from the frame at FP+16.. — the caller staged them there at the BL (ABI §3). *)
   let prologue =
     if frame = 0
     then []
@@ -829,23 +865,37 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
         List.mapi
           (fun i r ->
              L.Ins
-               (R.Store { size = R.W; a = r; base = sp_reg; off = home_area + (4 * i) }))
+               (R.Store
+                  { size = R.W; a = r; base = sp_reg; off = outgoing_area + (4 * i) }))
           saved
+      in
+      let fp_setup =
+        if needs_fp
+        then
+          [ L.Ins (R.Store { size = R.W; a = fp_reg; base = sp_reg; off = fp_off })
+          ; L.Ins (alu R.Add fp_reg sp_reg (R.Imm frame)) (* FP = SP + frame = entry SP *)
+          ]
+        else []
       in
       let lnk_save =
         if leaf
         then []
         else [ L.Ins (R.Store { size = R.W; a = lnk_reg; base = sp_reg; off = lnk_off }) ]
       in
-      let param_moves =
-        if leaf
-        then []
-        else
-          List.mapi
-            (fun i (v : C.varinfo) -> L.Ins (mov_reg (Hashtbl.find homes v.vid) i))
-            fd.sformals
+      let param_setup =
+        List.concat
+          (List.mapi
+             (fun i (v : C.varinfo) ->
+                let h = Hashtbl.find homes v.vid in
+                if i < 4
+                then if leaf then [] else [ L.Ins (mov_reg h i) ]
+                else [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ])
+             fd.sformals)
       in
-      (L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame)) :: saves) @ lnk_save @ param_moves)
+      (L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame)) :: saves)
+      @ fp_setup
+      @ lnk_save
+      @ param_setup)
   in
   { L.name = fd.svar.vname; frags = prologue @ List.rev ctx.rev_frags }
 ;;

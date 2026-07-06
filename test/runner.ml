@@ -53,7 +53,14 @@ let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
   let stop = code_base + List.length body in
   regs.(15) <- stop * 4;
   List.iter (fun r -> regs.(r) <- sentinel r) callee_saved;
-  List.iteri (fun i v -> regs.(i) <- v land 0xFFFF_FFFF) args;
+  (* args 1-4 in R0-R3; args 5+ on the stack at SP+4i (ABI §3, s4.2). Entry SP = stack_top, so
+     the callee reads arg i at FP+4i = stack_top+4i — words just above SP, in the notional
+     caller's frame (clear of the descending stack, the code, and the data segment). *)
+  List.iteri
+    (fun i v ->
+       let v = v land 0xFFFF_FFFF in
+       if i < 4 then regs.(i) <- v else ram.((stack_top / 4) + i) <- v)
+    args;
   M.For_tests.set_pc m code_base;
   let rec loop n =
     if M.For_tests.pc m >= stop
