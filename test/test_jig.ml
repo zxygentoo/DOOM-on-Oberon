@@ -365,6 +365,25 @@ let samples =
        s2 = s1; return s2.a + x; }"
     , "cpg"
     , 1 (* global struct copy: both sides DB-relative → 1 + x (was a reject pre-s4.4) *) )
+    (* s5.1: a comparison or ! as a 0/1 *value* (not a branch) — materialized by branching over
+       two immediate loads (no set-on-condition on RISC5). All six relops exercise the rel_cond
+       (cond, neg) mapping; a flipped neg would invert the result, which the full-range args
+       (incl. INT_MIN/MAX, where signed compare must still hold through SUB overflow) catch. *)
+  ; "int ltv(int a,int b){ return a < b; }", "ltv", 2
+  ; "int gtv(int a,int b){ return a > b; }", "gtv", 2
+  ; "int lev(int a,int b){ return a <= b; }", "lev", 2
+  ; "int gev(int a,int b){ return a >= b; }", "gev", 2
+  ; "int eqv(int a,int b){ return a == b; }", "eqv", 2
+  ; "int nev(int a,int b){ return a != b; }", "nev", 2
+  ; "int lnot(int x){ return !x; }", "lnot", 1 (* !x = (x == 0) *)
+  ; ( "int notnot(int x){ return !!x; }"
+    , "notnot"
+    , 1 (* boolean-normalize any nonzero → 1 *) )
+  ; ( "int cmix(int a,int b){ return (a > b) * 100 + (a < b) * 10 + (a == b); }"
+    , "cmix"
+    , 2
+      (* materialized bools as arithmetic operands; trichotomy → exactly 100, 10, or 1 *)
+    )
   ]
 ;;
 
@@ -388,7 +407,6 @@ let rejects =
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
   ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
-  ; "int cv(int a,int b){ return a < b; }", "cv" (* compare as a value — later slice *)
   ; ( "int uc(unsigned a,unsigned b){ if (a < b) return 1; return 0; }"
     , "uc" (* unsigned ordered — later *) )
   ; ( "int cn(int n){ n&=7; int s=0,i=0; for(i=0;i<n;i++){ if(i==2) continue; s+=i; } \

@@ -23,9 +23,10 @@
    memory calculus a global does, based at the slot instead of DB; an address-taken param keeps
    its register home and the prologue spills it into the slot. A whole-struct assignment (s4.4) is a
    byte-wise memory copy — alignment-agnostic, since these structs are often sub-word-aligned; by-value
-   struct args and returns never occur in DOOM (census) and stay refused. Anything outside the
-   supported subset raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message
-   names the later slice that will handle it. *)
+   struct args and returns never occur in DOOM (census) and stay refused. A comparison or [!] used
+   as a value (s5.1) materializes 0/1 by branching over two immediate loads — RISC5 has no
+   set-on-condition. Anything outside the supported subset raises [Check.Unsupported] — refuse to
+   miscompile rather than guess. Each message names the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
@@ -257,10 +258,14 @@ let binop_instr op rd b c : R.instr =
   | C.Shiftrt -> rr R.Asr (* arithmetic; the unsigned case is guarded in gen_expr *)
   | C.Div | C.Mod ->
     unsupported "/ and %% lower to __div/__mod calls (ABI §5) — call slice"
-  | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne | C.LAnd | C.LOr ->
-    (* a comparison used as a *value* (x = a < b) needs 0/1 materialization — later slice.
-       As an if/loop condition it never reaches here: gen_cond intercepts it. *)
-    unsupported "comparison as a value (0/1 materialization) — later slice"
+  | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne ->
+    (* a comparison never reaches the two-register builder: as a value gen_expr intercepts it
+       (bool_from_flags, s5.1), as a condition gen_cond does *)
+    unsupported "comparison — internal error (should be intercepted upstream)"
+  | C.LAnd | C.LOr ->
+    (* CIL lowers && / || in both value and condition contexts to control flow (a temp + if),
+       so these two rarely survive as a BinOp; if one does, it's a later slice *)
+    unsupported "short-circuit && / || as a value — later slice"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
     (* pointer arithmetic needs the pointee size to scale — gen_expr intercepts it
        (gen_ptr_arith) before this two-register builder is ever reached *)
@@ -291,6 +296,39 @@ let narrow_home ctx h ~bits ~signed =
     emit ctx (alu R.Lsl h h (R.Imm sh));
     emit ctx (alu R.Asr h h (R.Imm sh)))
   else emit ctx (alu R.And h h (R.Imm ((1 lsl bits) - 1)))
+;;
+
+(* A C relational op -> the RISC5 (cond, neg) that HOLDS iff [a op b] is true, given the flags
+   from SUB a,b. Signed: Lt = N≠V, Le = (N≠V)|Z, Eq = Z. Ordered ops are signed-only for now
+   (unsigned < / <= need the carry conditions — s5.2); ==/!= are sign-agnostic. Shared by the
+   value form (bool_from_flags, below) and the branch form (gen_cond). *)
+let rel_cond (op : C.binop) : (R.cond * bool) option =
+  match op with
+  | C.Eq -> Some (R.Eq, false)
+  | C.Ne -> Some (R.Eq, true)
+  | C.Lt -> Some (R.Lt, false)
+  | C.Ge -> Some (R.Lt, true)
+  | C.Le -> Some (R.Le, false)
+  | C.Gt -> Some (R.Le, true)
+  | _ -> None
+;;
+
+(* Materialize a comparison's truth as a 0/1 value (s5.1). RISC5 has no set-on-condition, so
+   branch over two immediate loads; [tcond]/[tneg] (from [rel_cond]) is the condition that HOLDS
+   iff the comparison is true, with the flags already set by the caller's SUB. [d] is allocated
+   only after the operands are freed, so it never widens the operands' live range — register
+   pressure is the top naive-alloc blocker. *)
+let bool_from_flags ctx (tcond : R.cond) (tneg : bool) : reg =
+  let d = alloc_scratch ctx in
+  let l_true = new_label ctx in
+  let l_end = new_label ctx in
+  bcc ctx tcond tneg l_true;
+  load_const ctx d 0;
+  jmp ctx l_end;
+  place ctx l_true;
+  load_const ctx d 1;
+  place ctx l_end;
+  d
 ;;
 
 (* ---- expressions: emit code computing [e], return the register holding its value ---- *)
@@ -328,6 +366,28 @@ let rec gen_expr ctx (e : C.exp) : reg =
   | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
+  | C.BinOp (((C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne) as op), e1, e2, t) ->
+    (* a comparison as a *value* (s5.1): x = a < b, return a == b, !!p (CIL: p != 0), … — SUB
+       for the flags, then materialize 0/1. As an if/loop condition it goes through gen_cond
+       instead. Ordered unsigned compares defer to s5.2 (same guard as gen_cond). *)
+    Check.check_unsupported_types t;
+    (match op with
+     | (C.Lt | C.Gt | C.Le | C.Ge) when is_unsigned_int (C.typeOf e1) ->
+       unsupported "unsigned ordered comparison — needs carry conditions, later slice"
+     | _ -> ());
+    let tcond, tneg =
+      match rel_cond op with
+      | Some c -> c
+      | None -> assert false (* the six relational ops all map *)
+    in
+    let r1 = gen_expr ctx e1 in
+    let r2 = gen_expr ctx e2 in
+    let s = alloc_scratch ctx in
+    emit ctx (alu R.Sub s r1 (R.Reg r2)) (* flags = e1 - e2; s is dead *);
+    free_scratch ctx s;
+    free_scratch ctx r1;
+    free_scratch ctx r2;
+    bool_from_flags ctx tcond tneg
   | C.BinOp (op, e1, e2, t) ->
     Check.check_unsupported_types t;
     let r1 = gen_expr ctx e1 in
@@ -361,7 +421,15 @@ and gen_unop ctx op e' =
     free_scratch ctx m;
     free_scratch ctx r;
     rd
-  | C.LNot -> unsupported "logical ! (0/1 materialization) — later slice"
+  | C.LNot ->
+    (* !x is (x == 0) as a 0/1 value (s5.1): set flags from x (MOV sets N/Z), then materialize
+       the Eq condition. Works for any scalar — int, char, pointer — since all test against 0. *)
+    let r = gen_expr ctx e' in
+    let s = alloc_scratch ctx in
+    emit ctx (mov_reg s r) (* flags: Z = (x == 0); s is dead *);
+    free_scratch ctx s;
+    free_scratch ctx r;
+    bool_from_flags ctx R.Eq false
 
 (* Narrowing cast to a sub-word type, used as a *value*: e.g. (char)x, (short)x, or the
    coercion CIL inserts on a sub-word assignment / return. Unsigned masks to the low
@@ -667,20 +735,6 @@ let gen_instr ctx (i : C.instr) =
 ;;
 
 (* ---- conditions: branch to [false_label] when [cond] is false, else fall through ---- *)
-
-(* A C relational op -> the RISC5 (cond, neg) that HOLDS iff [a op b] is true, given the flags
-   from SUB a,b. Signed: Lt = N≠V, Le = (N≠V)|Z, Eq = Z. Ordered ops are signed-only for now
-   (unsigned < / <= need the carry conditions — a later slice); ==/!= are sign-agnostic. *)
-let rel_cond (op : C.binop) : (R.cond * bool) option =
-  match op with
-  | C.Eq -> Some (R.Eq, false)
-  | C.Ne -> Some (R.Eq, true)
-  | C.Lt -> Some (R.Lt, false)
-  | C.Ge -> Some (R.Lt, true)
-  | C.Le -> Some (R.Le, false)
-  | C.Gt -> Some (R.Le, true)
-  | _ -> None
-;;
 
 let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   (* fallback: treat [cond] as a value, false iff zero (the register write sets Z) *)
