@@ -884,12 +884,16 @@ let gen_instr ctx (i : C.instr) =
        ->
        let h = home ctx v in
        if h <> return_reg then emit ctx (mov_reg h return_reg)
-     | Some (C.Var v, C.NoOffset) when not v.vglob ->
-       gen_store
-         ctx
-         (C.Var v, C.NoOffset)
-         return_reg (* result into a slotted local (s4.3) *)
-     | Some _ -> unsupported "call result to a non-local lval — later slice")
+     | Some lv ->
+       (* Any memory destination — a slotted local, a global, *p, s.f, arr[i]. The result
+          sits in R0: the lowest-numbered scratch, exactly what the destination's address
+          calculus would allocate first (or what a division inside an index expression
+          would clobber). Claim it as a busy scratch for the store's duration — gen_addr
+          then allocates from R1 up, and a helper call inside the lval (arr[x % 4] = f(..))
+          saves and restores R0 through the div-area protocol like any live value. *)
+       ctx.scratch_free.(return_reg) <- false;
+       gen_store ctx lv return_reg;
+       free_scratch ctx return_reg)
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
 ;;

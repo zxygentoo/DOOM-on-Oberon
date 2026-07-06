@@ -660,6 +660,32 @@ let samples =
        i){ return nsc + i; }"
     , "fxn"
     , 1 (* negative: -45875.2 truncates toward zero → -45875, not floor's -45876 *) )
+    (* call result to a memory lval: the result sits in R0 — the lowest scratch, exactly
+       what the destination's address calculus would grab first — so the store claims R0
+       busy while gen_addr runs. Destinations: global, deref, field, array, sub-word. *)
+  ; ( "int cgv; int idg(int x){ return x * 3; } int cres(int i){ cgv = idg(i); return \
+       cgv + 1; }"
+    , "cres"
+    , 1 (* plain global destination: g = f(i) stays a direct Call(Some g) — no CIL temp *)
+    )
+  ; ( "int idp(int x){ return x - 5; } int cptr2(int i){ int x = 0; int *p = &x; *p = \
+       idp(i); return x; }"
+    , "cptr2"
+    , 1 (* deref destination: *p = f(i) — the pointer loads into a scratch above R0 *) )
+  ; ( "struct cpt { int x; int y; }; struct cpt gcp = {3, 0}; int idq(int x){ return x ^ \
+       7; } int cfld(int i){ gcp.y = idq(i); return gcp.y + gcp.x; }"
+    , "cfld"
+    , 1 (* field destination: constant residual, general path *) )
+  ; ( "int cga[4]; int ida(int x){ return x + 9; } int cidx(int i){ cga[(i & 0x7FFF) % \
+       4] = ida(i); return cga[(i & 0x7FFF) % 4]; }"
+    , "cidx"
+    , 1
+      (* THE composition test: a __mod call inside the destination index while R0 holds \
+           the result — the div-area protocol saves/restores the claimed R0 *)
+    )
+  ; ( "char cgc; int idc2(int x){ return x; } int cch(int i){ cgc = idc2(i); return cgc; }"
+    , "cch"
+    , 1 (* sub-word destination: STB truncates, LDB re-widens — mod-256 both sides *) )
   ]
 ;;
 
