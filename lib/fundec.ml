@@ -4,8 +4,9 @@
    PC-relative offsets), and word-sized memory through the s3.2 address calculus
    ([gen_addr]): globals/statics off DB (ABI §2/§6), array indexing, struct fields,
    deref chains, &global and array decay, and pointer arithmetic ([gen_ptr_arith] —
-   ptr±int scaled by the pointee size, pow-2 ptr−ptr). The minimal vertical the
-   differential jig exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
+   ptr±int scaled by the pointee size, pow-2 ptr−ptr), plus unsigned-char access
+   (LDB/STB + entry/cast narrowing, s3.3a). The minimal vertical the differential jig
+   exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
    freely; args and return in R0..) — every variable keeps a fixed home register, so
    control-flow merge points need no reconciliation. Anything outside the supported subset raises
    [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the
@@ -101,12 +102,19 @@ let global_offset ctx (v : C.varinfo) =
      | None -> unsupported "extern global without a definition — 3b linker / mini-libc")
 ;;
 
-(* s3.2 loads/stores words only: the accessed type must be a 32-bit scalar. Sub-word
-   (char/short) access is s3.3; aggregate assignment (struct copy) is later. *)
-let check_word_access (lv : C.lval) =
-  match C.unrollType (C.typeOfLval lv) with
-  | (C.TInt _ | C.TEnum _ | C.TPtr _) as t when C.bitsSizeOf t = 32 -> ()
-  | C.TInt _ -> unsupported "sub-word memory access (char/short) — memory slice s3.3"
+(* The RISC5 memory size for a scalar access — and the widening rule that rides with it:
+   - word (int/enum/ptr): LDW/STW.
+   - unsigned char: LDB zero-extends to a correct int (ABI §1) — no fixup; STB truncates.
+   s3.3b adds signed char (LDB + sign-extend) and short (composed from two bytes, no
+   halfword op exists). Aggregates/float never reach a scalar load/store. *)
+let access_size (lv : C.lval) : R.size =
+  let t = C.unrollType (C.typeOfLval lv) in
+  match t with
+  | (C.TInt _ | C.TEnum _ | C.TPtr _) when C.bitsSizeOf t = 32 -> R.W
+  | C.TInt (ik, _) when C.bitsSizeOf t = 8 && not (C.isSigned ik) -> R.B
+  | C.TInt (_, _) when C.bitsSizeOf t = 8 ->
+    unsupported "signed char access (LDB + sign-extend) — memory slice s3.3b"
+  | C.TInt _ -> unsupported "short access (composed from bytes) — memory slice s3.3b"
   | C.TComp _ | C.TArray _ ->
     unsupported "aggregate load/store (struct copy) — later slice"
   | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
@@ -230,14 +238,14 @@ let rec gen_expr ctx (e : C.exp) : reg =
     r
   | C.Lval (C.Var v, C.NoOffset) when not v.vglob -> home ctx v
   | C.Lval lv ->
-    (* memory read — global scalar (one LDW off DB), aggregate element, deref chain:
-       all one Load off the folded (base, residual) address *)
-    check_word_access lv;
+    (* memory read — global/element/deref scalar: one Load (LDW word, LDB char) off the
+       folded (base, residual) address *)
+    let size = access_size lv in
     let base, off = gen_addr ctx lv in
     free_scratch ctx base;
     (* dest may reuse it: LDW Ra,Ra,off reads before writing *)
     let r = alloc_scratch ctx in
-    emit ctx (R.Load { size = R.W; a = r; base; off });
+    emit ctx (R.Load { size; a = r; base; off });
     r
   | C.AddrOf (C.Var v, _) when not v.vglob ->
     unsupported "&local (needs a stack slot in the ABI §3 frame) — call slice"
@@ -246,8 +254,9 @@ let rec gen_expr ctx (e : C.exp) : reg =
     materialize_addr ctx lv
   | C.CastE (_, t, e') ->
     Check.check_unsupported_types t;
-    if C.bitsSizeOf t < 32 then unsupported "narrowing cast to <32-bit — later slice";
-    gen_expr ctx e' (* int<->int of the same width: the 32-bit value is unchanged *)
+    if C.bitsSizeOf t >= 32
+    then gen_expr ctx e' (* same-width or widening: the 32-bit value is unchanged *)
+    else gen_narrow ctx t e'
   | C.UnOp (op, e', t) ->
     Check.check_unsupported_types t;
     gen_unop ctx op e'
@@ -290,6 +299,20 @@ and gen_unop ctx op e' =
     free_scratch ctx r;
     rd
   | C.LNot -> unsupported "logical ! (0/1 materialization) — later slice"
+
+(* Narrowing cast to a sub-word type, used as a *value*: e.g. (char)x, or the coercion
+   CIL inserts on a char-typed assignment / return. (unsigned char) x = x AND 0xFF (the
+   low byte, zero-extended). signed char / short need sign-extension — s3.3b. A store
+   into a char lval needs no cast here: STB truncates for free. *)
+and gen_narrow ctx (t : C.typ) (e' : C.exp) : reg =
+  match C.unrollType t with
+  | C.TInt (ik, _) when C.bitsSizeOf t = 8 && not (C.isSigned ik) ->
+    let r = gen_expr ctx e' in
+    let rd = alloc_scratch ctx in
+    emit ctx (alu R.And rd r (R.Imm 0xFF));
+    free_scratch ctx r;
+    rd
+  | _ -> unsupported "narrowing cast to signed char / short — memory slice s3.3b"
 
 (* ---- pointer arithmetic (s3.2b). ptr±int scales the integer by the pointee size
    (LSL for pow-2, MUL otherwise) then ADD/SUB; a constant offset folds scale-and-add
@@ -432,11 +455,12 @@ let gen_instr ctx (i : C.instr) =
     if r <> h then emit ctx (mov_reg h r);
     free_scratch ctx r
   | C.Set (lv, e, _, _) ->
-    (* memory write: value, then address (CIL: both side-effect-free, order is free) *)
-    check_word_access lv;
+    (* memory write: value, then address (CIL: both side-effect-free, order is free).
+       STB truncates to the low byte, so a char store needs no extra masking. *)
+    let size = access_size lv in
     let r = gen_expr ctx e in
     let base, off = gen_addr ctx lv in
-    emit ctx (R.Store { size = R.W; a = r; base; off });
+    emit ctx (R.Store { size; a = r; base; off });
     free_scratch ctx base;
     free_scratch ctx r
   | C.Call _ -> unsupported "function call — call slice"
@@ -590,19 +614,21 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
     (fun (v : C.varinfo) -> Check.check_unsupported_types v.vtype)
     (fd.sformals @ fd.slocals);
   (* ABI §3: aggregates travel by hidden pointer / stack copy — call-slice machinery.
-     Sub-word params would need entry narrowing (caller passes a full word); until
-     s3.3 masks them, a raw home register would diverge from gcc. *)
+     A sub-word param arrives as a full word (caller / jig pass the raw int); unsigned
+     char is narrowed at entry (below), short / signed char are s3.3b. *)
   (match C.unrollType return_type with
    | C.TComp _ | C.TArray _ ->
      unsupported "aggregate return (hidden pointer, ABI §3) — call slice"
    | _ -> ());
   List.iter
     (fun (v : C.varinfo) ->
-       match C.unrollType v.vtype with
+       let t = C.unrollType v.vtype in
+       match t with
        | C.TComp _ | C.TArray _ ->
          unsupported "aggregate param (stack copy, ABI §3) — call slice"
-       | t when C.bitsSizeOf t < 32 ->
-         unsupported "sub-word (char/short) param — needs entry narrowing, s3.3"
+       | C.TInt (ik, _) when C.bitsSizeOf t = 8 && not (C.isSigned ik) -> ()
+       | C.TInt _ when C.bitsSizeOf t < 32 ->
+         unsupported "short / signed-char param (entry narrowing) — memory slice s3.3b"
        | _ -> ())
     fd.sformals;
   if List.length fd.sformals > 4 then unsupported ">4 params (stack args — call slice)";
@@ -627,6 +653,17 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : R.instr list =
     ; func_end = 0
     }
   in
+  (* entry narrowing (s3.3a): an unsigned-char param arrives as a full word; mask its
+     home to the low byte so it holds the C-correct value from the first use (the jig's
+     gcc oracle narrows at the call site — we get the raw int). *)
+  List.iter
+    (fun (v : C.varinfo) ->
+       match C.unrollType v.vtype with
+       | C.TInt (ik, _) when C.bitsSizeOf v.vtype = 8 && not (C.isSigned ik) ->
+         let h = Hashtbl.find homes v.vid in
+         emit ctx (alu R.And h h (R.Imm 0xFF))
+       | _ -> ())
+    fd.sformals;
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
   place ctx ctx.func_end;
   resolve (List.rev ctx.rev_frags)

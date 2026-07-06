@@ -44,9 +44,12 @@ let gcc_compile ~src ~fname ~arity : string =
     fname
     (String.concat "," params);
   close_out oc;
+  (* -funsigned-char: the oracle must model *our* target, and ABI §1 makes char unsigned
+     (LDB zero-extends). Without it gcc's x86-64 default (signed char) sign-extends on
+     widening reads and the diff is apples-to-oranges — the jig flagged exactly this. *)
   let cmd =
     Printf.sprintf
-      "gcc -std=gnu99 -w -O0 %s -o %s"
+      "gcc -std=gnu99 -funsigned-char -w -O0 %s -o %s"
       (Filename.quote cfile)
       (Filename.quote exe)
   in
@@ -183,6 +186,25 @@ let samples =
        af + n; int s = 0; while (q != end){ s += *q; q = q + 1; } return s; }"
     , "walkne"
     , 1 (* walk to a sentinel: ptr != is sign-agnostic (ordered ptr < waits for s5) *) )
+    (* sub-word char (s3.3a): LDB/STB, entry + cast narrowing; state lives inside samples *)
+  ; "char gc = 65; int rgc(int x){ return gc + x; }", "rgc", 1
+  ; ( "char ca[8] = {10,20,30,40,50,60,70,80}; int cget(int i){ return ca[i & 7]; }"
+    , "cget"
+    , 1 )
+  ; ( "char cw[8]; int cset(int i,int v){ cw[i & 7] = v; return cw[i & 7]; }"
+    , "cset"
+    , 2 (* STB truncates → v & 0xFF *) )
+  ; ( "int gw2 = 0x11223344; int cb(int i){ char *c = (char *)&gw2; return c[i & 3]; }"
+    , "cb"
+    , 1 (* little-endian byte order *) )
+  ; "int pc(char c){ return c; }", "pc", 1 (* entry narrowing: c = arg & 0xFF *)
+  ; ( "int cl(int x){ char c = x; c = c + 200; return c; }"
+    , "cl"
+    , 1 (* char local wraps at 256 *) )
+  ; ( "struct m { int a; char b; }; struct m mm = {1000, 50}; int mf(int k){ return mm.a \
+       + mm.b * k; }"
+    , "mf"
+    , 1 )
   ]
 ;;
 
@@ -193,16 +215,16 @@ let samples =
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
-  ; ( "char gc; int rgc(int x){ return gc + x; }"
-    , "rgc" (* sub-word global — s3.3 (sl below covers the Globals skip→attribute path) *)
-    )
+  ; "short gs = 1000; int rs(int x){ return gs + x; }", "rs" (* short access — s3.3b *)
+  ; ( "signed char sc = -1; int rsc(int x){ return sc + x; }"
+    , "rsc" (* signed char access (LDB + sign-extend) — s3.3b *) )
+  ; "int ps(short s){ return s; }", "ps" (* short param — s3.3b *)
+  ; "int psc(signed char c){ return c; }", "psc" (* signed char param — s3.3b *)
   ; ( "int la(int i){ int t[4]; t[0] = i; return t[0]; }"
     , "la" (* local array — needs a stack slot, call slice *) )
   ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \
        s2 = s1; return s2.a + x; }"
     , "cp" (* struct copy — later *) )
-  ; ( "int gw2 = 0x11223344; int cb(int i){ char *c = (char *)&gw2; return c[i & 3]; }"
-    , "cb" (* sub-word deref — s3.3 *) )
   ; ( "struct s3 { int a; int b; int c; }; struct s3 sa[4]; int ppd(int i){ struct s3 *p \
        = sa + (i & 3); struct s3 *q = sa; return p - q; }"
     , "ppd" (* ptr−ptr, 12-byte elem: non-pow-2 → needs __div *) )

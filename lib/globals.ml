@@ -6,12 +6,12 @@
    same contract, small scale; the real 3b linker splits bss out only to keep the
    blob *file* short.
 
-   Deliberately *tolerant*: a global the current slice can't place (sub-word, union,
+   Deliberately *tolerant*: a global the current slice can't place (short, union,
    float ban, link-time-address initializer) is recorded in [skipped] with its reason
    instead of raised — so Fundec attributes the refusal to the functions that
    actually touch it, and every other function keeps compiling (the doomcc-histogram
-   semantics). Slice 3.2 places any type whose leaves are all 32-bit scalars
-   (arrays/structs included); char/short leaves are s3.3. *)
+   semantics). Places any type whose leaves are all words or chars (arrays/structs
+   included, s3.2 + s3.3a); short leaves wait for s3.3b. *)
 
 module C = GoblintCil
 
@@ -49,14 +49,17 @@ let word_of_init (e : C.exp) : int =
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
 
-(* A type places iff every leaf is a 32-bit scalar — arrays and structs of words
-   included (natural alignment ≤ 4, ABI §4, so layout can't diverge from gcc -m32;
-   the spike verified identical struct metrics under our machdep). *)
+(* A type places iff every leaf is a word or a char — arrays and structs included
+   (natural alignment ≤ 4, ABI §4, so layout can't diverge from gcc -m32; the spike
+   verified identical struct metrics under our machdep). short (16-bit) leaves are
+   s3.3b: they need the composed byte access Fundec doesn't emit yet. *)
 let rec check_placeable (t : C.typ) =
   match C.unrollType t with
   | (C.TInt _ | C.TEnum _ | C.TPtr _) as t' ->
-    if C.bitsSizeOf t' <> 32
-    then Check.unsupported "sub-word global (char/short) — memory slice s3.3"
+    (match C.bitsSizeOf t' with
+     | 32 | 8 -> () (* word, or char (LDB/STB, s3.3a) *)
+     | 16 -> Check.unsupported "short global — memory slice s3.3b"
+     | _ -> Check.unsupported "sub-word global — memory slice s3.3")
   | C.TArray (elem, _, _) -> check_placeable elem
   | C.TComp (ci, _) when ci.cstruct ->
     List.iter (fun (f : C.fieldinfo) -> check_placeable f.ftype) ci.cfields
@@ -64,27 +67,29 @@ let rec check_placeable (t : C.typ) =
   | _ -> Check.unsupported "global of unsupported type — later slice"
 ;;
 
-(* Serialize [init] at byte [off] into the writes list. CompoundInit offsets are
-   single-level (Field/Index with NoOffset — CIL's documented shape); nested
-   aggregates recurse; absent entries stay zero because the image is pre-zeroed —
-   C's partial-initializer semantics for free. *)
-let rec serialize_init writes (off : int) (init : C.init) =
+(* Serialize [init] (whose slot has type [t]) at byte [off] into the writes list as
+   (offset, value, byte-width) triples — the width comes from the *slot* type, not the
+   initializer expression (a char slot with an int-literal init is still one byte).
+   CompoundInit offsets are single-level (Field/Index with NoOffset — CIL's documented
+   shape); nested aggregates recurse; absent entries stay zero because the image is
+   pre-zeroed — C's partial-initializer semantics for free. *)
+let rec serialize_init writes (off : int) (t : C.typ) (init : C.init) =
   match init with
-  | C.SingleInit e -> writes := (off, word_of_init e) :: !writes
+  | C.SingleInit e -> writes := (off, word_of_init e, C.bitsSizeOf t / 8) :: !writes
   | C.CompoundInit (ct, initl) ->
     List.iter
       (fun ((o, sub) : C.offset * C.init) ->
-         let delta =
+         let delta, subt =
            match o with
-           | C.Field (_, C.NoOffset) -> fst (C.bitsOffset ct o) / 8
+           | C.Field (fi, C.NoOffset) -> fst (C.bitsOffset ct o) / 8, fi.ftype
            | C.Index (e, C.NoOffset) ->
              (match C.getInteger (C.constFold true e), C.unrollType ct with
               | Some i, C.TArray (elem, _, _) ->
-                C.Cilint.int_of_cilint i * (C.bitsSizeOf elem / 8)
+                C.Cilint.int_of_cilint i * (C.bitsSizeOf elem / 8), elem
               | _ -> Check.unsupported "initializer index — unexpected CIL shape")
            | _ -> Check.unsupported "initializer offset — unexpected CIL shape"
          in
-         serialize_init writes (off + delta) sub)
+         serialize_init writes (off + delta) subt sub)
       initl
 ;;
 
@@ -103,7 +108,7 @@ let from_file (file : C.file) : t =
     then Check.unsupported "data+bss image exceeds DB's +512 KB mem-op reach";
     (match init with
      | None -> () (* tentative definition: bss-style, stays zero *)
-     | Some i -> serialize_init writes off i);
+     | Some i -> serialize_init writes off v.vtype i);
     Hashtbl.replace offsets v.vid off;
     cursor := off + size
   in
@@ -116,6 +121,12 @@ let from_file (file : C.file) : t =
          Hashtbl.replace skipped v.vid ("global with incomplete type (" ^ why ^ ")"))
     | _ -> () (* GVarDecl w/o GVar = true extern: no offset; Fundec names it on use *));
   let image = Bytes.make ((!cursor + 3) / 4 * 4) '\000' in
-  List.iter (fun (off, w) -> Bytes.set_int32_le image off (Int32.of_int w)) !writes;
+  List.iter
+    (fun (off, w, width) ->
+       match width with
+       | 1 -> Bytes.set_uint8 image off (w land 0xFF)
+       | 2 -> Bytes.set_uint16_le image off (w land 0xFFFF)
+       | _ -> Bytes.set_int32_le image off (Int32.of_int w))
+    !writes;
   { offsets; skipped; image }
 ;;
