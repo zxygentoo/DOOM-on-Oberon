@@ -26,8 +26,10 @@
    struct args and returns never occur in DOOM (census) and stay refused. A comparison or [!] used
    as a value (s5.1) materializes 0/1 by branching over two immediate loads — RISC5 has no
    set-on-condition; signed compares read the overflow-aware N≠V, unsigned and pointer compares
-   the carry (s5.2). Anything outside the supported subset raises [Check.Unsupported] — refuse to
-   miscompile rather than guess. Each message names the later slice that will handle it. *)
+   the carry (s5.2). Unsigned [>>] (s5.2b) is ROR + mask — RISC5 has no logical shift right, so a
+   rotate then a mask of the low 32−n bits. Anything outside the supported subset raises
+   [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the later
+   slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
@@ -376,8 +378,32 @@ let rec gen_expr ctx (e : C.exp) : reg =
   | C.UnOp (op, e', t) ->
     Check.check_unsupported_types t;
     gen_unop ctx op e'
-  | C.BinOp (C.Shiftrt, _, _, t) when is_unsigned_int t ->
-    unsupported "unsigned >> (compiles to ROR + mask) — later slice"
+  | C.BinOp (C.Shiftrt, e1, e2, t) when is_unsigned_int t ->
+    (* logical >> (s5.2b): RISC5 has no LSR (ABI §1), only ASR (sign-fill) and ROR. So rotate
+       right by n, then mask off the n low bits ROR wrapped into the top — leaving x's bits
+       [n..31] in [0..31-n], zeros above = the logical shift. Constant count is the common case
+       (FRACBITS, byte/colour extracts); a variable count needs a runtime mask (1<<(32-n))-1
+       with an n=0 corner, deferred. The mask often exceeds a 16-bit immediate (n=1 → 0x7FFFFFFF)
+       so it rides a register via load_const. *)
+    (match C.getInteger (C.constFold true e2) with
+     | Some c ->
+       let n = C.Cilint.int_of_cilint c in
+       if n = 0
+       then gen_expr ctx e1 (* x >> 0 = x *)
+       else if n >= 1 && n <= 31
+       then (
+         let r = gen_expr ctx e1 in
+         let d = alloc_scratch ctx in
+         emit ctx (alu R.Ror d r (R.Imm n));
+         free_scratch ctx r;
+         let m = alloc_scratch ctx in
+         load_const ctx m ((1 lsl (32 - n)) - 1);
+         emit ctx (alu R.And d d (R.Reg m));
+         free_scratch ctx m;
+         d)
+       else unsupported "unsigned >> by %d — shift count outside 0..31 (undefined in C)" n
+     | None ->
+       unsupported "unsigned >> by a variable count (ROR + runtime mask) — later slice")
   | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2

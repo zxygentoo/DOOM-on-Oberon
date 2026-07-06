@@ -408,6 +408,16 @@ let samples =
       (* pointer < (CIL lowers to unsigned; the pointer-walk payoff): both point into one local
          array, so p < q iff (i&7) < (j&7) — jig-safe, only the 0/1 escapes *)
     )
+    (* s5.2b: unsigned (logical) >> — ROR then mask, since RISC5 has no LSR. The edge x=-1
+       (0xFFFFFFFF) separates logical from arithmetic: >>1 is 0x7FFFFFFF (logical) vs 0xFFFFFFFF
+       (ASR). Spans the mask cases: n=1 needs a load_const mask (0x7FFFFFFF > 16-bit imm), n=16
+       fits an immediate (0xFFFF), n=31 is a 1-bit mask. *)
+  ; "unsigned usr1(unsigned x){ return x >> 1; }", "usr1", 1
+  ; "unsigned usr16(unsigned x){ return x >> 16; }", "usr16", 1 (* FRACBITS-shaped *)
+  ; "unsigned usr31(unsigned x){ return x >> 31; }", "usr31", 1 (* sign bit as 0/1 *)
+  ; ( "unsigned usrmix(unsigned a){ return (a >> 8) & 0xFF; }"
+    , "usrmix"
+    , 1 (* the real byte-extract idiom: logical >> feeding a mask *) )
   ]
 ;;
 
