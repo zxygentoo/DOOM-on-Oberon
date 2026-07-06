@@ -17,7 +17,10 @@
    R0.. (a zero-cost frame when it touches only R0-R5). Stack args (s4.2): a callee with >4
    params sets FP = entry SP and loads args 5+ from FP+16.. into their homes; a caller with >4
    args stages them past the home area (SP+16..) and sizes its outgoing area to the widest call
-   it makes (ABI §3). Anything outside the supported subset
+   it makes (ABI §3). Locals that can't be a register (s4.3) — aggregates and address-taken
+   scalars (CIL's [vaddrof]) — get an SP-relative frame slot (the locals region, between the
+   outgoing area and the saves) and route through the same memory calculus a global does, based
+   at the slot instead of DB. Anything outside the supported subset
    raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message names
    the later slice that will handle it. *)
 
@@ -56,7 +59,12 @@ let lnk_reg = 15 (* LNK: BL writes it; a callee returns via [B LNK] (To_reg) *)
    to {!Linker.link} (labels/branches resolve there, alongside cross-function calls). *)
 type ctx =
   { mutable rev_frags : L.frag list (* emitted frags, reversed *)
-  ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register *)
+  ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register (register locals) *)
+  ; slots : (int, int) Hashtbl.t
+    (* vid -> byte offset within the locals region, for a local that can't be a register:
+       an aggregate or an address-taken scalar (s4.3). Addressed SP-relative, [slots_base]+off *)
+  ; slots_base : int
+    (* SP-offset where the locals region starts (above the outgoing area) *)
   ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
   ; scratch_lo : reg (* low end of the scratch pool: above the homes (leaf), or the *)
   ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
@@ -290,10 +298,15 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r (Char.code ch);
     r
-  | C.Lval (C.Var v, C.NoOffset) when not v.vglob -> home ctx v
+  | C.Lval (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
+    ->
+    home
+      ctx
+      v (* a register local; a slotted one falls through to the memory load below *)
   | C.Lval lv -> gen_load ctx lv
-  | C.AddrOf (C.Var v, _) when not v.vglob ->
-    unsupported "&local (needs a stack slot in the ABI §3 frame) — call slice"
+  | C.AddrOf (C.Var v, _) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
+    (* a non-slotted &-taken var is a parameter (an &-taken local is always slotted) — step 2 *)
+    unsupported "&param (address-taken parameter → stack slot) — s4.3 step 2"
   | C.AddrOf lv | C.StartOf lv ->
     (* &lv, and array decay — the same address, materialized as a value *)
     materialize_addr ctx lv
@@ -435,9 +448,12 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
     match host with
     | C.Var v when v.vglob -> db_reg, global_offset ctx v, v.vtype
     | C.Var v ->
-      unsupported
-        "local %s used as memory (array/struct local needs a stack slot) — call slice"
-        v.vname
+      (* a slotted local (s4.3): its frame slot, SP-relative — the mirror of a global's
+         DB-relative base, so the fold below layers fields/indexes on top identically *)
+      (match Hashtbl.find_opt ctx.slots v.vid with
+       | Some off -> sp_reg, ctx.slots_base + off, v.vtype
+       | None ->
+         unsupported "local %s used as memory but has no slot — internal error" v.vname)
     | C.Mem e ->
       let pointee =
         match C.unrollType (C.typeOf e) with
@@ -533,13 +549,11 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
 (* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
   match i with
-  | C.Set ((C.Var v, C.NoOffset), e, _, _) when not v.vglob ->
-    (match C.unrollType v.vtype with
-     | C.TComp _ | C.TArray _ ->
-       (* an aggregate "fits" in a register home only by accident — never emit the
-          bogus MOV, even though no supported construct could observe it yet *)
-       unsupported "aggregate assignment (struct copy) — later slice"
-     | _ -> ());
+  | C.Set ((C.Var v, C.NoOffset), e, _, _)
+    when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
+    (* a register local: evaluate, then MOV into its home. A slotted local (aggregate or
+       address-taken) falls through to the memory store below — and a whole-aggregate copy
+       lands there too, where gen_store refuses it (s4.4). *)
     let r = gen_expr ctx e in
     let h = home ctx v in
     if r <> h then emit ctx (mov_reg h r);
@@ -597,9 +611,15 @@ let gen_instr ctx (i : C.instr) =
     call ctx callee.vname;
     (match lvopt with
      | None -> () (* void call / result discarded *)
-     | Some (C.Var v, C.NoOffset) when not v.vglob ->
+     | Some (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
+       ->
        let h = home ctx v in
        if h <> return_reg then emit ctx (mov_reg h return_reg)
+     | Some (C.Var v, C.NoOffset) when not v.vglob ->
+       gen_store
+         ctx
+         (C.Var v, C.NoOffset)
+         return_reg (* result into a slotted local (s4.3) *)
      | Some _ -> unsupported "call result to a non-local lval — later slice")
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
@@ -766,6 +786,38 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and reads
      them at FP+16.. (below). The naive-alloc register ceiling still applies via [assign]. *)
   let needs_fp = List.length fd.sformals > 4 in
+  let outgoing_area =
+    match call_info with
+    | None -> 0
+    | Some n -> 4 * max 4 n
+  in
+  (* s4.3: a local that can't live in a register — an aggregate, or a scalar whose address is
+     taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
+     above the outgoing area. Addressed SP-relative: the offset ([slots_base]+off) is known
+     here, before body codegen fixes the save set — which an FP-relative offset couldn't be
+     (it subtracts the frame size). An address-taken *param* is step 2. *)
+  let slots = Hashtbl.create 8 in
+  let locals_size = ref 0 in
+  let needs_slot (v : C.varinfo) =
+    v.vaddrof
+    ||
+    match C.unrollType v.vtype with
+    | C.TComp _ | C.TArray _ -> true
+    | _ -> false
+  in
+  List.iter
+    (fun (v : C.varinfo) ->
+       if needs_slot v
+       then (
+         Hashtbl.replace slots v.vid !locals_size;
+         (* round each slot up to a word so the next stays 4-aligned (ABI §4) *)
+         locals_size := !locals_size + (((C.bitsSizeOf v.vtype / 8) + 3) land lnot 3)))
+    fd.slocals;
+  List.iter
+    (fun (v : C.varinfo) ->
+       if v.vaddrof
+       then unsupported "address-taken parameter %s — stack slot (s4.3 step 2)" v.vname)
+    fd.sformals;
   (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
      R0-R5. Leaf: today's model — homes R0.., scratch above them. *)
   let home_base = if leaf then 0 else first_callee_saved in
@@ -781,13 +833,18 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     incr next
   in
   List.iter assign fd.sformals;
-  List.iter assign fd.slocals;
+  (* slotted locals live in memory, not a register — skip them here *)
+  List.iter
+    (fun (v : C.varinfo) -> if not (Hashtbl.mem slots v.vid) then assign v)
+    fd.slocals;
   let scratch_lo, scratch_hi =
     if leaf then !next, max_reg else 0, first_callee_saved - 1
   in
   let ctx =
     { rev_frags = []
     ; homes
+    ; slots
+    ; slots_base = outgoing_area
     ; globals
     ; scratch_lo
     ; scratch_hi
@@ -815,23 +872,19 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
        | _ -> ())
     fd.sformals;
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
-  (* The frame (ABI §3). Callee-saved regs written = R[6..max_used] (contiguous: homes then,
-     for a leaf, scratch — both fill upward). A non-leaf also saves LNK (BL clobbers it) and
-     reserves an outgoing area at SP+0 for the calls it makes — the 16-byte home area for
-     R0-R3 plus a slot per outgoing stack arg 5+, sized to the widest call ([call_info]); the
-     saves sit above that area, LNK topmost. A pure leaf touching only R0-R5 gets frame = 0
-     (no SUB/ADD SP, just [B LNK]). *)
+  (* The frame (ABI §3): SP-relative, low-to-high — outgoing area · locals region (s4.3) ·
+     callee-saved R[6..max_used] · FP (needs_fp) · LNK (non-leaf). The saves are contiguous
+     (homes then, for a leaf, scratch — both fill upward). The outgoing area (sized to the
+     widest call, [call_info]) and the locals ([locals_size]) sit below the saves, so a pure
+     leaf touching only R0-R5 with no slots gets frame = 0 (no SUB/ADD SP, just [B LNK]). *)
   let saved =
     List.init
       (max 0 (ctx.max_used - first_callee_saved + 1))
       (fun i -> first_callee_saved + i)
   in
-  let outgoing_area =
-    match call_info with
-    | None -> 0
-    | Some n -> 4 * max 4 n
-  in
-  let saves_end = outgoing_area + (4 * List.length saved) in
+  (* the saves start above the outgoing area and the locals region *)
+  let saves_base = outgoing_area + !locals_size in
+  let saves_end = saves_base + (4 * List.length saved) in
   (* slots above the saves: FP (needs_fp), then LNK (non-leaf), matching the ABI §3 idiom *)
   let fp_off = saves_end in
   let lnk_off = saves_end + if needs_fp then 4 else 0 in
@@ -840,9 +893,7 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   place ctx ctx.func_end;
   List.iteri
     (fun i r ->
-       emit
-         ctx
-         (R.Load { size = R.W; a = r; base = sp_reg; off = outgoing_area + (4 * i) }))
+       emit ctx (R.Load { size = R.W; a = r; base = sp_reg; off = saves_base + (4 * i) }))
     saved;
   if needs_fp
   then emit ctx (R.Load { size = R.W; a = fp_reg; base = sp_reg; off = fp_off });
@@ -865,8 +916,7 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
         List.mapi
           (fun i r ->
              L.Ins
-               (R.Store
-                  { size = R.W; a = r; base = sp_reg; off = outgoing_area + (4 * i) }))
+               (R.Store { size = R.W; a = r; base = sp_reg; off = saves_base + (4 * i) }))
           saved
       in
       let fp_setup =

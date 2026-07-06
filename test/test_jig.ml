@@ -300,6 +300,28 @@ let samples =
          arg to add5 (SP+16) — incoming (above FP) and outgoing (near SP) areas are disjoint;
          the reversed arg order would surface a misplaced slot *)
     )
+    (* s4.3 step 1: locals that can't be a register get an SP-relative frame slot — aggregates
+       (array/struct) and address-taken scalars (CIL's vaddrof). Access, &, and pointer-writes
+       all route through the s3.2 memory calculus based at the slot. State lives inside each
+       sample; every slot is written before it's read (else our garbage != gcc's garbage). *)
+  ; ( "int aql(int x){ int y = x; int *p = &y; *p = *p + 3; return y; }"
+    , "aql"
+    , 1 (* address-taken scalar: &y, and y aliases *p — the write lands in y's slot *) )
+  ; ( "int larr(int i){ int t[4]; t[0]=5; t[1]=6; t[2]=7; t[3]=8; return t[i & 3]; }"
+    , "larr"
+    , 1 (* local array: const-index writes, dynamic-index read, all off the slot *) )
+  ; ( "struct ls { int a; int b; }; int lstruct(int k){ struct ls p; p.a = k; p.b = k + \
+       1; return p.a * p.b; }"
+    , "lstruct"
+    , 1 (* local struct: field writes/reads at slot+0 / slot+4 → k*(k+1) *) )
+  ; ( "int cptr(int x){ char c = x; char *p = &c; *p = *p + 1; return c; }"
+    , "cptr"
+    , 1 (* sub-word slot: LDB/STB on the slot; result ((x&0xFF)+1)&0xFF *) )
+  ; ( "int addone(int *p){ *p = *p + 1; return 0; } int outp(int x){ int y = x; \
+       addone(&y); return y; }"
+    , "outp"
+    , 1 (* &local escaping to a callee (out-param): slot + outgoing area coexist → x+1 *)
+    )
   ]
 ;;
 
@@ -315,8 +337,6 @@ let rejects =
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
     , "usemk" (* aggregate return (hidden pointer) — s4.4 *) )
-  ; ( "int la(int i){ int t[4]; t[0] = i; return t[0]; }"
-    , "la" (* local array — needs a stack slot, call slice *) )
   ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \
        s2 = s1; return s2.a + x; }"
     , "cp" (* struct copy — later *) )
@@ -327,8 +347,6 @@ let rejects =
     , "sl" (* string-literal init — 3b linker *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
-  ; ( "int al(int x){ int y = x; int *p = &y; return x; }"
-    , "al" (* &local needs a stack slot — call slice *) )
   ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
   ; "int cv(int a,int b){ return a < b; }", "cv" (* compare as a value — later slice *)
   ; ( "int uc(unsigned a,unsigned b){ if (a < b) return 1; return 0; }"
