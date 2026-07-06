@@ -18,3 +18,6 @@ val merge : GoblintCil.file list -> name:string -> GoblintCil.file
 (** [find_fundec file fname] returns the (single) function definition named [fname].
     Raises [Failure] if there is none. *)
 val find_fundec : GoblintCil.file -> string -> GoblintCil.fundec
+
+(** [fundecs file] returns every function definition in [file], in source order. *)
+val fundecs : GoblintCil.file -> GoblintCil.fundec list

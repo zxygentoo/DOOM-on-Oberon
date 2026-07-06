@@ -24,9 +24,11 @@ let u32 x = x land 0xFFFF_FFFF
 let dcc_compile ~src ~fname =
   let file = Frontend.parse_string ~name:fname src in
   let globals = Globals.from_file file in
-  let fd = Frontend.find_fundec file fname in
-  let obj = Fundec.compile ~globals fd in
-  (Linker.link [ obj ]).Linker.code, globals.Globals.image
+  (* compile every function in the snippet; link with the entry [fname] first so it lands at
+     offset 0 (where the Runner starts) and its callees follow *)
+  let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) in
+  let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
+  (Linker.link (entry @ rest)).Linker.code, globals.Globals.image
 ;;
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)
@@ -243,6 +245,29 @@ let samples =
        e*f + a - f; }"
     , "regpress"
     , 1 )
+    (* s4.1b: calls — the caller marshals args into R0-R3 (via the home area) and BL's a
+       named callee; the callee is non-leaf so its homes live in callee-saved R6-R11 and
+       survive the call. The entry (fname) links first (offset 0); callees follow. *)
+  ; "int g(int x){ return x + 1; } int f(int x){ return g(x) * 2; }", "f", 1
+  ; ( "int add3(int a,int b,int c){ return a + b + c; } int u3(int x){ return add3(x, x \
+       + 1, x + 2); }"
+    , "u3"
+    , 1 )
+  ; ( "int add4(int a,int b,int c,int d){ return a + b + c + d; } int u4(int x){ return \
+       add4(x, x + 1, x + 2, x + 3); }"
+    , "u4"
+    , 1 (* all four register args *) )
+  ; ( "int sq(int x){ return x * x; } int ss(int x){ return sq(x) + sq(x + 1); }"
+    , "ss"
+    , 1 (* two calls; the first result is held (a home) across the second *) )
+  ; ( "int inc(int x){ return x + 1; } int chain(int x){ int a = x * 3; int b = inc(a); \
+       return a + b; }"
+    , "chain"
+    , 1 (* a is live across the call: its callee-saved home preserves it *) )
+  ; ( "int fib(int n){ n &= 7; if (n < 2) return n; return fib(n - 1) + fib(n - 2); }"
+    , "fib"
+    , 1 (* recursion: each frame's n survives both self-calls; masked so it terminates *)
+    )
   ]
 ;;
 
@@ -253,6 +278,13 @@ let samples =
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
+  ; ( "int callptr(int (*fp)(int), int x){ return fp(x); }"
+    , "callptr" (* indirect call (function pointer) — later slice *) )
+  ; ( "extern int va(int,int,int,int,int); int u5(int x){ return va(x,x,x,x,x); }"
+    , "u5" (* >4 call args (stack args) — s4.2 *) )
+  ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
+       pt p = mk(x); return p.x; }"
+    , "usemk" (* aggregate return (hidden pointer) — s4.4 *) )
   ; ( "int la(int i){ int t[4]; t[0] = i; return t[0]; }"
     , "la" (* local array — needs a stack slot, call slice *) )
   ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \

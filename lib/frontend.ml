@@ -63,3 +63,11 @@ let find_fundec (file : file) (fname : string) : fundec =
   | Some fd -> fd
   | None -> failwith (Printf.sprintf "function %s not found in parsed unit" fname)
 ;;
+
+let fundecs (file : file) : fundec list =
+  let acc = ref [] in
+  iterGlobals file (function
+    | GFun (fd, _) -> acc := fd :: !acc
+    | _ -> ());
+  List.rev !acc
+;;

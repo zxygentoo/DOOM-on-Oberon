@@ -1,6 +1,6 @@
-(* Per-function compilation (AGENT.md 1b): one CIL fundec -> its Risc5_isa.instr list,
-   for integer *leaf* functions — straight-line code, if/while/for control flow
-   (comparisons lower to SUB + a conditional branch; [resolve] lays the branches out to
+(* Per-function compilation (AGENT.md 1b): one CIL fundec -> its unresolved {!Linker.obj},
+   for integer functions — straight-line code, if/while/for control flow
+   (comparisons lower to SUB + a conditional branch; {!Linker.link} lays the branches out to
    PC-relative offsets), and word-sized memory through the s3.2 address calculus
    ([gen_addr]): globals/statics off DB (ABI §2/§6), array indexing, struct fields,
    deref chains, &global and array decay, and pointer arithmetic ([gen_ptr_arith] —
@@ -10,11 +10,13 @@
    differential jig exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
    freely; args and return in R0..) — every variable keeps a fixed home register, so
    control-flow merge points need no reconciliation. Each function is a well-formed ABI
-   callee (s4.1a): a prologue/epilogue saves and restores the callee-saved regs (R6-R11)
-   it writes and returns through [B LNK] (ABI §3); a pure leaf touching only R0-R5 keeps a
-   zero-cost frame (no SUB/ADD SP). Anything outside the supported subset raises
-   [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the
-   later slice that will handle it. *)
+   callee (s4.1a): a prologue/epilogue saves and restores the callee-saved regs (R6-R11) it
+   writes and returns through [B LNK] (ABI §3). Calls (s4.1b): a caller marshals args through
+   the home area into R0-R3 and BLs the named callee; a *non-leaf* keeps its homes in
+   callee-saved R6-R11 (they survive the call) and scratch in R0-R5, while a leaf keeps homes
+   R0.. (a zero-cost frame when it touches only R0-R5). Anything outside the supported subset
+   raises [Check.Unsupported] — refuse to miscompile rather than guess. Each message names
+   the later slice that will handle it. *)
 
 module C = GoblintCil (* the CIL front-end AST *)
 module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
@@ -49,7 +51,8 @@ type ctx =
   { mutable rev_frags : L.frag list (* emitted frags, reversed *)
   ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register *)
   ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
-  ; base_scratch : reg (* first register above the homes *)
+  ; scratch_lo : reg (* low end of the scratch pool: above the homes (leaf), or the *)
+  ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
   ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
   ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
   ; mutable loops : (int * int) list (* enclosing loops: (continue=top, break) targets *)
@@ -70,29 +73,31 @@ let new_label ctx =
 let place ctx l = ctx.rev_frags <- L.Label l :: ctx.rev_frags
 let bcc ctx cond neg l = ctx.rev_frags <- L.Bcc (cond, neg, l) :: ctx.rev_frags
 let jmp ctx l = ctx.rev_frags <- L.Jmp l :: ctx.rev_frags
+let call ctx name = ctx.rev_frags <- L.Call name :: ctx.rev_frags
 
 let alloc_scratch ctx =
   let rec find r =
-    if r > max_reg
+    if r > ctx.scratch_hi
     then
       unsupported
-        "out of registers (naive alloc over %d homes) — needs spilling"
-        ctx.base_scratch
+        "out of registers (naive alloc, scratch R%d-R%d full) — needs spilling"
+        ctx.scratch_lo
+        ctx.scratch_hi
     else if ctx.scratch_free.(r)
     then (
       ctx.scratch_free.(r) <- false;
       r)
     else find (r + 1)
   in
-  let r = find ctx.base_scratch in
+  let r = find ctx.scratch_lo in
   if r > ctx.max_used then ctx.max_used <- r;
   r
 ;;
 
-(* Only R[base_scratch..max_reg] are scratches — the homes below and DB (R13) must
-   never be freed; DB would even index past scratch_free. The upper bound lets every
-   consumer of an address uniformly "free the base" (a no-op for DB and homes). *)
-let is_scratch ctx r = r >= ctx.base_scratch && r <= max_reg
+(* Only R[scratch_lo..scratch_hi] are scratches — the homes and DB (R13) must never be
+   freed; DB would even index past scratch_free. The bounds let every consumer of an
+   address uniformly "free the base" (a no-op for DB and homes). *)
+let is_scratch ctx r = r >= ctx.scratch_lo && r <= ctx.scratch_hi
 let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 
 let home ctx (v : C.varinfo) =
@@ -538,7 +543,54 @@ let gen_instr ctx (i : C.instr) =
     let r = gen_expr ctx e in
     gen_store ctx lv r;
     free_scratch ctx r
-  | C.Call _ -> unsupported "function call — call slice"
+  | C.Call (lvopt, fexp, args, _, _) ->
+    (* Direct call to a named function; ≤4 scalar args in R0-R3, scalar/void return in R0
+       (ABI §3). Marshal through the outgoing home area: evaluate each arg with the full
+       scratch pool, STW it to SP+4i, then LDW R0..R3 — evaluation and register placement
+       decouple, so no half-loaded arg register is clobbered mid-setup (and the home area
+       is left populated, which is exactly what a ≤4-arg varargs callee expects). This
+       function makes a call, so it is non-leaf: homes are R6-R11, scratch R0-R5. *)
+    let callee =
+      match fexp with
+      | C.Lval (C.Var f, C.NoOffset)
+        when match C.unrollType f.vtype with
+             | C.TFun _ -> true
+             | _ -> false -> f
+      | _ -> unsupported "indirect call (through a function pointer) — later slice"
+    in
+    (match C.unrollType callee.vtype with
+     | C.TFun (rt, _, _, _) ->
+       (match C.unrollType rt with
+        | C.TComp _ | C.TArray _ ->
+          unsupported "aggregate return (hidden pointer, ABI §3) — s4.4"
+        | C.TFloat _ -> unsupported "float return (ABI §4: banned)"
+        | _ -> ())
+     | _ -> ());
+    if List.length args > 4 then unsupported ">4 call args (stack args — s4.2)";
+    List.iter
+      (fun a ->
+         match C.unrollType (C.typeOf a) with
+         | C.TComp _ | C.TArray _ ->
+           unsupported "aggregate call arg (stack copy, ABI §3) — s4.4"
+         | C.TFloat _ -> unsupported "float arg (ABI §4: banned)"
+         | _ -> ())
+      args;
+    List.iteri
+      (fun i a ->
+         let r = gen_expr ctx a in
+         emit ctx (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i });
+         free_scratch ctx r)
+      args;
+    List.iteri
+      (fun i _ -> emit ctx (R.Load { size = R.W; a = i; base = sp_reg; off = 4 * i }))
+      args;
+    call ctx callee.vname;
+    (match lvopt with
+     | None -> () (* void call / result discarded *)
+     | Some (C.Var v, C.NoOffset) when not v.vglob ->
+       let h = home ctx v in
+       if h <> return_reg then emit ctx (mov_reg h return_reg)
+     | Some _ -> unsupported "call result to a non-local lval — later slice")
   | C.VarDecl _ -> ()
   | C.Asm _ -> unsupported "inline asm — n/a"
 ;;
@@ -639,6 +691,31 @@ let rec gen_stmt ctx (s : C.stmt) =
   | C.Switch _ -> unsupported "switch — later slice"
 ;;
 
+(* Does the body contain a call? A non-leaf clobbers LNK (BL writes it) and needs its live
+   values to survive calls, so its homes move to callee-saved R6-R11 (ABI §2) and it saves
+   LNK. CIL statements nest only through these skinds. *)
+let makes_call (fd : C.fundec) : bool =
+  let found = ref false in
+  let rec scan (s : C.stmt) =
+    match s.skind with
+    | C.Instr instrs ->
+      List.iter
+        (function
+          | C.Call _ -> found := true
+          | _ -> ())
+        instrs
+    | C.Block b -> List.iter scan b.bstmts
+    | C.If (_, a, b, _, _) ->
+      List.iter scan a.bstmts;
+      List.iter scan b.bstmts
+    | C.Loop (b, _, _, _, _) -> List.iter scan b.bstmts
+    | C.Switch (_, b, _, _, _) -> List.iter scan b.bstmts
+    | _ -> ()
+  in
+  List.iter scan fd.sbody.bstmts;
+  !found
+;;
+
 (* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
    [Linker.link] lays this out with any callees and resolves branches and calls. ---- *)
 let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
@@ -666,26 +743,38 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
        | _ -> ())
     fd.sformals;
   if List.length fd.sformals > 4 then unsupported ">4 params (stack args — call slice)";
+  let leaf = not (makes_call fd) in
+  (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
+     R0-R5. Leaf: today's model — homes R0.., scratch above them. *)
+  let home_base = if leaf then 0 else first_callee_saved in
   let homes = Hashtbl.create 16 in
-  let next = ref 0 in
+  let next = ref home_base in
   let assign (v : C.varinfo) =
     if !next > max_reg
-    then unsupported "too many params+locals for naive alloc (>%d regs)" (max_reg + 1);
+    then
+      unsupported
+        "too many params+locals for naive alloc (>%d regs) — needs spilling"
+        (max_reg - home_base + 1);
     Hashtbl.replace homes v.vid !next;
     incr next
   in
   List.iter assign fd.sformals;
   List.iter assign fd.slocals;
+  let scratch_lo, scratch_hi =
+    if leaf then !next, max_reg else 0, first_callee_saved - 1
+  in
   let ctx =
     { rev_frags = []
     ; homes
     ; globals
-    ; base_scratch = !next
+    ; scratch_lo
+    ; scratch_hi
     ; scratch_free = Array.make (max_reg + 1) true
     ; next_label = 1 (* label 0 is func_end *)
     ; loops = []
     ; func_end = 0
-    ; max_used = !next - 1 (* homes R0..!next-1 are all written; scratch grows this *)
+    ; max_used =
+        !next - 1 (* the last home; scratch (and so the save set) grow from here *)
     }
   in
   (* entry narrowing (s3.3): a sub-word param arrives as a full word; narrow its home to
@@ -704,34 +793,59 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
        | _ -> ())
     fd.sformals;
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
-  (* The frame (ABI §3). The callee-saved regs actually written are R[6..max_used] —
-     contiguous, since homes start at R0 and scratch fills upward from base_scratch. Each
-     needs a word slot; s4.1a has no calls, so no LNK save / FP / outgoing home area yet
-     (s4.1b). A pure leaf touching only R0-R5 gets frame = 0: no SUB/ADD SP, just [B LNK]. *)
+  (* The frame (ABI §3). Callee-saved regs written = R[6..max_used] (contiguous: homes then,
+     for a leaf, scratch — both fill upward). A non-leaf also saves LNK (BL clobbers it) and
+     reserves the 16-byte outgoing home area at SP+0 for the calls it makes; the saves sit
+     above that area, LNK topmost. A pure leaf touching only R0-R5 gets frame = 0 (no
+     SUB/ADD SP, just [B LNK]). *)
   let saved =
     List.init
       (max 0 (ctx.max_used - first_callee_saved + 1))
       (fun i -> first_callee_saved + i)
   in
-  let frame = 4 * List.length saved in
-  (* epilogue at func_end: restore the saves, drop the frame, return to the caller (B LNK) *)
+  let home_area = if leaf then 0 else 16 in
+  let lnk_off = home_area + (4 * List.length saved) in
+  let frame = lnk_off + if leaf then 0 else 4 in
+  (* epilogue at func_end: restore saves (+ LNK for a non-leaf), drop the frame, B LNK *)
   place ctx ctx.func_end;
   List.iteri
-    (fun i r -> emit ctx (R.Load { size = R.W; a = r; base = sp_reg; off = 4 * i }))
+    (fun i r ->
+       emit ctx (R.Load { size = R.W; a = r; base = sp_reg; off = home_area + (4 * i) }))
     saved;
+  if not leaf
+  then emit ctx (R.Load { size = R.W; a = lnk_reg; base = sp_reg; off = lnk_off });
   if frame > 0 then emit ctx (alu R.Add sp_reg sp_reg (R.Imm frame));
   emit
     ctx
     (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg lnk_reg });
-  (* prologue: open the frame and save the callee-saved regs we will clobber *)
+  (* prologue: open the frame, save callee-saved (+ LNK), then (non-leaf) move the incoming
+     args R0-R3 into their R6-R11 homes — after the saves, which preserve the caller's
+     R6-R11. Leaf params already sit in their homes (R0..). *)
   let prologue =
     if frame = 0
     then []
-    else
-      L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame))
-      :: List.mapi
-           (fun i r -> L.Ins (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i }))
-           saved
+    else (
+      let saves =
+        List.mapi
+          (fun i r ->
+             L.Ins
+               (R.Store { size = R.W; a = r; base = sp_reg; off = home_area + (4 * i) }))
+          saved
+      in
+      let lnk_save =
+        if leaf
+        then []
+        else [ L.Ins (R.Store { size = R.W; a = lnk_reg; base = sp_reg; off = lnk_off }) ]
+      in
+      let param_moves =
+        if leaf
+        then []
+        else
+          List.mapi
+            (fun i (v : C.varinfo) -> L.Ins (mov_reg (Hashtbl.find homes v.vid) i))
+            fd.sformals
+      in
+      (L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame)) :: saves) @ lnk_save @ param_moves)
   in
   { L.name = fd.svar.vname; frags = prologue @ List.rev ctx.rev_frags }
 ;;
