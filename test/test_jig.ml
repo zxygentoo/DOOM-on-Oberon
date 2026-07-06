@@ -498,6 +498,22 @@ let samples =
   ; ( "int szstr(int x){ return sizeof(\"hello\") + x; }"
     , "szstr"
     , 1 (* SizeOfStr: 5 bytes + NUL → 6 + x *) )
+    (* string literals (CStr): a char* to bytes interned in the data image (Globals), addressed
+       DB-relative. The pointer value isn't comparable across address spaces, but the *bytes* are
+       — every sample dereferences (char is unsigned, ABI §1, so 'A' = 65 on both sides). *)
+  ; ( "int sidx(int i){ char *s = \"ABCD\"; return s[i & 3]; }"
+    , "sidx"
+    , 1 (* index a literal: 'A'..'D' = 65..68 *) )
+  ; ( "int slen(int i){ char *s = \"hello\"; int n = 0; while (s[n]) n++; return n + i; }"
+    , "slen"
+    , 1 (* iterate to the NUL terminator → 5 + i (proves the NUL is placed) *) )
+  ; ( "int rdc(char *p, int i){ return p[i]; } int spass(int i){ return rdc(\"WXYZ\", i \
+       & 3); }"
+    , "spass"
+    , 1 (* a literal as a *call argument* (the printf shape) → 'W'..'Z' *) )
+  ; ( "int smulti(int i){ char *a = \"AB\", *b = \"cd\"; return a[i & 1] + b[i & 1]; }"
+    , "smulti"
+    , 1 (* two distinct literals coexisting → ('A'|'B') + ('c'|'d') *) )
   ]
 ;;
 

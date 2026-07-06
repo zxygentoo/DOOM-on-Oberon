@@ -8,6 +8,10 @@ type t =
   ; skipped : (int, string) Hashtbl.t
     (** vid -> why it has no offset; {!Fundec} re-raises this on first use, so the
         refusal lands on the functions that touch the global, not the whole program *)
+  ; strings : (string, int) Hashtbl.t
+    (** interned string-literal content -> DB-relative byte offset of its bytes (with a NUL
+        terminator) in [image]; identical literals share one copy. {!Fundec} materializes a
+        [CStr] as [DB + offset], the same address form a global gets. *)
   ; image : bytes (** data+bss, little-endian, length padded to a word multiple *)
   }
 

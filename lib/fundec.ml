@@ -379,6 +379,15 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r (Char.code ch);
     r
+  | C.Const (C.CStr (s, _)) ->
+    (* a string literal is a char* to anonymous static bytes interned in the data image
+       (Globals); materialize its address DB + offset, exactly as &global does (add_const frees
+       the base — a no-op for DB). *)
+    (match Hashtbl.find_opt ctx.globals.Globals.strings s with
+     | Some off -> add_const ctx db_reg off
+     | None ->
+       unsupported
+         "string literal not interned (data image past DB's +512 KB reach) — 3b linker")
   | C.Lval (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
     ->
     home

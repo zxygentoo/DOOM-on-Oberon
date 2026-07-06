@@ -18,11 +18,17 @@ module C = GoblintCil
 type t =
   { offsets : (int, int) Hashtbl.t (* varinfo.vid -> DB-relative byte offset *)
   ; skipped : (int, string) Hashtbl.t (* vid -> why it has no offset (refusal message) *)
+  ; strings :
+      (string, int) Hashtbl.t (* string-literal content -> DB-relative byte offset *)
   ; image : bytes (* data+bss, little-endian, length padded to a word multiple *)
   }
 
 let no_globals =
-  { offsets = Hashtbl.create 1; skipped = Hashtbl.create 1; image = Bytes.empty }
+  { offsets = Hashtbl.create 1
+  ; skipped = Hashtbl.create 1
+  ; strings = Hashtbl.create 1
+  ; image = Bytes.empty
+  }
 ;;
 
 (* Mem-op offsets are 20-bit signed (ABI §1): DB reaches +512 KB — the whole image
@@ -92,9 +98,11 @@ let rec serialize_init writes (off : int) (t : C.typ) (init : C.init) =
 
 let from_file (file : C.file) : t =
   let offsets = Hashtbl.create 64
-  and skipped = Hashtbl.create 64 in
+  and skipped = Hashtbl.create 64
+  and strings = Hashtbl.create 64 in
   let cursor = ref 0
-  and writes = ref [] in
+  and writes = ref []
+  and string_blits = ref [] in
   let place (v : C.varinfo) (init : C.init option) =
     Check.check_unsupported_types v.vtype;
     check_placeable v.vtype;
@@ -117,6 +125,33 @@ let from_file (file : C.file) : t =
        | C.SizeOfError (why, _) ->
          Hashtbl.replace skipped v.vid ("global with incomplete type (" ^ why ^ ")"))
     | _ -> () (* GVarDecl w/o GVar = true extern: no offset; Fundec names it on use *));
+  (* String literals are anonymous static data: scan every expression (function bodies *and*
+     global initializers) for a CStr and append its bytes — the content plus a NUL — after the
+     placed globals, deduplicating identical literals. Fundec then materializes each as
+     DB + offset, the same address form a global gets; the NUL rides free (image is pre-zeroed). *)
+  let intern (s : string) =
+    if not (Hashtbl.mem strings s)
+    then (
+      let len = String.length s + 1 in
+      if !cursor + len <= max_db_offset
+      then (
+        Hashtbl.replace strings s !cursor;
+        string_blits := (!cursor, s) :: !string_blits;
+        cursor := !cursor + len
+        (* past DB's +512 KB reach: leave uninterned — Fundec refuses functions that use it *)))
+  in
+  let collector =
+    object
+      inherit C.nopCilVisitor
+
+      method! vexpr e =
+        (match e with
+         | C.Const (C.CStr (s, _)) -> intern s
+         | _ -> ());
+        C.DoChildren
+    end
+  in
+  C.visitCilFileSameGlobals collector file;
   let image = Bytes.make ((!cursor + 3) / 4 * 4) '\000' in
   List.iter
     (fun (off, w, width) ->
@@ -125,5 +160,9 @@ let from_file (file : C.file) : t =
        | 2 -> Bytes.set_uint16_le image off (w land 0xFFFF)
        | _ -> Bytes.set_int32_le image off (Int32.of_int w))
     !writes;
-  { offsets; skipped; image }
+  (* blit each interned string's content; its trailing NUL is already zero in the image *)
+  List.iter
+    (fun (off, s) -> Bytes.blit_string s 0 image off (String.length s))
+    !string_blits;
+  { offsets; skipped; strings; image }
 ;;
