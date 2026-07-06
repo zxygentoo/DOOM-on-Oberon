@@ -120,17 +120,21 @@ let ptr_target ~offsets ~strings (e : C.exp) : int option =
 ;;
 
 (* A type places iff every leaf is an integer scalar (word / short / char) or pointer —
-   arrays and structs included (natural alignment ≤ 4, ABI §4, so layout can't diverge
-   from gcc -m32; the spike verified identical struct metrics under our machdep). The
-   64-bit ban and float ban are enforced upstream by {!Check.check_unsupported_types},
-   so every width reaching here (8/16/32) now serializes; only unions are left out. *)
+   arrays, structs, and unions included (natural alignment ≤ 4, ABI §4, so layout can't
+   diverge from gcc -m32; the spike verified identical struct metrics under our machdep).
+   A union's members all live at byte offset 0 (bitsOffset yields 0) and its size and
+   alignment are the max over members (CIL's machdep-computed bitsSizeOf/alignOf) —
+   DOOM's unions (actionf_t's function-pointer variants, intercept_t's thing/line) are
+   same-width scalars anyway. A static union initializer names exactly one member; the
+   other bytes stay zero, which the pre-zeroed image gives for free — C's static-storage
+   semantics. The 64-bit ban and float ban are enforced upstream by
+   {!Check.check_unsupported_types}, so every width reaching here (8/16/32) serializes. *)
 let rec check_placeable (t : C.typ) =
   match C.unrollType t with
   | C.TInt _ | C.TEnum _ | C.TPtr _ -> ()
   | C.TArray (elem, _, _) -> check_placeable elem
-  | C.TComp (ci, _) when ci.cstruct ->
+  | C.TComp (ci, _) ->
     List.iter (fun (f : C.fieldinfo) -> check_placeable f.ftype) ci.cfields
-  | C.TComp _ -> Check.unsupported "union global — later slice"
   | _ -> Check.unsupported "global of unsupported type — later slice"
 ;;
 

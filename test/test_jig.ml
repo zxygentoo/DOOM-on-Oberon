@@ -686,6 +686,33 @@ let samples =
   ; ( "char cgc; int idc2(int x){ return x; } int cch(int i){ cgc = idc2(i); return cgc; }"
     , "cch"
     , 1 (* sub-word destination: STB truncates, LDB re-widens — mod-256 both sides *) )
+    (* unions: members all at byte offset 0, size/align = max over members; a static
+       initializer names exactly one member and the rest stays zero. DOOM's unions are
+       actionf_t (function-pointer variants) and intercept_t's thing/line — same-width
+       scalars; type-punning through memory is well-defined here because both sides are
+       little-endian and every access is a real load/store. *)
+  ; ( "union uv { int i; char c[4]; }; union uv gu; int ur(int i){ gu.i = i; return \
+       gu.c[0] + gu.c[1] * 256; }"
+    , "ur"
+    , 1 (* bss union global + punning: write .i, read bytes back (LE) *) )
+  ; ( "union uw { int i; short s; }; union uw guw = { 42 }; int uwr(int i){ return guw.i \
+       + i; }"
+    , "uwr"
+    , 1 (* initialized union: the first member takes the value *) )
+  ; ( "struct th { int x; union { int a; unsigned b; } u; }; struct th gth = { 1, { 2 } \
+       }; int thr(int i){ return gth.x + gth.u.a + i; }"
+    , "thr"
+    , 1 (* union nested in a struct — the thinker_t/actionf_t shape *) )
+  ; ( "union pu { int *p; char *q; }; int pux = 258; union pu gpu = { &pux }; int \
+       upr(int i){ return *gpu.p + gpu.q[0] + i; }"
+    , "upr"
+    , 1
+      (* an s8 reloc inside a union init; deref via .p and pun via .q (LE low byte = 2) *)
+    )
+  ; ( "union uv2 { int i; char c[4]; }; int ulc(int i){ union uv2 v; v.i = i * 5 + 1; \
+       return v.c[3]; }"
+    , "ulc"
+    , 1 (* union LOCAL: slotted (aggregate), punned through the frame slot *) )
   ]
 ;;
 
