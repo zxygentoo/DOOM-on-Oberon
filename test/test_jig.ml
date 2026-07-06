@@ -25,10 +25,11 @@ let dcc_compile ~src ~fname =
   let file = Frontend.parse_string ~name:fname src in
   let globals = Globals.from_file file in
   (* compile every function in the snippet; link with the entry [fname] first so it lands at
-     offset 0 (where the Runner starts) and its callees follow *)
+     offset 0 (where the Runner starts) and its callees follow — including the Runtime
+     helpers (ABI §5: __div &c.), linked into every program exactly as the real blob will *)
   let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) in
   let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
-  (Linker.link (entry @ rest)).Linker.code, globals.Globals.image
+  (Linker.link (entry @ rest @ Runtime.objs)).Linker.code, globals.Globals.image
 ;;
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)
@@ -514,6 +515,98 @@ let samples =
   ; ( "int smulti(int i){ char *a = \"AB\", *b = \"cd\"; return a[i & 1] + b[i & 1]; }"
     , "smulti"
     , 1 (* two distinct literals coexisting → ('A'|'B') + ('c'|'d') *) )
+    (* division (ABI §5): / and % lower to Runtime helper calls — __div/__mod wrap the
+       floored, positive-divisor-only hardware DIV into C's truncating semantics;
+       __udiv/__umod ride DIV' (exact unsigned) plus the big-divisor 0/1 path. The §7-1a
+       vectors: all four sign combinations, both operators, with masked operands so no
+       sample divides by zero or computes INT_MIN/-1 (both C UB — gcc traps on them). *)
+  ; ( "int dpp(int a,int b){ a &= 0x7FFFFFFF; b = (b & 0x3FFF) + 1; return a / b; }"
+    , "dpp"
+    , 2 (* +/+ : floored = truncated, the easy quadrant *) )
+  ; ( "int dnp(int a,int b){ a = -(a & 0x7FFFFFFF); b = (b & 0x3FFF) + 1; return a / b; }"
+    , "dnp"
+    , 2 (* −/+ : the floor→trunc fix-up (q+1 when inexact) *) )
+  ; ( "int dpn(int a,int b){ a &= 0x7FFFFFFF; b = -((b & 0x3FFF) + 1); return a / b; }"
+    , "dpn"
+    , 2 (* +/− : divisor negated (envelope), quotient negated after *) )
+  ; ( "int dnn(int a,int b){ a = -(a & 0x7FFFFFFF); b = -((b & 0x3FFF) + 1); return a / \
+       b; }"
+    , "dnn"
+    , 2 (* −/− : both wraps at once *) )
+  ; ( "int mpp(int a,int b){ a &= 0x7FFFFFFF; b = (b & 0x3FFF) + 1; return a % b; }"
+    , "mpp"
+    , 2 )
+  ; ( "int mnp(int a,int b){ a = -(a & 0x7FFFFFFF); b = (b & 0x3FFF) + 1; return a % b; }"
+    , "mnp"
+    , 2 (* −/+ : remainder H−b when inexact — sign follows the dividend *) )
+  ; ( "int mpn(int a,int b){ a &= 0x7FFFFFFF; b = -((b & 0x3FFF) + 1); return a % b; }"
+    , "mpn"
+    , 2 (* +/− : a % b = a % |b| — divisor sign is irrelevant to C's % *) )
+  ; ( "int mnn(int a,int b){ a = -(a & 0x7FFFFFFF); b = -((b & 0x3FFF) + 1); return a % \
+       b; }"
+    , "mnn"
+    , 2 )
+  ; ( "int dfull(int a,int b){ b |= 1; if (b == -1) b = 3; return a / b; }"
+    , "dfull"
+    , 2
+      (* full-range dividend incl. INT_MIN; odd divisor, never 0 or −1 (INT_MIN/−1 UB) *)
+    )
+  ; "int mfull(int a,int b){ b |= 1; if (b == -1) b = 3; return a % b; }", "mfull", 2
+  ; ( "int dm(int a,int b){ b |= 1; if (b == -1) b = 3; return (a / b) * b + a % b - a; }"
+    , "dm"
+    , 2 (* the C99 identity (a/b)*b + a%b == a → 0; catches any /-% disagreement *) )
+  ; ( "int dmin(int b){ b = (b & 0x3FFF) + 2; int a = -2147483647 - 1; return a / b + a \
+       % b; }"
+    , "dmin"
+    , 1
+      (* INT_MIN dividend — the un-negatable value rides the hardware's own sign handling *)
+    )
+  ; ( "int dbymin(int a){ int m = -2147483647 - 1; return (a | 1) / m + (a | 1) % m; }"
+    , "dbymin"
+    , 1
+      (* INT_MIN divisor — the helpers' special case (−INT_MIN wraps); a|1 is odd, never \
+           INT_MIN, so → 0 + (a|1) *)
+    )
+  ; ( "int dhalf(int a){ return a / 2; }"
+    , "dhalf"
+    , 1 (* the classic; promoted from the retired `d` reject *) )
+  ; ( "int udf(int a,int b){ unsigned x = (unsigned)a, y = (unsigned)b | 1u; return \
+       (int)(x / y); }"
+    , "udf"
+    , 2
+      (* unsigned full-range: y odd, spans both the DIV' path and the big-divisor path *)
+    )
+  ; ( "int umf(int a,int b){ unsigned x = (unsigned)a, y = (unsigned)b | 1u; return \
+       (int)(x % y); }"
+    , "umf"
+    , 2 )
+  ; ( "int ubig(int a,int b){ unsigned x = (unsigned)a, y = (unsigned)b | 0x80000000u; \
+       return (int)(x / y) + (int)(x % y); }"
+    , "ubig"
+    , 2
+      (* divisor top bit forced: quotient is 0 or 1, remainder a or a−b — the slow path *)
+    )
+  ; ( "struct s3 { int a; int b; int c; }; struct s3 sa[4]; int ppd(int i){ struct s3 *p \
+       = sa + (i & 3); struct s3 *q = sa; return p - q; }"
+    , "ppd"
+    , 1
+      (* non-pow-2 ptr−ptr (12-byte elem) through __div; promoted from the retired reject *)
+    )
+  ; ( "struct t3 { int a; int b; int c; }; struct t3 g3[8]; int pnd(int i){ struct t3 *p \
+       = &g3[i & 7]; struct t3 *q = &g3[(i & 15) >> 1]; return p - q; }"
+    , "pnd"
+    , 1 (* non-pow-2 ptr−ptr with a *negative* gap — exact division is sign-safe *) )
+  ; ( "int dmix(int a,int b){ b = (b & 255) + 2; return (a ^ b) + (a / b) * (a - b) + (a \
+       % b); }"
+    , "dmix"
+    , 2 (* live temporaries across the helper BL — the save/restore protocol under load *)
+    )
+  ; ( "int ddn(int a,int b){ b = (b & 255) + 2; return (a / b) / ((b % 5) + 6); }"
+    , "ddn"
+    , 2
+      (* nested divisions: the inner call's use of the div area completes before the \
+           outer's begins *)
+    )
   ]
 ;;
 
@@ -529,14 +622,10 @@ let rejects =
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
     , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
-  ; ( "struct s3 { int a; int b; int c; }; struct s3 sa[4]; int ppd(int i){ struct s3 *p \
-       = sa + (i & 3); struct s3 *q = sa; return p - q; }"
-    , "ppd" (* ptr−ptr, 12-byte elem: non-pow-2 → needs __div *) )
   ; ( "char *msg = \"hi\"; int sl(int x){ if (msg) return x; return 1; }"
     , "sl" (* string-literal init — 3b linker *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
-  ; "int d(int a){ return a / 2; }", "d" (* / lowers to a call — ABI §5 *)
   ]
 ;;
 

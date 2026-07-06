@@ -29,7 +29,10 @@
    the carry (s5.2). Unsigned [>>] (s5.2b) is ROR + mask — RISC5 has no logical shift right, so a
    rotate then a mask of the low 32−n bits. switch / goto / break / continue (s5.3/s5.4) route
    through per-statement backend labels: a switch is a compare-and-branch dispatch chain, goto and
-   continue a jump to a labeled statement. Anything outside the supported subset raises
+   continue a jump to a labeled statement. [/] and [%] (and non-pow-2 ptr−ptr) lower to Runtime
+   helper calls (ABI §5) through the div-area protocol ([gen_helper_call2]): a backend-generated
+   BL lands mid-expression, outside CIL's no-source-calls-in-expressions guarantee, so live
+   scratches are saved around it by hand. Anything outside the supported subset raises
    [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the later
    slice that will handle it. *)
 
@@ -73,7 +76,11 @@ type ctx =
     (* vid -> byte offset within the locals region, for a local that can't be a register:
        an aggregate or an address-taken scalar (s4.3). Addressed SP-relative, [slots_base]+off *)
   ; slots_base : int
-    (* SP-offset where the locals region starts (above the outgoing area) *)
+    (* SP-offset where the locals region starts (above the outgoing and div areas) *)
+  ; div_base : int
+    (* SP-offset of the div area (ABI §5 helper-call staging: 2 operand words + up to 6
+       scratch saves), between the outgoing area and the locals region; -1 when the
+       pre-scan found no helper-lowered construct, so a stray helper call fails loud *)
   ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
   ; scratch_lo : reg (* low end of the scratch pool: above the homes (leaf), or the *)
   ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
@@ -280,7 +287,9 @@ let binop_instr op rd b c : R.instr =
   | C.Shiftlt -> rr R.Lsl
   | C.Shiftrt -> rr R.Asr (* arithmetic; the unsigned case is guarded in gen_expr *)
   | C.Div | C.Mod ->
-    unsupported "/ and %% lower to __div/__mod calls (ABI §5) — call slice"
+    (* / and % never reach the two-register builder: gen_expr intercepts them into
+       Runtime helper calls (ABI §5) *)
+    unsupported "division — internal error (should be intercepted upstream)"
   | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne ->
     (* a comparison never reaches the two-register builder: as a value gen_expr intercepts it
        (bool_from_flags, s5.1), as a condition gen_cond does *)
@@ -436,6 +445,21 @@ let rec gen_expr ctx (e : C.exp) : reg =
   | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
+  | C.BinOp (((C.Div | C.Mod) as op), e1, e2, t) ->
+    (* / and % are calls, not instructions (ABI §5: "the backend never emits a bare DIV") —
+       the hardware DIV floors where C truncates and takes only divisors in [1, 2^31-1], so
+       the sign/envelope wrapping lives once, in the Runtime helpers. Usual arithmetic
+       conversions are already applied (CIL), so the result type's signedness picks the
+       helper pair. *)
+    Check.check_unsupported_types t;
+    let name =
+      match op, is_unsigned_int t with
+      | C.Div, false -> "__div"
+      | C.Div, true -> "__udiv"
+      | C.Mod, false -> "__mod"
+      | _ -> "__umod"
+    in
+    gen_helper_call2 ctx name (fun () -> gen_expr ctx e1) (fun () -> gen_expr ctx e2)
   | C.BinOp (((C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne) as op), e1, e2, t) ->
     (* a comparison as a *value* (s5.1; unsigned/pointer s5.2): x = a < b, return a == b, p < q
        (CIL: unsigned), … — SUB for the flags, then materialize 0/1. As an if/loop condition it
@@ -561,8 +585,62 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
        emit ctx (alu R.Asr d d (R.Imm k));
        d
      | None ->
-       unsupported "ptr−ptr with non-pow-2 element size — needs __div (call slice)")
+       (* non-pow-2 element (a 12-byte struct, say): C guarantees both pointers index one
+          array, so the gap is an *exact* multiple — and exact division is sign-safe through
+          __div (floored = truncated when the remainder is 0). Gap already in [d]; the
+          divisor is the compile-time size. *)
+       gen_helper_call2
+         ctx
+         "__div"
+         (fun () -> d)
+         (fun () ->
+            let c = alloc_scratch ctx in
+            load_const ctx c size;
+            c))
   | _ -> unsupported "gen_ptr_arith: non-pointer op — internal error"
+
+(* Call a 2-arg Runtime helper (ABI §5) from *inside* an expression. CIL's guarantee that
+   expressions contain no calls covers only source calls — this BL is backend-generated, so
+   any live temporaries sitting in caller-saved scratch (R0-R5, which a standard-ABI helper
+   may clobber) must survive it by hand. The div area (ctx.div_base, sized in [compile] when
+   the pre-scan finds a helper-lowered construct) holds 2 operand words + up to 6 scratch
+   saves. Protocol: evaluate BOTH operands first (a nested division inside either one uses
+   this same area and *completes* before we touch it), store both and free them (the same
+   store/load decoupling as the arg marshaller — no swap puzzle when they sit in R1,R0),
+   save every still-busy scratch, load R0/R1, BL, park the result in a fresh register
+   (alloc excludes the saved set by construction), restore. *)
+and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg =
+  if ctx.div_base < 0
+  then unsupported "helper call without a div area — pre-scan mismatch (internal error)";
+  let ra = gen_a () in
+  let rb = gen_b () in
+  emit ctx (R.Store { size = R.W; a = ra; base = sp_reg; off = ctx.div_base });
+  emit ctx (R.Store { size = R.W; a = rb; base = sp_reg; off = ctx.div_base + 4 });
+  free_scratch ctx ra;
+  free_scratch ctx rb;
+  let busy =
+    List.filter
+      (fun r -> not ctx.scratch_free.(r))
+      (List.init (ctx.scratch_hi - ctx.scratch_lo + 1) (fun i -> ctx.scratch_lo + i))
+  in
+  List.iteri
+    (fun i r ->
+       emit
+         ctx
+         (R.Store { size = R.W; a = r; base = sp_reg; off = ctx.div_base + 8 + (4 * i) }))
+    busy;
+  emit ctx (R.Load { size = R.W; a = 0; base = sp_reg; off = ctx.div_base });
+  emit ctx (R.Load { size = R.W; a = 1; base = sp_reg; off = ctx.div_base + 4 });
+  call ctx name;
+  let rd = alloc_scratch ctx in
+  if rd <> return_reg then emit ctx (mov_reg rd return_reg);
+  List.iteri
+    (fun i r ->
+       emit
+         ctx
+         (R.Load { size = R.W; a = r; base = sp_reg; off = ctx.div_base + 8 + (4 * i) }))
+    busy;
+  rd
 
 (* ---- the s3.2 address calculus: fold an lval into (base register, residual const).
    Constant hops — fields, constant indexes — accumulate in the residual, which rides
@@ -985,6 +1063,35 @@ let call_arity (fd : C.fundec) : int option =
   !widest
 ;;
 
+(* Does the body contain a construct that lowers to a Runtime helper call (ABI §5) — a
+   [/] or [%], or a ptr−ptr whose element size isn't a power of two? A yes sizes the div
+   area into the frame and forces the non-leaf shape (the BL clobbers LNK and the
+   caller-saved scratch pool). Division hides in any expression position (an index, a
+   condition, a call argument), so this is a visitor, not a statement walk like
+   [call_arity]'s. *)
+let calls_runtime_helper (fd : C.fundec) : bool =
+  let found = ref false in
+  let scan =
+    object
+      inherit C.nopCilVisitor
+
+      method! vexpr e =
+        (match e with
+         | C.BinOp ((C.Div | C.Mod), _, _, _) -> found := true
+         | C.BinOp (C.MinusPP, e1, _, _) ->
+           (* must mirror gen_ptr_arith's routing exactly: only the non-pow-2 case calls *)
+           (try if pow2_log (pointee_size (C.typeOf e1)) = None then found := true with
+            | Check.Unsupported _ | C.SizeOfError _ ->
+              (* codegen will refuse this expression itself, with the right message *)
+              ())
+         | _ -> ());
+        C.DoChildren
+    end
+  in
+  ignore (C.visitCilFunction scan fd);
+  !found
+;;
+
 (* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
    [Linker.link] lays this out with any callees and resolves branches and calls. ---- *)
 let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
@@ -1032,7 +1139,14 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
        | _ -> ())
     fd.sformals;
   let call_info = call_arity fd in
-  let leaf = call_info = None in
+  (* A body with / or % (or a non-pow-2 ptr−ptr) BLs a Runtime helper (ABI §5), so it is
+     non-leaf even with zero source calls — LNK gets clobbered, and values must live in
+     callee-saved homes. It also gets a div area in the frame: 2 operand words + up to 6
+     scratch saves for the mid-expression call protocol (gen_helper_call2). The helpers
+     themselves are frame-less leaves that never touch the caller's stack, so no outgoing
+     home area is owed for them. *)
+  let has_div = calls_runtime_helper fd in
+  let leaf = call_info = None && not has_div in
   (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and reads
      them at FP+16.. (below). The naive-alloc register ceiling still applies via [assign]. *)
   let needs_fp = List.length fd.sformals > 4 in
@@ -1041,6 +1155,9 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     | None -> 0
     | Some n -> 4 * max 4 n
   in
+  let div_area = if has_div then 32 else 0 in
+  (* locals region base: above the outgoing area and the div area *)
+  let slots_base = outgoing_area + div_area in
   (* s4.3: a variable that can't live in a register — an aggregate, or a scalar whose address
      is taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
      above the outgoing area. Addressed SP-relative: the offset ([slots_base]+off) is known
@@ -1111,7 +1228,8 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     { rev_frags = []
     ; homes
     ; slots
-    ; slots_base = outgoing_area
+    ; slots_base
+    ; div_base = (if has_div then outgoing_area else -1)
     ; globals
     ; scratch_lo
     ; scratch_hi
@@ -1152,8 +1270,8 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
       (max 0 (ctx.max_used - first_callee_saved + 1))
       (fun i -> first_callee_saved + i)
   in
-  (* the saves start above the outgoing area and the locals region *)
-  let saves_base = outgoing_area + !locals_size in
+  (* the saves start above the outgoing area, the div area, and the locals region *)
+  let saves_base = slots_base + !locals_size in
   let saves_end = saves_base + (4 * List.length saved) in
   (* slots above the saves: FP (needs_fp), then LNK (non-leaf), matching the ABI §3 idiom *)
   let fp_off = saves_end in
@@ -1221,7 +1339,7 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
                   | Some off ->
                     [ L.Ins
                         (R.Store
-                           { size = R.W; a = h; base = sp_reg; off = outgoing_area + off })
+                           { size = R.W; a = h; base = sp_reg; off = slots_base + off })
                     ]
                   | None -> []
                 in
