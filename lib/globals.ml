@@ -6,12 +6,12 @@
    same contract, small scale; the real 3b linker splits bss out only to keep the
    blob *file* short.
 
-   Deliberately *tolerant*: a global the current slice can't place (short, union,
-   float ban, link-time-address initializer) is recorded in [skipped] with its reason
-   instead of raised — so Fundec attributes the refusal to the functions that
-   actually touch it, and every other function keeps compiling (the doomcc-histogram
-   semantics). Places any type whose leaves are all words or chars (arrays/structs
-   included, s3.2 + s3.3a); short leaves wait for s3.3b. *)
+   Deliberately *tolerant*: a global the current slice can't place (union, float ban,
+   link-time-address initializer) is recorded in [skipped] with its reason instead of
+   raised — so Fundec attributes the refusal to the functions that actually touch it,
+   and every other function keeps compiling (the doomcc-histogram semantics). Places any
+   type whose scalar leaves are integers or pointers (arrays/structs included, all widths
+   through s3.3); unions and link-time initializers wait for later slices. *)
 
 module C = GoblintCil
 
@@ -49,17 +49,14 @@ let word_of_init (e : C.exp) : int =
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
 
-(* A type places iff every leaf is a word or a char — arrays and structs included
-   (natural alignment ≤ 4, ABI §4, so layout can't diverge from gcc -m32; the spike
-   verified identical struct metrics under our machdep). short (16-bit) leaves are
-   s3.3b: they need the composed byte access Fundec doesn't emit yet. *)
+(* A type places iff every leaf is an integer scalar (word / short / char) or pointer —
+   arrays and structs included (natural alignment ≤ 4, ABI §4, so layout can't diverge
+   from gcc -m32; the spike verified identical struct metrics under our machdep). The
+   64-bit ban and float ban are enforced upstream by {!Check.check_unsupported_types},
+   so every width reaching here (8/16/32) now serializes; only unions are left out. *)
 let rec check_placeable (t : C.typ) =
   match C.unrollType t with
-  | (C.TInt _ | C.TEnum _ | C.TPtr _) as t' ->
-    (match C.bitsSizeOf t' with
-     | 32 | 8 -> () (* word, or char (LDB/STB, s3.3a) *)
-     | 16 -> Check.unsupported "short global — memory slice s3.3b"
-     | _ -> Check.unsupported "sub-word global — memory slice s3.3")
+  | C.TInt _ | C.TEnum _ | C.TPtr _ -> ()
   | C.TArray (elem, _, _) -> check_placeable elem
   | C.TComp (ci, _) when ci.cstruct ->
     List.iter (fun (f : C.fieldinfo) -> check_placeable f.ftype) ci.cfields

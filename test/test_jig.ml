@@ -205,6 +205,36 @@ let samples =
        + mm.b * k; }"
     , "mf"
     , 1 )
+    (* sub-word short / signed char (s3.3b): halfword composed from 2×LDB/STB, and the
+       signed vs unsigned widening that rides each load / cast / param entry *)
+  ; "short gs = 1000; int rs(int x){ return gs + x; }", "rs", 1 (* signed short load *)
+  ; ( "short gn = -5; int rn(int x){ return gn + x; }"
+    , "rn"
+    , 1 (* negative: sign-extend on the composed load *) )
+  ; ( "unsigned short us = 50000; int ru(int x){ return us + x; }"
+    , "ru"
+    , 1 (* > 32767: zero-extended, NOT sign-extended *) )
+  ; ( "signed char sc = -1; int rsc(int x){ return sc + x; }"
+    , "rsc"
+    , 1 (* LDB + sign-extend *) )
+  ; ( "short sar[4] = {100,-200,300,-400}; int sget(int i){ return sar[i & 3]; }"
+    , "sget"
+    , 1 (* short array: element stride 2, mixed signs *) )
+  ; ( "struct sm { int a; short b; }; struct sm sm0 = {1000, -50}; int smf(int k){ \
+       return sm0.a + sm0.b * k; }"
+    , "smf"
+    , 1 (* signed short field at offset 4 *) )
+  ; ( "short sw; int sset(int x){ sw = x; return sw; }"
+    , "sset"
+    , 1 (* composed store (2×STB) then signed read-back: (short)40000 = -25536 *) )
+  ; ( "unsigned short uw; int uset(int x){ uw = x; return uw; }"
+    , "uset"
+    , 1 (* unsigned read-back: (unsigned short)70000 = 4464 *) )
+  ; "int ps(short s){ return s; }", "ps", 1 (* signed short param: sign-extend at entry *)
+  ; "int psc(signed char c){ return c; }", "psc", 1 (* signed char param entry narrow *)
+  ; ( "int scast(int x){ short s = x; return s; }"
+    , "scast"
+    , 1 (* (short) narrowing cast as a value: gen_narrow signed path *) )
   ]
 ;;
 
@@ -215,11 +245,6 @@ let samples =
 let rejects =
   [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
   ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
-  ; "short gs = 1000; int rs(int x){ return gs + x; }", "rs" (* short access — s3.3b *)
-  ; ( "signed char sc = -1; int rsc(int x){ return sc + x; }"
-    , "rsc" (* signed char access (LDB + sign-extend) — s3.3b *) )
-  ; "int ps(short s){ return s; }", "ps" (* short param — s3.3b *)
-  ; "int psc(signed char c){ return c; }", "psc" (* signed char param — s3.3b *)
   ; ( "int la(int i){ int t[4]; t[0] = i; return t[0]; }"
     , "la" (* local array — needs a stack slot, call slice *) )
   ; ( "struct sc { int a; int b; }; struct sc s1 = {1,2}; struct sc s2; int cp(int x){ \
