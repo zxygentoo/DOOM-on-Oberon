@@ -70,6 +70,11 @@ let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
       failwith
         "Runner.run: step cap exceeded (mis-resolved branch / non-terminating body?)"
     else (
+      (* the synthetic ms clock ticks with the instruction count (1 ms per 1024
+         steps — the rate is arbitrary, monotonicity is the contract), so
+         time-dependent code (DG_SleepMs's spin on the ms counter) terminates
+         instead of reading a frozen clock into the step cap *)
+      M.set_time m (n asr 10);
       M.For_tests.single_step m;
       loop (n + 1))
   in

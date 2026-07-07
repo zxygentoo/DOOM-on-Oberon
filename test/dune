@@ -7,4 +7,9 @@
 
 (tests
  (names test_runner test_jig test_blob)
- (libraries emu doomcc_core unix))
+ (libraries emu doomcc_core unix)
+ ; the jig merges the mini-libc sources at run time (test_jig's libc_path):
+ ; declaring them makes them visible from the runtest cwd (_build/default/test,
+ ; where the bare source tree isn't) and re-runs the jig when they change
+ (deps
+  (glob_files %{workspace_root}/libc/*.c)))

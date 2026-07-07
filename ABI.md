@@ -236,6 +236,19 @@ SHARED page (v1 fields; rest reserved):
 (heartbeat) · `+20` key ring head · `+24` tail · `+32…` ring of 2-byte
 events (make/break, code), 256 entries.
 
+Key-ring discipline (v1; a §10 non-breaking clarification of the fields
+above): head and tail are free-running u32 counters, masked at use
+(index = counter & 255) — empty is `head = tail`, full is
+`head − tail = 256`, both exact across the u32 rollover. The producer
+(stub `KeyIn` / a UART poll) writes the 2-byte event at
+`+32 + 2·(head & 255)`, *then* increments head; the consumer (the blob's
+`DG_GetKey`) reads at `+32 + 2·(tail & 255)` when `tail ≠ head`, then
+increments tail. A full ring drops the event, producer-side. Event bytes:
+byte 0 = pressed (1 make, 0 break), byte 1 = doomkey code (`doomkeys.h`) —
+the sender owns all translation; the blob never sees a scancode. The stub
+zeroes the SHARED page (head = tail = 0) before writing magic/version and
+calling `Init`.
+
 ## 9. Confirm-in-sim checklist (becomes the first jig vectors)
 
 - **C1** — interrupts genuinely never fire (else R12/H/flags rules change).

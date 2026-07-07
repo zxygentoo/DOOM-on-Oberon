@@ -29,17 +29,21 @@ let libc_path name =
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
    body plus the data/bss image the runner drops at DB before each run ---- *)
-let dcc_compile ?(libc = false) ~src ~fname () =
+let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
   let file = Frontend.parse_string ~name:fname src in
   let file =
     if libc
     then
       Frontend.merge
-        [ file
-        ; Frontend.parse_file (libc_path "mini.c")
-        ; Frontend.parse_file (libc_path "stdio.c")
-        ; Frontend.parse_file (libc_path "fixed.c")
-        ]
+        ([ file
+         ; Frontend.parse_file (libc_path "mini.c")
+         ; Frontend.parse_file (libc_path "stdio.c")
+         ; Frontend.parse_file (libc_path "fixed.c")
+         ]
+         (* the platform layer only on request: its functions read [__shared_base],
+            which every merged sample would then have to define *)
+         @ if port then [ Frontend.parse_file (libc_path "doomgeneric_oberon.c") ] else []
+        )
         ~name:fname
     else file
   in
@@ -1069,6 +1073,58 @@ let libc_selfchecks =
   ]
 ;;
 
+(* ---- self-checks (port slice): the DG_ hooks' machine surface — the SHARED-page
+   key ring (pure memory, fully checkable) and the ms-counter spin (checkable since
+   the Runner ticks the synthetic clock; the real assertion in [slp] is TERMINATION —
+   a frozen clock would spin DG_SleepMs into the step cap). The samples bind
+   [__shared_base] to 0x78000: a free 4 KB between the stack top (0x70000, grows
+   down) and the data segment (0x80000). Console functions stay off-limits as ever
+   (no serial attached). ---- *)
+let port_selfchecks =
+  List.map (fun (src, name, cases) ->
+    ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; char \
+       *__shared_base = (char *)0x78000; extern void DG_KeyEnqueue(int pressed, unsigned \
+       char key); extern int DG_GetKey(int *pressed, unsigned char *key); extern \
+       unsigned int DG_GetTicksMs(); extern void DG_SleepMs(unsigned int ms); "
+      ^ src
+    , name
+    , cases ))
+  @@ [ ( "int kr1(int i){ int p; unsigned char k; int acc; int n; acc = 0; n = 0; if \
+          (DG_GetKey(&p, &k)) return -1; DG_KeyEnqueue(1, 173); DG_KeyEnqueue(0, 173); \
+          DG_KeyEnqueue(1, 32); while (DG_GetKey(&p, &k)) { acc = acc * 1000 + k + p * \
+          500; n++; } return acc + n + (i - i); }"
+       , "kr1"
+         (* empty-at-start + FIFO order + both event bytes:
+            (173+500)*1000000 + 173*1000 + (32+500) + 3 *)
+       , [ 0, 673173535; 9, 673173535 ] )
+     ; ( "int kr2(int i){ unsigned int *head; unsigned int *tail; int p; unsigned char \
+          k; int r; head = (unsigned int *)(__shared_base + 20); tail = (unsigned int \
+          *)(__shared_base + 24); *head = 0xFFFFFFFEu; *tail = 0xFFFFFFFEu; \
+          DG_KeyEnqueue(1, 11); DG_KeyEnqueue(1, 22); DG_KeyEnqueue(0, 33); \
+          DG_GetKey(&p, &k); r = k; DG_GetKey(&p, &k); r = r * 100 + k; DG_GetKey(&p, \
+          &k); r = r * 100 + k + p; if (DG_GetKey(&p, &k)) r = -r; return r + (i - i); }"
+       , "kr2"
+         (* the free-running-counter contract: head/tail seeded at 0xFFFFFFFE, three
+            events ride slots 254, 255, 0 across the u32 rollover, drain in order,
+            ring empty after: 11*10000 + 22*100 + 33 *)
+       , [ 0, 112233; -5, 112233 ] )
+     ; ( "int kr3(int i){ int j; int c; int p; unsigned char k; int last; c = 0; last = \
+          0; for (j = 0; j < 300; j++) DG_KeyEnqueue(1, (unsigned char)j); while \
+          (DG_GetKey(&p, &k)) { c++; last = k; } return c * 1000 + last + (i - i); }"
+       , "kr3"
+         (* full-ring drop: 300 offered, exactly 256 accepted (keys 0..255) and the
+            rest dropped — an over-accepting ring would overwrite live slots and
+            surface as c > 256 or a wrapped last key (last != 255) *)
+       , [ 0, 256255; 3, 256255 ] )
+     ; ( "int slp(int i){ unsigned int t0; unsigned int t1; t0 = DG_GetTicksMs(); \
+          DG_SleepMs(3); t1 = DG_GetTicksMs(); return (t1 - t0 >= 3u) + (i - i); }"
+       , "slp"
+         (* the spin waits at least [ms] on the Runner's synthetic clock — and
+            terminates, which is the assertion a frozen clock would fail *)
+       , [ 0, 1; 2, 1 ] )
+     ]
+;;
+
 (* a random 32-bit signed arg, plus the edge values every sample is probed with *)
 let r32 () =
   let b () = Random.bits () in
@@ -1125,8 +1181,8 @@ let check_reject (src, fname) : int =
 ;;
 
 (* one self-check: run ours over the given args, compare to the stated constants *)
-let check_self (src, fname, cases) : int * int =
-  let body, data = dcc_compile ~libc:true ~src ~fname () in
+let check_self ?(port = false) (src, fname, cases) : int * int =
+  let body, data = dcc_compile ~libc:true ~port ~src ~fname () in
   let sfails = ref 0 in
   List.iter
     (fun (arg, want) ->
@@ -1163,13 +1219,21 @@ let () =
       acc
       fixed_samples
   in
-  let total, sample_fails =
+  let self_fold ?port acc list =
     List.fold_left
       (fun (cases, fails) sc ->
-         let c, f = check_self sc in
+         let c, f = check_self ?port sc in
          cases + c, fails + f)
-      (fixed_fold (fold true (fold false (0, 0) samples) libc_samples))
-      libc_selfchecks
+      acc
+      list
+  in
+  let total, sample_fails =
+    self_fold
+      ~port:true
+      (self_fold
+         (fixed_fold (fold true (fold false (0, 0) samples) libc_samples))
+         libc_selfchecks)
+      port_selfchecks
   in
   let fails =
     sample_fails + List.fold_left (fun acc r -> acc + check_reject r) 0 rejects
@@ -1180,7 +1244,8 @@ let () =
     (List.length samples
      + List.length libc_samples
      + List.length fixed_samples
-     + List.length libc_selfchecks)
+     + List.length libc_selfchecks
+     + List.length port_selfchecks)
     (List.length rejects)
     fails;
   if fails > 0 then exit 1
