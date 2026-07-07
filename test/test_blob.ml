@@ -2,10 +2,9 @@
    small program, emit the blob file through Blob with a crt0 thunk as the Init entry,
    then play DOOM.Mod's stub — load the file bytes at BLOB_BASE, verify the header
    (magic, version, lengths, checksum), zero the bss range the header names, and BL the
-   header's entry — in the vendored emulator. The emulator models Oberon's 1 MB RAM
-   (the 24-bit himem widening is a pending vendor patch), so the test's base is 0x40000
-   instead of the real 0x100000; the layout math is identical, only the constant
-   differs.
+   header's entry — in the vendored emulator, at the real ABI §8 addresses: the
+   emulator's default machine carries 16 MiB, so the blob loads, runs, and stacks in
+   himem exactly as it will on the hardware.
 
    The loader sets NOTHING but what a stub's BL would: R0 (the arg), LNK (the return
    address), PC (the header's entry offset). DB and SP belong to the thunk — and
@@ -16,11 +15,8 @@ module Isa = Emu.Risc5_isa
 module M = Emu.Risc
 open Doomcc_core
 
-let base =
-  0x40000 (* test BLOB_BASE: inside the emulator's 1 MB (real machine: 0x100000) *)
-;;
-
-let stack_top = 0x70000
+let base = 0x100000 (* BLOB_BASE, ABI §8 *)
+let stack_top = 0x300000 (* STACK_TOP, ABI §8 *)
 let max_steps = 1_000_000
 
 (* the program: data global · bss global · fn-ptr Code reloc · string Data reloc *)
