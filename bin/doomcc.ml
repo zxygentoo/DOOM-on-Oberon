@@ -27,7 +27,18 @@ let () =
     | [] -> ()
   in
   parse_args (List.tl (Array.to_list Sys.argv));
-  let inputs = List.rev !inputs in
+  (* m_fixed.c is replaced WHOLESALE (AGENT.md §4): its int64_t code arrives via the
+     host-preprocessed .i as 32-bit `long` — a silent miscompile, not a refusal — so
+     the file is skipped unconditionally: FixedMul is the ABI §5 linker intrinsic,
+     FixedDiv comes from libc/fixed.c. Encoded here so no invocation can forget. *)
+  let inputs, skipped_fixed =
+    List.partition (fun f -> Filename.basename f <> "m_fixed.i") (List.rev !inputs)
+  in
+  if skipped_fixed <> []
+  then
+    Printf.printf
+      "front:   m_fixed.i skipped — replaced by the FixedMul intrinsic + libc/fixed.c \
+       (ABI §5)\n";
   if inputs = []
   then (
     prerr_endline "usage: doomcc <unit.i> [unit2.i ...] [-o out.blob]";
@@ -98,7 +109,9 @@ let () =
   List.iter (fun (o : Linker.obj) -> Hashtbl.replace defined o.Linker.name ()) objs;
   let missing = Hashtbl.create 64 in
   let note_ref name =
-    if not (Hashtbl.mem defined name) then Hashtbl.replace missing name ()
+    (* intrinsics resolve by inline expansion, not by a defining object (ABI §5) *)
+    if (not (Hashtbl.mem defined name)) && not (Linker.is_intrinsic name)
+    then Hashtbl.replace missing name ()
   in
   List.iter
     (fun (o : Linker.obj) ->

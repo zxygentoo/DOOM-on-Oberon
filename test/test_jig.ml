@@ -38,6 +38,7 @@ let dcc_compile ?(libc = false) ~src ~fname () =
         [ file
         ; Frontend.parse_file (libc_path "mini.c")
         ; Frontend.parse_file (libc_path "stdio.c")
+        ; Frontend.parse_file (libc_path "fixed.c")
         ]
         ~name:fname
     else file
@@ -67,11 +68,15 @@ let dcc_compile ?(libc = false) ~src ~fname () =
 ;;
 
 (* ---- gcc oracle: compile [src] + a tiny argv driver once, then run the exe per tuple ---- *)
-let gcc_compile ~src ~fname ~arity : string =
+let gcc_compile ?(gcc_extra = "") ~src ~fname ~arity () : string =
   let cfile = Filename.temp_file "jig" ".c" in
   let exe = cfile ^ ".exe" in
   let oc = open_out cfile in
   output_string oc src;
+  (* oracle-side-only definitions (e.g. the int64_t m_fixed originals: OUR side gets
+     the intrinsic + libc/fixed.c, the gcc side the genuine 64-bit article) *)
+  output_string oc "\n";
+  output_string oc gcc_extra;
   (* the driver's two needs, declared rather than #included: headers would re-typedef
      size_t as -m32's unsigned int and clash with the libc samples' unsigned-long
      prototypes (which mirror the host-preprocessed .i files CIL merges against) *)
@@ -932,6 +937,52 @@ let libc_samples =
     ]
 ;;
 
+(* ---- m_fixed (1a meets the intrinsic): FixedMul expands inline at link (MUL + read
+   H + repack — the §1 "near custom-built" moment) and FixedDiv is libc/fixed.c's
+   16-step restoring division. The oracle side compiles doomgeneric's REAL int64_t
+   originals (gcc_extra — our side never sees them), so the diff pits our 32-bit
+   machinery against genuine 64-bit arithmetic over full-range fixed-point pairs. *)
+let fixed_ref =
+  "static int _fm_abs(int x){ return x < 0 ? -x : x; } int FixedMul(int a, int b){ \
+   return (int)(((long long)a * (long long)b) >> 16); } int FixedDiv(int a, int b){ if \
+   ((_fm_abs(a) >> 14) >= _fm_abs(b)) return (a ^ b) < 0 ? (int)0x80000000 : \
+   (int)0x7FFFFFFF; { long long r = ((long long)a << 16) / b; return (int)r; } }\n"
+;;
+
+let fixed_samples =
+  (* the heap globals bind mini.c's malloc (merged with everything) inside emulator RAM *)
+  List.map (fun (src, name, arity) ->
+    ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; " ^ src
+    , name
+    , arity ))
+  @@ [ ( "extern int FixedMul(int, int); int fxm(int a, int b){ return FixedMul(a, b); }"
+       , "fxm"
+       , 2 (* full-range: any dropped high word (the miscompile this slice fixes) shows *)
+       )
+     ; ( "extern int FixedMul(int, int); int fxmi(int a){ return FixedMul(a, 1 << 16) - \
+          a; }"
+       , "fxmi"
+       , 1 (* the unit identity: a * 1.0 == a, exact for every a *) )
+     ; ( "extern int FixedDiv(int, int); int fxd(int a, int b){ a |= 1; return \
+          FixedDiv(a, b); }"
+       , "fxd"
+       , 2
+         (* full-range with a != INT_MIN (the original's abs-overflow quirk diverges \
+           there); b = 0 rides the saturation guard on both sides *)
+       )
+     ; ( "extern int FixedDiv(int, int); int fxdi(int a){ a = (a & 0xFFFFFF) - 0x800000; \
+          return FixedDiv(a, 1 << 16) - a; }"
+       , "fxdi"
+       , 1 (* the unit identity: a / 1.0 == a across ±2^23 (inside the guard) *) )
+     ; ( "extern int FixedMul(int, int); extern int FixedDiv(int, int); int fxc2(int a, \
+          int b){ b |= 1; int m = FixedMul(a, b); int d = FixedDiv(a, b); return m + d * \
+          3; }"
+       , "fxc2"
+       , 2 (* both in one frame: the intrinsic expansion and the C division coexisting *)
+       )
+     ]
+;;
+
 (* ---- self-checks (1c.3): the memory-file registry has no glibc counterpart, so
    these compile with the full libc and verify against hand-computed constants instead
    of an oracle. They must not touch the console functions — the bare jig emulator has
@@ -984,9 +1035,9 @@ let nrand = 40
 
 (* one sample: compile with both backends, diff R0 over edge + random arg-tuples;
    returns (run cases, mismatches) for the caller to total up *)
-let check_sample ?(libc = false) (src, fname, arity) : int * int =
+let check_sample ?(libc = false) ?(gcc_extra = "") (src, fname, arity) : int * int =
   let body, data = dcc_compile ~libc ~src ~fname () in
-  let exe = gcc_compile ~src ~fname ~arity in
+  let exe = gcc_compile ~gcc_extra ~src ~fname ~arity () in
   let tuples =
     List.map (fun v -> List.init arity (fun _ -> v)) edges
     @ List.init nrand (fun _ -> List.init arity (fun _ -> r32 ()))
@@ -1058,12 +1109,20 @@ let () =
       (cases, fails)
       list
   in
+  let fixed_fold acc =
+    List.fold_left
+      (fun (cases, fails) sample ->
+         let c, f = check_sample ~libc:true ~gcc_extra:fixed_ref sample in
+         cases + c, fails + f)
+      acc
+      fixed_samples
+  in
   let total, sample_fails =
     List.fold_left
       (fun (cases, fails) sc ->
          let c, f = check_self sc in
          cases + c, fails + f)
-      (fold true (fold false (0, 0) samples) libc_samples)
+      (fixed_fold (fold true (fold false (0, 0) samples) libc_samples))
       libc_selfchecks
   in
   let fails =
@@ -1072,7 +1131,10 @@ let () =
   Printf.printf
     "diff jig: %d run cases across %d samples + %d gate rejects, %d failures\n"
     total
-    (List.length samples + List.length libc_samples + List.length libc_selfchecks)
+    (List.length samples
+     + List.length libc_samples
+     + List.length fixed_samples
+     + List.length libc_selfchecks)
     (List.length rejects)
     fails;
   if fails > 0 then exit 1

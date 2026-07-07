@@ -32,7 +32,15 @@ type image =
   ; code_base : int (* the byte address the code is linked at (the [link] argument) *)
   }
 
-(** Word length of a function's resolved code (labels contribute 0, [Addr] two). *)
+(** The intrinsic registry (ABI §5, frozen at [{ FixedMul }]): a [Call] to one of these
+    expands inline at resolve — MUL + read H + repack, the machine's 16.16 fixed-point
+    party trick — clobbering exactly R0/R1/H/flags, a strict subset of a call's clobber
+    set. Undefined-symbol scans must skip intrinsics: they resolve without a defining
+    object. Taking an intrinsic's address is unsupported. *)
+val is_intrinsic : string -> bool
+
+(** Word length of a function's resolved code (labels contribute 0, [Addr] two,
+    intrinsic [Call]s their expansion width). *)
 val code_size : obj -> int
 
 (** A linked function's absolute byte address — what an [Addr] frag loads, and what a

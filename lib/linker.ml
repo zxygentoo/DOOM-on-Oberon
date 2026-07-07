@@ -25,9 +25,22 @@ type image =
   ; code_base : int
   }
 
+(* The intrinsic registry (ABI §5, frozen: { FixedMul }). A Call to an intrinsic
+   expands INLINE at resolve instead of becoming a BL: FixedMul is the machine's party
+   trick (§1: MUL leaves the 64-bit product's high word in H, natively, in 2 cycles),
+   and the expansion clobbers exactly R0, R1, H, flags — a strict subset of a call's
+   clobber set, so callers cannot tell, except by being fast. Taking an intrinsic's
+   ADDRESS is unsupported: there is no function to point at (sym_addr fails loud). *)
+let intrinsic_width name = if name = "FixedMul" then Some 6 else None
+let is_intrinsic name = intrinsic_width name <> None
+
 let frag_width = function
   | Label _ -> 0
-  | Ins _ | Bcc _ | Jmp _ | Call _ -> 1
+  | Ins _ | Bcc _ | Jmp _ -> 1
+  | Call name ->
+    (match intrinsic_width name with
+     | Some w -> w
+     | None -> 1)
   | Addr _ -> 2 (* MOV-high + IOR, fixed even for small addresses: deterministic layout *)
 ;;
 
@@ -81,6 +94,19 @@ let link ~(code_base : int) (objs : obj list) : image =
          | Ins i -> [ i ]
          | Bcc (cond, neg, l) -> [ branch cond neg (Hashtbl.find addr l) ]
          | Jmp l -> [ branch R.True false (Hashtbl.find addr l) ]
+         | Call "FixedMul" ->
+           (* fixed_t product = (int64(a) * int64(b)) >> 16, without any 64-bit value:
+              MUL computes the full 64-bit product (low -> R0, high -> H); the result
+              is high<<16 | low>>>16 — the middle 32 bits, exactly the int cast of the
+              arithmetic shift. ROR+AND is the logical >>16 (no LSR on RISC5, s5.2b). *)
+           [ R.Alu { op = R.Mul; u = false; v = false; a = 0; b = 0; operand = R.Reg 1 }
+           ; R.Alu { op = R.Mov; u = true; v = false; a = 1; b = 0; operand = R.Reg 0 }
+           ; R.Alu { op = R.Lsl; u = false; v = false; a = 1; b = 1; operand = R.Imm 16 }
+           ; R.Alu { op = R.Ror; u = false; v = false; a = 0; b = 0; operand = R.Imm 16 }
+           ; R.Alu
+               { op = R.And; u = false; v = false; a = 0; b = 0; operand = R.Imm 0xFFFF }
+           ; R.Alu { op = R.Ior; u = false; v = false; a = 0; b = 1; operand = R.Reg 0 }
+           ]
          | Call name ->
            [ R.Branch
                { cond = R.True
