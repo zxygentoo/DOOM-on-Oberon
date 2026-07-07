@@ -22,7 +22,12 @@ for o in $srcs; do
   # exports colors[256]/palette_changed for the platform layer's dither
   # LUTs. Without it the tree builds the truecolor path (cmap_to_fb RGB
   # conversion) our port never uses.
-  gcc -E -std=gnu99 -DCMAP256 -I"$SRCDIR" "$SRCDIR/$c" > "out/i/${c%.c}.i"
+  # -DDOOMGENERIC_RESX/RESY=320x200: fb_scaling = xres/320 = 1, so
+  # I_FinishUpdate degenerates to a per-line copy and DG_ScreenBuffer is the
+  # raw 320x200 index buffer — the 2x2 doubling happens inside the dither
+  # blit (libc/dither.c), not as a byte-doubled 256 KB intermediate.
+  gcc -E -std=gnu99 -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
+    -I"$SRCDIR" "$SRCDIR/$c" > "out/i/${c%.c}.i"
   n=$((n + 1))
 done
 echo "preprocessed $n TUs into out/i/"

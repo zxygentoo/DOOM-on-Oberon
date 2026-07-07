@@ -10,3 +10,4 @@
 char *__heap_base = (char *)0x320000;
 char *__heap_end = (char *)0xA00000;
 char *__shared_base = (char *)0x300000;
+char *__fb_base = (char *)0xE7F00; /* the 1024x768x1 framebuffer (bottom-up) */

@@ -33,10 +33,17 @@ let sentinel r = 0xCAFE_0000 lor r land 0xFFFF_FFFF
 
 (* Runaway guard: any correct function over the jig's bounded inputs halts well within this, so
    hitting it means a codegen bug (mis-resolved branch / non-terminating loop), not a slow
-   program — fail loud rather than spin forever. *)
+   program — fail loud rather than spin forever. Samples that legitimately run long (the
+   full-frame dither-blit self-check, ~3.5M instrs) pass an explicit [steps] override. *)
 let max_steps = 1_000_000
 
-let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
+let run
+      ?(data = Bytes.empty)
+      ?(steps = max_steps)
+      (body : Isa.instr list)
+      (args : int list)
+  : int
+  =
   let m = M.make () in
   let ram = M.For_tests.ram m in
   List.iteri (fun i instr -> ram.(code_base + i) <- Isa.encode instr) body;
@@ -65,7 +72,7 @@ let run ?(data = Bytes.empty) (body : Isa.instr list) (args : int list) : int =
   let rec loop n =
     if M.For_tests.pc m >= stop
     then ()
-    else if n >= max_steps
+    else if n >= steps
     then
       failwith
         "Runner.run: step cap exceeded (mis-resolved branch / non-terminating body?)"

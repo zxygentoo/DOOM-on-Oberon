@@ -41,9 +41,14 @@ let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
          ; Frontend.parse_file (libc_path "fixed.c")
          ]
          (* the platform layer only on request: its functions read [__shared_base],
-            which every merged sample would then have to define *)
-         @ if port then [ Frontend.parse_file (libc_path "doomgeneric_oberon.c") ] else []
-        )
+            colors[] &c., which every merged sample would then have to define *)
+         @
+         if port
+         then
+           [ Frontend.parse_file (libc_path "doomgeneric_oberon.c")
+           ; Frontend.parse_file (libc_path "dither.c")
+           ]
+         else [])
         ~name:fname
     else file
   in
@@ -1135,22 +1140,37 @@ let libc_selfchecks =
   ]
 ;;
 
-(* ---- self-checks (port slice): the DG_ hooks' machine surface — the SHARED-page
-   key ring (pure memory, fully checkable) and the ms-counter spin (checkable since
-   the Runner ticks the synthetic clock; the real assertion in [slp] is TERMINATION —
-   a frozen clock would spin DG_SleepMs into the step cap). The samples bind
-   [__shared_base] to 0x78000: a free 4 KB between the stack top (0x70000, grows
-   down) and the data segment (0x80000). Console functions stay off-limits as ever
+(* ---- the ~port sample prelude: binds every extern the platform layer reads.
+   Himem addresses point into safe emulator RAM — __shared_base at 0x78000 (a free
+   4 KB between the stack top 0x70000 and the data segment 0x80000), __fb_base at
+   0xC0000 (96 KB of framebuffer ending at 0xD8000, clear of the data image and the
+   unused heap). The DOOM-side globals (colors / palette_changed / DG_ScreenBuffer
+   — defined by i_video/doomgeneric in the real tree) must be defined here too:
+   DG_DrawFrame merges in with every ~port sample, and an extern without a
+   definition refuses the whole compile. Console functions stay off-limits as ever
    (no serial attached). ---- *)
+let port_prelude =
+  "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; char \
+   *__shared_base = (char *)0x78000; char *__fb_base = (char *)0xC0000; struct color { \
+   unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int a:8; }; struct \
+   color colors[256]; unsigned int palette_changed; unsigned char *DG_ScreenBuffer; \
+   extern void DG_KeyEnqueue(int pressed, unsigned char key); extern int DG_GetKey(int \
+   *pressed, unsigned char *key); extern unsigned int DG_GetTicksMs(); extern void \
+   DG_SleepMs(unsigned int ms); extern void DG_DrawFrame(void); extern void \
+   __dg_build_lut(const unsigned char *pal); extern void __dg_dither(const unsigned char \
+   *src, int w, int h, unsigned int *dst, int stride); "
+;;
+
+(* ---- self-checks (port slice): the DG_ hooks' machine surface — the SHARED-page
+   key ring (pure memory, fully checkable), the ms-counter spin (checkable since
+   the Runner ticks the synthetic clock; the real assertion in [slp] is TERMINATION —
+   a frozen clock would spin DG_SleepMs into the step cap), and the dither kernel's
+   SEMANTICS ([kd1]: hand-computed packed words pin LSB-leftmost bit order, the
+   Bayer thresholds, 2x2 doubling, and the stride-as-flip contract — the
+   differential samples below can't catch a wrong-but-deterministic algorithm,
+   since both sides run the same C). ---- *)
 let port_selfchecks =
-  List.map (fun (src, name, cases) ->
-    ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; char \
-       *__shared_base = (char *)0x78000; extern void DG_KeyEnqueue(int pressed, unsigned \
-       char key); extern int DG_GetKey(int *pressed, unsigned char *key); extern \
-       unsigned int DG_GetTicksMs(); extern void DG_SleepMs(unsigned int ms); "
-      ^ src
-    , name
-    , cases ))
+  List.map (fun (src, name, cases) -> port_prelude ^ src, name, cases)
   @@ [ ( "int kr1(int i){ int p; unsigned char k; int acc; int n; acc = 0; n = 0; if \
           (DG_GetKey(&p, &k)) return -1; DG_KeyEnqueue(1, 173); DG_KeyEnqueue(0, 173); \
           DG_KeyEnqueue(1, 32); while (DG_GetKey(&p, &k)) { acc = acc * 1000 + k + p * \
@@ -1184,6 +1204,84 @@ let port_selfchecks =
          (* the spin waits at least [ms] on the Runner's synthetic clock — and
             terminates, which is the assertion a frozen clock would fail *)
        , [ 0, 1; 2, 1 ] )
+     ; ( "unsigned char pal[1024]; unsigned char fr[32]; unsigned int ob[4]; unsigned \
+          int oc[4]; int kd1(int i){ int k; int r; for (k = 0; k < 1024; k++) pal[k] = \
+          0; pal[4] = 255; pal[5] = 255; pal[6] = 255; pal[8] = 128; pal[9] = 128; \
+          pal[10] = 128; __dg_build_lut(pal); for (k = 0; k < 8; k++) fr[k] = 0; for (k \
+          = 8; k < 16; k++) fr[k] = 1; for (k = 16; k < 32; k++) fr[k] = 2; \
+          __dg_dither(fr, 16, 2, ob, 1); r = (ob[0] == 0xFFFF0000u) + (ob[1] == \
+          0xFFFF0000u) * 2 + (ob[2] == 0xCCCCCCCCu) * 4 + (ob[3] == 0xCCCCCCCCu) * 8; \
+          __dg_dither(fr, 16, 2, oc + 3, -1); r += (oc[3] == 0xFFFF0000u) * 16 + (oc[2] \
+          == 0xFFFF0000u) * 32 + (oc[1] == 0xCCCCCCCCu) * 64 + (oc[0] == 0xCCCCCCCCu) * \
+          128; return r + (i - i); }"
+       , "kd1"
+         (* the dither semantics, hand-computed. Palette: 0=black, 1=white, 2=mid
+            gray (lum 0/255/128 by the sum-256 weights). Row 0 = 8 black + 8 white
+            source px -> doubled word 0xFFFF0000 (LSB = LEFTMOST: low 16 bits are
+            the black half). Row 1 = 16x gray: Bayer row 1 thresholds
+            {200,72,232,104}, 128 beats cols 1,3 -> bit pairs 00 11 00 11 = 0xCC
+            per byte -> 0xCCCCCCCC. Each word stored to BOTH output lines (2x2
+            doubling). Second pass: same frame, dst = oc+3, stride = -1 — the
+            bottom-up flip as the machine uses it, same words mirror-ordered. *)
+       , [ 0, 255; 4, 255 ] )
+     ]
+;;
+
+(* the full-machine-shape witness: DG_DrawFrame itself — the palette_changed
+   protocol and the real rect geometry (origin word 583*32+6, stride -32, 400
+   lines x 20 words) — against a sentinel-fenced framebuffer. All-black palette:
+   the rect goes 0 and the four fence words (left/right/above/below the rect)
+   survive; then color 0 -> white, palette_changed re-raised: the rect goes all-1
+   through the rebuilt LUT and the flag reads cleared. Two full 320x200 blits
+   ~3.5M instrs: its own list, run with an explicit step budget. *)
+let port_selfchecks_big =
+  [ ( port_prelude
+      ^ "unsigned char sbuf[64000]; int kd2(int i){ unsigned int *fb; int k; int r; fb = \
+         (unsigned int *)__fb_base; r = 0; DG_ScreenBuffer = sbuf; for (k = 0; k < \
+         64000; k++) sbuf[k] = 0; for (k = 0; k < 256; k++) { colors[k].b = 0; \
+         colors[k].g = 0; colors[k].r = 0; colors[k].a = 0; } palette_changed = 1; \
+         fb[583 * 32 + 5] = 0x12345678u; fb[583 * 32 + 26] = 0x12345678u; fb[584 * 32 + \
+         6] = 0x12345678u; fb[183 * 32 + 6] = 0x12345678u; DG_DrawFrame(); r += \
+         (palette_changed == 0); r += (fb[583 * 32 + 6] == 0) * 2; r += (fb[184 * 32 + \
+         25] == 0) * 4; r += (fb[583 * 32 + 5] == 0x12345678u) * 8; r += (fb[583 * 32 + \
+         26] == 0x12345678u) * 16; r += (fb[584 * 32 + 6] == 0x12345678u) * 32; r += \
+         (fb[183 * 32 + 6] == 0x12345678u) * 64; colors[0].b = 255; colors[0].g = 255; \
+         colors[0].r = 255; palette_changed = 1; DG_DrawFrame(); r += (fb[583 * 32 + 6] \
+         == 0xFFFFFFFFu) * 128; r += (fb[184 * 32 + 25] == 0xFFFFFFFFu) * 256; return r \
+         + (i - i); }"
+    , "kd2"
+    , [ 0, 511; 1, 511 ] )
+  ]
+;;
+
+(* ---- the dither differential: the SAME dither.c — the file that ships in the
+   blob — compiles on both sides (ours via ~port, gcc's via gcc_extra), so any
+   divergence is a miscompile of the actual shipped kernel. Small frames only
+   (a full 320x200 blit is ~1.7M instrs — kd2's job); checksums cross the diff,
+   never pointers. ---- *)
+let dither_src = In_channel.with_open_text (libc_path "dither.c") In_channel.input_all
+
+let port_diff_samples =
+  List.map (fun (src, name, arity) -> port_prelude ^ src, name, arity)
+  @@ [ ( "unsigned char dpal[1024]; unsigned char dfr[64]; unsigned int dob[8]; int \
+          dd1(int a){ int i; unsigned int s; for (i = 0; i < 256; i++) { dpal[4 * i] = \
+          i; dpal[4 * i + 1] = (i * 3) & 255; dpal[4 * i + 2] = (i * 7) & 255; dpal[4 * \
+          i + 3] = 0; } __dg_build_lut(dpal); for (i = 0; i < 64; i++) dfr[i] = (i * 17 \
+          + (a & 0xFFFF)) & 255; __dg_dither(dfr, 16, 4, dob, 1); s = 0; for (i = 0; i < \
+          8; i++) s = s * 31 + dob[i]; return s; }"
+       , "dd1"
+       , 1 (* LUT + dither over an arg-seeded 16x4 frame, all four Bayer rows *) )
+     ; ( "unsigned char epal[1024]; unsigned char efr[128]; unsigned int eob[16]; int \
+          dd2(int a){ int i; unsigned int s; for (i = 0; i < 256; i++) { epal[4 * i] = \
+          (i * 5) & 255; epal[4 * i + 1] = (255 - i) & 255; epal[4 * i + 2] = (i ^ 99) & \
+          255; epal[4 * i + 3] = 0; } __dg_build_lut(epal); for (i = 0; i < 128; i++) \
+          efr[i] = (i * 13 + (a & 4095)) & 255; __dg_dither(efr, 32, 4, eob + 14, -2); s \
+          = 0; for (i = 0; i < 16; i++) s = s * 31 + eob[i]; return s; }"
+       , "dd2"
+       , 1
+         (* multi-word rows + NEGATIVE stride (the machine's bottom-up shape)
+              into a 2-word-wide, 8-line buffer filled from the top end *)
+       )
      ]
 ;;
 
@@ -1199,8 +1297,10 @@ let nrand = 40
 
 (* one sample: compile with both backends, diff R0 over edge + random arg-tuples;
    returns (run cases, mismatches) for the caller to total up *)
-let check_sample ?(libc = false) ?(gcc_extra = "") (src, fname, arity) : int * int =
-  let body, data = dcc_compile ~libc ~src ~fname () in
+let check_sample ?(libc = false) ?(port = false) ?(gcc_extra = "") (src, fname, arity)
+  : int * int
+  =
+  let body, data = dcc_compile ~libc ~port ~src ~fname () in
   let exe = gcc_compile ~gcc_extra ~src ~fname ~arity () in
   let tuples =
     List.map (fun v -> List.init arity (fun _ -> v)) edges
@@ -1243,12 +1343,12 @@ let check_reject (src, fname) : int =
 ;;
 
 (* one self-check: run ours over the given args, compare to the stated constants *)
-let check_self ?(port = false) (src, fname, cases) : int * int =
+let check_self ?(port = false) ?steps (src, fname, cases) : int * int =
   let body, data = dcc_compile ~libc:true ~port ~src ~fname () in
   let sfails = ref 0 in
   List.iter
     (fun (arg, want) ->
-       let got = u32 (Runner.run ~data body [ arg ]) in
+       let got = u32 (Runner.run ~data ?steps body [ arg ]) in
        if got <> u32 want
        then (
          incr sfails;
@@ -1281,10 +1381,18 @@ let () =
       acc
       fixed_samples
   in
-  let self_fold ?port acc list =
+  let dither_fold acc =
+    List.fold_left
+      (fun (cases, fails) sample ->
+         let c, f = check_sample ~libc:true ~port:true ~gcc_extra:dither_src sample in
+         cases + c, fails + f)
+      acc
+      port_diff_samples
+  in
+  let self_fold ?port ?steps acc list =
     List.fold_left
       (fun (cases, fails) sc ->
-         let c, f = check_self ?port sc in
+         let c, f = check_self ?port ?steps sc in
          cases + c, fails + f)
       acc
       list
@@ -1292,10 +1400,15 @@ let () =
   let total, sample_fails =
     self_fold
       ~port:true
+      ~steps:8_000_000
       (self_fold
-         (fixed_fold (fold true (fold false (0, 0) samples) libc_samples))
-         libc_selfchecks)
-      port_selfchecks
+         ~port:true
+         (self_fold
+            (dither_fold
+               (fixed_fold (fold true (fold false (0, 0) samples) libc_samples)))
+            libc_selfchecks)
+         port_selfchecks)
+      port_selfchecks_big
   in
   let fails =
     sample_fails + List.fold_left (fun acc r -> acc + check_reject r) 0 rejects
@@ -1306,8 +1419,10 @@ let () =
     (List.length samples
      + List.length libc_samples
      + List.length fixed_samples
+     + List.length port_diff_samples
      + List.length libc_selfchecks
-     + List.length port_selfchecks)
+     + List.length port_selfchecks
+     + List.length port_selfchecks_big)
     (List.length rejects)
     fails;
   if fails > 0 then exit 1

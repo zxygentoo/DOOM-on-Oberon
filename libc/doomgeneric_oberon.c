@@ -1,8 +1,9 @@
 /* doomgeneric_oberon.c — the doomgeneric platform layer for the Oberon RISC5
  * machine (AGENT.md §7, the DG_ port slice). Named the way upstream names its
- * platforms (doomgeneric_sdl.c, doomgeneric_allegro.c, ...). This sub-slice:
- * the four trivial hooks + the key-ring producer. DG_Init, DG_DrawFrame (the
- * dither-blit) and the Init/Tick/KeyIn entries land in later sub-slices.
+ * platforms (doomgeneric_sdl.c, doomgeneric_allegro.c, ...). Here: the four
+ * trivial hooks, the key-ring producer, and the DG_DrawFrame dither-blit
+ * wrapper (kernel in dither.c). DG_Init and the Init/Tick/KeyIn entries land
+ * in the final port sub-slice.
  *
  * Plain C, preprocessor-free (mini.c's rules): no includes, types spelled as
  * the host-preprocessed .i files spell them (uint32_t = unsigned int, ILP32).
@@ -83,6 +84,51 @@ void DG_KeyEnqueue(int pressed, unsigned char key)
     ring[2 * (h & 255)] = (unsigned char)(pressed != 0);
     ring[2 * (h & 255) + 1] = key;
     *head = h + 1;
+}
+
+/* ---- video: the dither-blit wrapper (AGENT.md §5) ----
+ *
+ * doomgeneric fills DG_ScreenBuffer (320x200 palette indices — RESX/RESY are
+ * pinned to 320x200 at preprocess time, so fb_scaling = 1 and I_FinishUpdate
+ * is a straight per-line copy) and calls DG_DrawFrame. The dither pipeline —
+ * luminance LUT + 4x4 Bayer + 2x2-doubled 1-bit packing — lives in dither.c
+ * (pure memory->memory, jig-diffed against host gcc); this wrapper owns the
+ * DOOM-side globals and the machine geometry:
+ *   - colors[256] (BGRA bytes in memory — the byte-aligned :8 layout) is
+ *     refilled by I_SetPalette on every palette switch, gamma pre-applied;
+ *     palette_changed signals it and the LUT rebuilds — §5's "14 precomputed
+ *     LUTs" simplified to one-LUT-on-change (the next frame dithers through
+ *     the new palette, which is the visible flash);
+ *   - the target rect: 640x400 centered on the 1024x768 1-bit framebuffer.
+ *     Origin = screen (192,184); Oberon's framebuffer is BOTTOM-UP (screen
+ *     line y lives at fb line 767-y, bit 0 leftmost), so the top-left word is
+ *     fb word (767-184)*32 + 192/32 = 583*32 + 6 and the stride is -32 words
+ *     per screen line. Everything word-aligned: 192 px = 6 words, 640 = 20. */
+
+struct color {
+    uint32_t b:8;
+    uint32_t g:8;
+    uint32_t r:8;
+    uint32_t a:8;
+};
+
+extern struct color colors[256];
+extern unsigned int palette_changed;    /* i_video's boolean */
+extern unsigned char *DG_ScreenBuffer;
+extern char *__fb_base;                 /* heap_doom.c binds 0xE7F00 */
+
+extern void __dg_build_lut(const unsigned char *pal);
+extern void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst,
+                        int stride);
+
+void DG_DrawFrame(void)
+{
+    if (palette_changed) {
+        __dg_build_lut((const unsigned char *)colors);
+        palette_changed = 0;
+    }
+    __dg_dither(DG_ScreenBuffer, 320, 200,
+                (unsigned int *)__fb_base + (583 * 32 + 6), -32);
 }
 
 /* ---- chrome ---- */
