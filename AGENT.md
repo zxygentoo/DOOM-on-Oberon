@@ -301,7 +301,7 @@ is content, not infrastructure.
 |---|---|---|
 | **1a** ✅ *(re-scoped)* | hand-rolled hot functions: `FixedMul`/`FixedDiv`, DIV/MOD fixup helpers, `R_DrawColumn`/`R_DrawSpan`, `mem*` — planned as pre-backend insurance ("each runs in the jig before the backend exists"); the backend went coverage-complete first, so only the *load-bearing* pieces are hand instrs: `FixedMul` = the ABI §5 intrinsic (1a.1) + the eDSL drawers `runtime.ml` (`__div`/`__mod`/`__udiv`/`__umod` s7 · `__lsr` sweep) and `__setjmp`/`__longjmp` (port.4). `FixedDiv` became C (`libc/fixed.c`, 1a.1), `mem*` the 1c.1 mini-libc, `R_DrawColumn`/`R_DrawSpan` compile through the backend like everything else. Hand-rolling those hot loops stays on the shelf as an *optional perf lever* (the alternative to the §4 allocator ladder), chosen by 1d's timedemo — the eDSL machinery is proven, the drawer deliberately unstocked | every landed piece jig-verified vs host: the §7-1a four-sign-quadrant division vectors live in s7's samples; m_fixed full-range vs the *genuine `int64_t` originals* (`gcc_extra`, 1a.1); setjmp/exit in port.4's |
 | **1b** ✅ *(coverage; allocator ladder open)* | the OCaml backend: CIL (gnu99 pin, RISC5 32-bit machdep, `Mergecil.merge`) → shared `risc5_isa` instrs → blob; ABI. Built on **two axes** — feature coverage (the *slice ladder* below): **COMPLETE `97397c2`** (2026-07-08) — 1202/1240, every reachable fn compiles, the 38 refusals all unreachable-or-replaced; and allocation quality (naive → local → linear-scan, §4): **open by design** — the spilling rungs (perf 1–4) landed so nothing *refuses*, but codegen is still the naive fixed-home allocator (store/reload redundancy; `DG_DrawFrame` ~2× the §5 blit estimate; the port layer's volatile-by-construction debt). Local/linear-scan re-enter only when 1d's timedemo numbers pick the lever | compiled jig blobs vs host: division across all four sign combos (`/` and `%`), call-heavy torture functions; **random-C-snippet differential** — our backend in the emulator vs host gcc; every increment through the same jig — final state **234 samples / 11 030 cases green** |
-| **1c** ◐ | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only). Three of four done: the merge is **live** (every whole-tree doomcc run merges the 82 TUs + the libc TUs); mini-libc **complete** (1c.1–1c.3 — nothing libc-shaped remains undefined); the 2b C ports **subsumed by port.1–port.4** (`dither.c`, `doomgeneric_oberon.c`, the blob entries; the §6 *host-side serial agent* is track-2 tooling, still open on that ledger). **Remaining: the host reference build** — the spike verified the merged TU *recompiles* under host gcc, compile-only; the running build is unbuilt, and it's load-bearing for 1d twice over: it *generates* the golden frame ("same dither code, bit-identical") and anchors the demo-desync oracle — so it sits on the 1d critical path, ahead of the sim harness | host build plays E1M1; pieces unit-tested in the jig |
+| **1c** ✅ | `Mergecil` single TU (spike-proven, `spikes/cil/`) + mini-libc + C ports of the 2b prototypes + **host reference build** (plain gcc on original sources — CIL stays target-path-only). The merge is **live** (every whole-tree doomcc run merges the 82 TUs + the libc TUs); mini-libc **complete** (1c.1–1c.3 — nothing libc-shaped remains undefined); the 2b C ports **subsumed by port.1–port.4** (`dither.c`, `doomgeneric_oberon.c`, the blob entries; the §6 *host-side serial agent* is track-2 tooling, still open on that ledger). **Host reference build ✅ `14f92c7`** (2026-07-08) — `host/Makefile`: plain gcc `-std=gnu99 -O2` + SDL2, the TU list read from the vendor Makefile's `SRC_DOOM` exactly as preprocess.sh reads it (one source of truth), platform TU swapped xlib → SDL; no `FEATURE_SOUND`, no `CMAP256`, no mouse (upstream has none) — the reference build carries the port's feature surface. `host/fetch-doom1.sh` pins the shareware WAD (md5, 4 196 020 B, repo root — also 1d's chunk-splitter input). Verified: E1M1 plays interactively; headless `-timedemo demo1` completes — **5026 gametics, the first desync-oracle constant** — with patch 0001's integer-tenths fps in first live use. The oracle *instrumentation* (CMAP256 + `dither.c` golden-frame dumper, gametic checksum) is 1d harness work | host build plays E1M1 ✅; pieces unit-tested in the jig ✅ (the libc/port samples) |
 | **1d** | first frame of E1M1 **in simulation** — harness preloads blob+WAD straight into the PSRAM model; pixel-exact framebuffer dumps via the visual-golden harness, a bring-up luxury no DOOM port ever had. (0.39 M cyc/s ≈ 10 s/frame is *steady-state*; `D_DoomMain` init is hundreds of M cycles ≈ tens of sim-minutes — don't debug a "hang" that is `R_InitTextures`.) Then v1 stub on hardware | sim framebuffer golden ≡ host-reference frame (same dither code, bit-identical); demo desync check; on-hardware E1M1 |
 
 **1b slice ladder** — the *coverage* axis: which C constructs compile, built one
@@ -356,15 +356,16 @@ The backend (1b) is **done — coverage-complete as of `97397c2`
 undefined symbols are by-design traps). A C backend for the world's
 cleanest 32-bit ISA proved exactly the gentle introduction predicted —
 built in ~30 slices over three days, each trusted only once the
-differential jig (234 samples / 11 030 cases) matched gcc. What remains on
-the critical path to the first frame is pure infrastructure: the 1c host
-reference build (the golden generator and desync oracle — wanted *before*
-there are frames to compare), the emulator's 24-bit himem patch (vendor),
-the sim harness that preloads blob+WAD, the WAD chunk splitter — and then
-performance work chosen by measurement (`-timedemo` survived the float ban
-precisely to be that instrument), not by guess: the §4 allocator ladder
-(local → linear-scan) and the 1a hand-rolled hot loops are the two levers,
-and 1d's numbers pick between them.
+differential jig (234 samples / 11 030 cases) matched gcc. With the 1c host
+reference build landed (`14f92c7` — the anchor of the golden-frame and
+desync oracles), what remains on the critical path to the first frame is
+pure 1d infrastructure: the emulator's 24-bit himem patch (vendor), the sim
+harness that preloads blob+WAD (incl. the oracle instrumentation — golden
+dumper, gametic checksum), the WAD chunk splitter — and then performance
+work chosen by measurement (`-timedemo` survived the float ban precisely to
+be that instrument), not by guess: the §4 allocator ladder (local →
+linear-scan) and the 1a hand-rolled hot loops are the two levers, and 1d's
+numbers pick between them.
 
 Cross-cutting oracle: the host build of the same amalgamated TU (ILP32-clean
 via stdint) is both the debugger and the golden generator — and the IWAD's
