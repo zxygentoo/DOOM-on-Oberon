@@ -190,7 +190,12 @@ let rec serialize_init ~writes ~relocs ~offsets ~strings (off : int) (t : C.typ)
       (fun ((o, sub) : C.offset * C.init) ->
          let delta, subt =
            match o with
-           | C.Field (fi, C.NoOffset) -> fst (C.bitsOffset ct o) / 8, fi.ftype
+           | C.Field (fi, C.NoOffset) ->
+             (* a byte-aligned :8 bitfield slot is ONE byte — its declared type
+                (uint32) would write a word over the three neighboring fields;
+                the check gate guarantees no other bitfield shape places *)
+             ( fst (C.bitsOffset ct o) / 8
+             , if fi.fbitfield = None then fi.ftype else C.TInt (C.IUChar, []) )
            | C.Index (e, C.NoOffset) ->
              (match C.getInteger (C.constFold true e), C.unrollType ct with
               | Some i, C.TArray (elem, _, _) ->

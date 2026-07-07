@@ -856,6 +856,57 @@ let samples =
        i+4); }"
     , "ical5"
     , 1 (* indirect call with a 5th (stack) arg: marshalling + claimed R0-R3 + BL reg *) )
+    (* ---- bitfields, the byte-aligned :8 degenerate case (the DG_ port slice's
+       compiler half): under GCC's LSB-first little-endian allocation, struct
+       color's b/g/r/a are bytes 0-3 of the word — one LDB/STB each, no
+       read-modify-write. bf1 pins the LAYOUT itself: it writes fields and reads
+       the raw bytes back through a char*, so if CIL's machdep ever disagreed
+       with gcc's allocation rule the diff explodes on the spot. ---- *)
+  ; ( "struct color { unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int \
+       a:8; }; int bf1(int x){ struct color c; unsigned char *p = (unsigned char *)&c; \
+       c.b = 1; c.g = 2; c.r = x; c.a = 4; return p[0] + p[1] * 10 + p[2] * 100 + p[3] * \
+       1000; }"
+    , "bf1"
+    , 1 (* the layout pin: field writes observed as raw bytes; c.r = x truncates *) )
+  ; ( "struct color { unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int \
+       a:8; }; int bf2(int x){ struct color c; c.b = 10; c.g = 20; c.r = 30; c.a = 40; \
+       c.g = c.g + x; return c.b + c.g * 100 + c.r * 10000 + c.a * 1000000; }"
+    , "bf2"
+    , 1
+      (* read-modify one field: the other three provably untouched (an STW-shaped
+           store would clobber them; the neighbors are the witnesses) *)
+    )
+  ; ( "struct color { unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int \
+       a:8; }; struct color colors[4]; unsigned char tab[6] = {3,1,4,1,5,9}; int bf3(int \
+       i){ int k; for (k = 0; k < 4; k++) { colors[k].a = 0; colors[k].r = tab[k]; \
+       colors[k].g = tab[k + 1]; colors[k].b = tab[k + 2]; } return colors[i & 3].r + \
+       colors[(i + 1) & 3].g * 100 + colors[2].b * 10000; }"
+    , "bf3"
+    , 1
+      (* the I_SetPalette shape verbatim: global struct-color array (placement
+           relaxation) filled from a byte table, indexed field access both ways *)
+    )
+  ; ( "struct color { unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int \
+       a:8; }; int bf4(int x){ struct color c; c.g = 300; c.b = (x & 4095) * 5; return \
+       c.g * 100000 + c.b * 100 + 7; }"
+    , "bf4"
+    , 1 (* store-truncation: 300 -> 44, and a wide expression narrowed by STB *) )
+  ; ( "struct sbf { int v:8; int w:8; }; int bf5(int x){ struct sbf s; s.v = x; s.w = \
+       200; return s.v * 1000 + s.w; }"
+    , "bf5"
+    , 1
+      (* signed :8: reads sign-extend (LDB + narrow, s3.3b); out-of-range stores
+           wrap modulo like gcc's (200 -> -56) *)
+    )
+  ; ( "struct color { unsigned int b:8; unsigned int g:8; unsigned int r:8; unsigned int \
+       a:8; }; struct color gc = { 5, 6, 7, 8 }; int bf6(int i){ unsigned char *p = \
+       (unsigned char *)&gc; return p[0] + p[1] * 10 + p[2] * 100 + p[3] * 1000 + gc.r + \
+       (i - i); }"
+    , "bf6"
+    , 1
+      (* a CompoundInit over bitfields: the serializer must write ONE byte per
+           field (the declared uint32 width would clobber the neighbors) *)
+    )
   ]
 ;;
 
@@ -871,6 +922,17 @@ let rejects =
     , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
     , "rex" (* declared, never defined — 3b linker *) )
+  ; ( "struct t3 { unsigned int v:3; }; int rj3(int x){ struct t3 s; s.v = x; return \
+       s.v; }"
+    , "rj3" (* a real bitfield (:3) — only the byte-aligned :8 degenerate lowers *) )
+  ; ( "struct t48 { unsigned int a:4; unsigned int b:8; }; int rj48(int x){ struct t48 \
+       s; s.b = x; return s.b; }"
+    , "rj48" (* an :8 pushed off-byte (bit offset 4) — width alone isn't enough *) )
+  ; ( "struct t5 { unsigned int v:5; }; int rjp(int x){ return ((struct t5 *)&x)->v; }"
+    , "rjp"
+      (* a banned bitfield reached through a CAST pointer: no declaration gate ever
+         sees struct t5, so this exercises gen_addr/classify_access's own guard *)
+    )
   ]
 ;;
 

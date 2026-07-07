@@ -188,7 +188,17 @@ type access =
   | Byte of bool
   | Half of bool
 
-let classify_access (lv : C.lval) : access =
+(* The final Field of an lval, if it is a bitfield. The access width is a property
+   of the ACCESS, not the value type: a bitfield lval's type is the declared
+   uint32_t, which classify_access would read as Word — an LDW that reads the
+   neighboring fields, and worse, an STW that clobbers all three on every write. *)
+let rec final_bitfield : C.offset -> C.fieldinfo option = function
+  | C.Field (fi, C.NoOffset) when fi.fbitfield <> None -> Some fi
+  | C.Field (_, rest) | C.Index (_, rest) -> final_bitfield rest
+  | C.NoOffset -> None
+;;
+
+let classify_scalar (lv : C.lval) : access =
   let t = C.unrollType (C.typeOfLval lv) in
   match t with
   | (C.TInt _ | C.TEnum _ | C.TPtr _) when C.bitsSizeOf t = 32 -> Word
@@ -202,6 +212,18 @@ let classify_access (lv : C.lval) : access =
     unsupported "aggregate used as a scalar value — unexpected CIL shape"
   | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
   | _ -> unsupported "memory access of unsupported type"
+;;
+
+let classify_access (lv : C.lval) : access =
+  match final_bitfield (snd lv) with
+  | Some fi when Check.byte_bitfield fi ->
+    (* one byte at bitsOffset/8 (gen_addr's fold): LDB zero-extends an unsigned
+       :8 for free; a signed :8 sign-extends like a signed char (s3.3b) *)
+    (match C.unrollType fi.ftype with
+     | C.TInt (ik, _) -> Byte (C.isSigned ik)
+     | _ -> unsupported "bitfield of a non-integer type — unexpected CIL shape")
+  | Some _ -> unsupported "bitfield other than byte-aligned :8 (ABI §4)"
+  | None -> classify_scalar lv
 ;;
 
 (* ---- instruction builders ---- *)
@@ -688,7 +710,12 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
     match o with
     | C.NoOffset -> base, residual
     | C.Field (fi, rest) ->
-      if fi.fbitfield <> None then unsupported "bitfield access (ABI §4: banned)";
+      (* a byte-aligned :8 bitfield IS its byte: bitsOffset/8 below lands on it
+         exactly, and classify_access serves the access as a Byte. Guarded here
+         too (not just the declaration gate): a cast pointer can reach a struct
+         no local/global/signature check ever saw. *)
+      if fi.fbitfield <> None && not (Check.byte_bitfield fi)
+      then unsupported "bitfield other than byte-aligned :8 (ABI §4)";
       let byte_off =
         fst (C.bitsOffset (C.TComp (fi.fcomp, [])) (C.Field (fi, C.NoOffset))) / 8
       in

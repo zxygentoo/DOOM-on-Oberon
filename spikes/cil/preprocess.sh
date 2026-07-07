@@ -17,7 +17,12 @@ for o in $srcs; do
   # -std=gnu99: gcc 15 defaults to C23, whose true/false *keywords* leak
   # through doomtype.h's C89 fallback and break CIL's (C11) grammar. The
   # real pipeline is C99-dialect anyway.
-  gcc -E -std=gnu99 -I"$SRCDIR" "$SRCDIR/$c" > "out/i/${c%.c}.i"
+  # -DCMAP256: the locked video mode (AGENT.md §2.1/§5) — pixel_t is a
+  # palette index, DG_ScreenBuffer the 8-bit index buffer, and i_video
+  # exports colors[256]/palette_changed for the platform layer's dither
+  # LUTs. Without it the tree builds the truecolor path (cmap_to_fb RGB
+  # conversion) our port never uses.
+  gcc -E -std=gnu99 -DCMAP256 -I"$SRCDIR" "$SRCDIR/$c" > "out/i/${c%.c}.i"
   n=$((n + 1))
 done
 echo "preprocessed $n TUs into out/i/"
