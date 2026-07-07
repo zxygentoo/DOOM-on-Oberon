@@ -165,6 +165,22 @@ int atoi(const char *s)
     return r;
 }
 
+/* the byte-swap builtins (i_swap.h's SwapBE path): defined as ordinary functions —
+   CIL kept the calls symbolic, our linker resolves them by name like any other. The
+   signatures match CIL's own builtin registrations exactly (short/int — probed, not
+   guessed); the math runs unsigned internally so the shifts are logical. */
+short __builtin_bswap16(short v)
+{
+    unsigned int u = (unsigned short)v;
+    return (short)(((u & 0xFF) << 8) | ((u >> 8) & 0xFF));
+}
+
+int __builtin_bswap32(int v)
+{
+    unsigned int u = (unsigned int)v;
+    return (int)((u << 24) | ((u & 0xFF00) << 8) | ((u >> 8) & 0xFF00) | (u >> 24));
+}
+
 /* ---- the one-big-block malloc ---- */
 
 extern char *__heap_base;              /* the environment owns the bounds */

@@ -23,8 +23,8 @@ let u32 x = x land 0xFFFF_FFFF
    tree. Parsed fresh per sample (Mergecil renames statics in its inputs); the gcc
    oracle side never sees it — our memcpy diffs against the REAL glibc. The path chain
    covers dune's two working directories (repo root for exec, test/ for runtest). *)
-let libc_path () =
-  List.find Sys.file_exists [ "libc/mini.c"; "../libc/mini.c"; "../../libc/mini.c" ]
+let libc_path name =
+  List.find Sys.file_exists [ "libc/" ^ name; "../libc/" ^ name; "../../libc/" ^ name ]
 ;;
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
@@ -33,7 +33,13 @@ let dcc_compile ?(libc = false) ~src ~fname () =
   let file = Frontend.parse_string ~name:fname src in
   let file =
     if libc
-    then Frontend.merge [ file; Frontend.parse_file (libc_path ()) ] ~name:fname
+    then
+      Frontend.merge
+        [ file
+        ; Frontend.parse_file (libc_path "mini.c")
+        ; Frontend.parse_file (libc_path "stdio.c")
+        ]
+        ~name:fname
     else file
   in
   let globals = Globals.from_file file in
@@ -926,6 +932,46 @@ let libc_samples =
     ]
 ;;
 
+(* ---- self-checks (1c.3): the memory-file registry has no glibc counterpart, so
+   these compile with the full libc and verify against hand-computed constants instead
+   of an oracle. They must not touch the console functions — the bare jig emulator has
+   no serial attached, and the UART tx-ready wait would spin forever. ---- *)
+let libc_selfchecks =
+  [ ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
+       struct _IO_FILE FILE; extern void __file_register(const char *, const void *, \
+       unsigned long); extern FILE *fopen(const char *, const char *); extern int \
+       fclose(FILE *); extern unsigned long fread(void *, unsigned long, unsigned long, \
+       FILE *); extern int fseek(FILE *, long, int); extern long ftell(FILE *); char \
+       fdata[8] = {10,20,30,40,50,60,70,80}; int sc1(int i){ FILE *f; char b[4]; char c; \
+       char e; int n; int t1; int m; int w; __file_register(\"wad\", fdata, 8); f = \
+       fopen(\"wad\", \"rb\"); if (!f) return -1; n = (int)fread(b, 1, 3, f); t1 = \
+       (int)ftell(f); fseek(f, 2, 0); fread(&c, 1, 1, f); fseek(f, -1, 2); fread(&e, 1, \
+       1, f); m = fopen(\"nope\", \"rb\") == 0; w = fopen(\"wad\", \"w\") == 0; \
+       fclose(f); return n + t1 * 10 + c + e * 100 + m * 1000 + w * 2000 + b[1] + (i - \
+       i); }"
+    , "sc1"
+      (* register + open + read + SEEK_SET/END + miss + write-refusal + fclose:
+         3 + 3*10 + 30 + 80*100 + 1000 + 2000 + 20 *)
+    , [ 0, 11083; 5, 11083; -3, 11083 ] )
+  ; ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
+       struct _IO_FILE FILE; extern void __file_register(const char *, const void *, \
+       unsigned long); extern FILE *fopen(const char *, const char *); extern int \
+       fclose(FILE *); extern unsigned long fread(void *, unsigned long, unsigned long, \
+       FILE *); extern int fseek(FILE *, long, int); extern long ftell(FILE *); char \
+       g1[6] = {1,2,3,4,5,6}; char g2[3] = {9,8,7}; int sc2(int i){ FILE *a; FILE *b; \
+       char x; char y; int r1; int r2; int over; int tl; __file_register(\"a\", g1, 6); \
+       __file_register(\"b\", g2, 3); a = fopen(\"a\", \"rb\"); b = fopen(\"b\", \
+       \"rb\"); fseek(a, 4, 0); fseek(a, 1, 1); fread(&x, 1, 1, a); r1 = (int)fread(&x, \
+       1, 1, a); fread(&y, 1, 1, b); over = fseek(b, 9, 0); tl = (int)ftell(b); r2 = \
+       (int)fread(&y, 1, 1, b); fclose(a); fclose(b); return x + r1 * 10 + y * 100 + \
+       over * 1000 + tl * 10000 + r2 + (i - i); }"
+    , "sc2"
+      (* two live handles, SEEK_CUR, read-at-EOF (0 items, dest untouched),
+         out-of-range seek fails without moving: 6 + 0 + 8*100 - 1000 + 10000 + 1 *)
+    , [ 0, 9807; 9, 9807 ] )
+  ]
+;;
+
 (* a random 32-bit signed arg, plus the edge values every sample is probed with *)
 let r32 () =
   let b () = Random.bits () in
@@ -981,6 +1027,27 @@ let check_reject (src, fname) : int =
     1
 ;;
 
+(* one self-check: run ours over the given args, compare to the stated constants *)
+let check_self (src, fname, cases) : int * int =
+  let body, data = dcc_compile ~libc:true ~src ~fname () in
+  let sfails = ref 0 in
+  List.iter
+    (fun (arg, want) ->
+       let got = u32 (Runner.run ~data body [ arg ]) in
+       if got <> u32 want
+       then (
+         incr sfails;
+         Printf.printf "  SELFCHECK %s(%d): got %08x want %08x\n" fname arg got want))
+    cases;
+  Printf.printf
+    "  %-7s %d instr, %d cases%s (self)\n"
+    fname
+    (List.length body)
+    (List.length cases)
+    (if !sfails = 0 then "  ok" else Printf.sprintf "  %d FAIL" !sfails);
+  List.length cases, !sfails
+;;
+
 let () =
   Random.init 0x51ce;
   let fold libc (cases, fails) list =
@@ -991,14 +1058,21 @@ let () =
       (cases, fails)
       list
   in
-  let total, sample_fails = fold true (fold false (0, 0) samples) libc_samples in
+  let total, sample_fails =
+    List.fold_left
+      (fun (cases, fails) sc ->
+         let c, f = check_self sc in
+         cases + c, fails + f)
+      (fold true (fold false (0, 0) samples) libc_samples)
+      libc_selfchecks
+  in
   let fails =
     sample_fails + List.fold_left (fun acc r -> acc + check_reject r) 0 rejects
   in
   Printf.printf
     "diff jig: %d run cases across %d samples + %d gate rejects, %d failures\n"
     total
-    (List.length samples + List.length libc_samples)
+    (List.length samples + List.length libc_samples + List.length libc_selfchecks)
     (List.length rejects)
     fails;
   if fails > 0 then exit 1
