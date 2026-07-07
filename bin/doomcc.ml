@@ -1,11 +1,11 @@
 (* doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
 
-   This is the *shape* of the full pipeline. The front (parse + amalgamate) and the middle
-   (Globals placement + per-function Fundec compilation) are real; the back (the ABI §6
-   instr-level linker + blob emit, track 3b) is stubbed. Until the later slices land (calls,
-   control flow, memory), most functions gate-refuse — so for now doomcc doubles as a
-   progress gauge: per merged program it reports how many functions compile and, for the
-   rest, a histogram of *why* (each reason naming the slice that will unblock it).
+   The full pipeline: parse + amalgamate (Frontend) · data/bss layout (Globals) ·
+   per-function compilation (Fundec) · whole-program link at BLOB_BASE with crt0 thunks
+   and Runtime helpers (Linker/Crt0/Runtime) · the ABI §7 blob file + symbol map (Blob).
+   Functions the gate still refuses are histogrammed by reason (each names its pending
+   slice) and their symbols become one-word self-loop traps, alongside the undefined
+   imports the mini-libc will provide — that printed list is the 1c worklist.
 
    Usage:  doomcc <unit.i> [unit2.i ...] [-o out.blob]
    Preprocess first with spikes/cil/preprocess.sh (or gcc -E -std=gnu99). *)
@@ -125,15 +125,41 @@ let () =
       "link:    %d undefined symbols -> self-loop traps (the mini-libc worklist):\n"
       (List.length missing);
     Printf.printf "         %s\n" (String.concat " " missing));
+  (* crt0 thunks (ABI §7) for each entry whose C symbol exists — the 1c port layer will
+     provide Init/Tick/KeyIn; until then the header fields stay 0. Thunk size is a
+     constant, so the code section is sizable before the layout the thunks bake in. *)
+  let entry_names =
+    List.filter (fun n -> Hashtbl.mem defined n) [ "Init"; "Tick"; "KeyIn" ]
+  in
+  let stack_top =
+    0x300000
+    (* STACK_TOP, ABI §8 *)
+  in
   let all = objs @ traps in
-  let code_words = List.fold_left (fun a o -> a + Linker.code_size o) 0 all in
+  let code_words =
+    List.fold_left (fun a o -> a + Linker.code_size o) 0 all
+    + (Crt0.size * List.length entry_names)
+  in
   let data_size = globals.Globals.data_size in
   let bss_size = Bytes.length globals.Globals.image - data_size in
+  let save_bss = if entry_names = [] then 0 else Crt0.save_area_size in
   let base =
     0x100000
     (* BLOB_BASE, ABI §8 *)
   in
-  let layout = Blob.layout ~base ~code_words ~data_size ~bss_size in
+  let layout = Blob.layout ~base ~code_words ~data_size ~bss_size:(bss_size + save_bss) in
+  let thunks =
+    List.map
+      (fun n ->
+         Crt0.thunk
+           ~name:("__crt0_" ^ n)
+           ~entry:n
+           ~save_area:(layout.Blob.bss_base + bss_size)
+           ~stack_top
+           ~data_base:layout.Blob.data_base)
+      entry_names
+  in
+  let all = all @ thunks in
   if layout.Blob.bss_base + layout.Blob.bss_length > 0x2C0000
   then
     Printf.printf
@@ -151,9 +177,10 @@ let () =
        in
        Bytes.set_int32_le data off (Int32.of_int v))
     globals.Globals.relocs;
-  (* entries: 0 until the crt0 thunks exist (hello blob) *)
+  (* header entries point at the thunks, not the C functions — the thunk owns the world
+     switch (ABI §7); 0 while the port layer's C entry doesn't exist yet *)
   let entry name =
-    match List.assoc_opt name image.Linker.symbols with
+    match List.assoc_opt ("__crt0_" ^ name) image.Linker.symbols with
     | Some off -> layout.Blob.code_base + (4 * off) - base
     | None -> 0
   in
