@@ -31,6 +31,11 @@ type t =
     (* pointer-valued initializer slots: (image byte offset, target) — ABI §6's
        "pointer-valued data initializers patched as absolute words" *)
   ; image : bytes (* data+bss, little-endian, length padded to a word multiple *)
+  ; data_size : int
+    (* bytes of [image] that are *data* (initialized globals + interned strings, padded
+       to a word). Everything past it is bss — placement orders initialized globals and
+       strings first, uninitialized after, so the image's zero tail IS the bss range:
+       the blob file carries only [0, data_size) and the stub zeroes the rest (ABI §7) *)
   }
 
 let no_globals =
@@ -39,6 +44,7 @@ let no_globals =
   ; strings = Hashtbl.create 1
   ; relocs = []
   ; image = Bytes.empty
+  ; data_size = 0
   }
 ;;
 
@@ -205,17 +211,26 @@ let from_file (file : C.file) : t =
     Hashtbl.replace offsets v.vid off;
     cursor := off + size
   in
+  let gvars = ref [] in
   C.iterGlobals file (fun g ->
     match g with
-    | C.GVar (v, ii, _) ->
-      (try place v ii.init with
-       | Check.Unsupported why -> Hashtbl.replace skipped v.vid why
-       | C.SizeOfError (why, _) ->
-         Hashtbl.replace skipped v.vid ("global with incomplete type (" ^ why ^ ")"))
+    | C.GVar (v, ii, _) -> gvars := (v, ii.init) :: !gvars
     | _ -> () (* GVarDecl w/o GVar = true extern: no offset; Fundec names it on use *));
+  let gvars = List.rev !gvars in
+  let place_tolerant (v, init) =
+    try place v init with
+    | Check.Unsupported why -> Hashtbl.replace skipped v.C.vid why
+    | C.SizeOfError (why, _) ->
+      Hashtbl.replace skipped v.C.vid ("global with incomplete type (" ^ why ^ ")")
+  in
+  (* Placement order is the data/bss split (ABI §7): initialized globals first, then the
+     interned strings — together the *data* section, the bytes the blob file carries —
+     then uninitialized globals, so the image's zero tail IS the bss range the stub
+     zeroes. [data_size] marks the boundary. *)
+  List.iter (fun (v, init) -> if init <> None then place_tolerant (v, init)) gvars;
   (* String literals are anonymous static data: scan every expression (function bodies *and*
      global initializers) for a CStr and append its bytes — the content plus a NUL — after the
-     placed globals, deduplicating identical literals. Fundec then materializes each as
+     initialized globals, deduplicating identical literals. Fundec then materializes each as
      DB + offset, the same address form a global gets; the NUL rides free (image is pre-zeroed). *)
   let intern (s : string) =
     if not (Hashtbl.mem strings s)
@@ -240,6 +255,9 @@ let from_file (file : C.file) : t =
     end
   in
   C.visitCilFileSameGlobals collector file;
+  (* everything below the cursor is data (initialized globals + strings); bss follows *)
+  let data_size = (!cursor + 3) / 4 * 4 in
+  List.iter (fun (v, init) -> if init = None then place_tolerant (v, init)) gvars;
   (* Pass 3 — serialize, to a FIXED POINT. A global can place (pass 1) yet fail here (a
      function-pointer table, say): it must be un-placed and skipped. But another global's
      initializer may hold its address — and if that reloc resolved before the failure, it
@@ -290,5 +308,5 @@ let from_file (file : C.file) : t =
   List.iter
     (fun (off, s) -> Bytes.blit_string s 0 image off (String.length s))
     !string_blits;
-  { offsets; skipped; strings; relocs = !relocs; image }
+  { offsets; skipped; strings; relocs = !relocs; image; data_size }
 ;;

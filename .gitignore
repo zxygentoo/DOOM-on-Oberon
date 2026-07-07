@@ -1,3 +1,5 @@
 _build/
 *.install
 _opam/
+*.blob
+*.blob.map

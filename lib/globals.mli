@@ -26,6 +26,11 @@ type t =
         — the jig at [Runner.data_base]/[Runner.code_base], the 3b linker at the blob's
         (ABI §6, pointer initializers as absolute words) *)
   ; image : bytes (** data+bss, little-endian, length padded to a word multiple *)
+  ; data_size : int
+    (** bytes of [image] that are data (initialized globals + interned strings, padded
+        to a word); the zero tail past it is bss — placement orders initialized first,
+        so the blob file carries only [0, data_size) and the stub zeroes the rest
+        (ABI §7 bss start/length) *)
   }
 
 (** No globals at all (the default for bare {!Fundec.compile} calls). *)

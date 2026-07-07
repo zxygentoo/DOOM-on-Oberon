@@ -2,7 +2,9 @@
 ;   runner      : execution half — run a leaf body + data image in the vendored emulator
 ;   test_runner : hand-built instr -> encode -> run (the runner's own plumbing proof)
 ;   test_jig    : compile small C leaves with doomcc_core, run in the emulator, diff vs host gcc
+;   test_blob   : the 3b.2 envelope — emit a blob file, verify the ABI §7 header, load
+;                 and run it in the emulator the way the stub will
 
 (tests
- (names test_runner test_jig)
+ (names test_runner test_jig test_blob)
  (libraries emu doomcc_core unix))

@@ -52,7 +52,8 @@ let () =
   let total = ref 0
   and ok = ref 0
   and rejected = ref 0
-  and n_instr = ref 0 in
+  and n_instr = ref 0
+  and objs = ref [] in
   let reasons : (string, int) Hashtbl.t = Hashtbl.create 32 in
   let bump k =
     Hashtbl.replace reasons k (1 + Option.value ~default:0 (Hashtbl.find_opt reasons k))
@@ -64,7 +65,8 @@ let () =
       (match Fundec.compile ~globals fd with
        | obj ->
          incr ok;
-         n_instr := !n_instr + Linker.code_size obj
+         n_instr := !n_instr + Linker.code_size obj;
+         objs := obj :: !objs
        | exception Check.Unsupported msg ->
          incr rejected;
          bump msg
@@ -86,9 +88,108 @@ let () =
     Hashtbl.fold (fun k n acc -> (n, k) :: acc) reasons []
     |> List.sort (fun a b -> compare (fst b) (fst a))
     |> List.iter (fun (n, k) -> Printf.printf "         %5d  %s\n" n k));
-  (* ---- (4) back end — STUB (ABI §6 / track 3b) ----
-     The instr-level linker (label/branch resolution, LEA + FixedMul expansion, section
-     layout, header + checksum, symbol map) turns the per-function instr lists + data/bss
-     into the flat blob at 0x100000. Not built yet. *)
-  Printf.printf "link:    TODO (ABI §6 / 3b) — would emit %s @ 0x100000\n" !out
+  (* ---- (4) link + emit (3b.2, ABI §6/§7/§8) ----
+     Whole-program link at BLOB_BASE. Symbols referenced but not defined — libc imports
+     the mini-libc will provide, plus any still-refused function — get a self-loop trap
+     stub so the layout closes, and the list is printed: it IS the mini-libc worklist.
+     Entry offsets stay 0 until the crt0 thunks land (the hello-blob slice). *)
+  let objs = List.rev !objs @ Runtime.objs in
+  let defined = Hashtbl.create 256 in
+  List.iter (fun (o : Linker.obj) -> Hashtbl.replace defined o.Linker.name ()) objs;
+  let missing = Hashtbl.create 64 in
+  let note_ref name =
+    if not (Hashtbl.mem defined name) then Hashtbl.replace missing name ()
+  in
+  List.iter
+    (fun (o : Linker.obj) ->
+       List.iter
+         (function
+           | Linker.Call n | Linker.Addr (_, n) -> note_ref n
+           | _ -> ())
+         o.Linker.frags)
+    objs;
+  List.iter
+    (function
+      | _, Globals.Code n -> note_ref n
+      | _, Globals.Data _ -> ())
+    globals.Globals.relocs;
+  let missing = List.sort compare (Hashtbl.fold (fun k () acc -> k :: acc) missing []) in
+  let traps =
+    List.map
+      (fun name -> { Linker.name; frags = [ Linker.Label 0; Linker.Jmp 0 ] })
+      missing
+  in
+  if missing <> []
+  then (
+    Printf.printf
+      "link:    %d undefined symbols -> self-loop traps (the mini-libc worklist):\n"
+      (List.length missing);
+    Printf.printf "         %s\n" (String.concat " " missing));
+  let all = objs @ traps in
+  let code_words = List.fold_left (fun a o -> a + Linker.code_size o) 0 all in
+  let data_size = globals.Globals.data_size in
+  let bss_size = Bytes.length globals.Globals.image - data_size in
+  let base =
+    0x100000
+    (* BLOB_BASE, ABI §8 *)
+  in
+  let layout = Blob.layout ~base ~code_words ~data_size ~bss_size in
+  if layout.Blob.bss_base + layout.Blob.bss_length > 0x2C0000
+  then
+    Printf.printf
+      "link:    WARNING blob end 0x%X exceeds the 1.75 MB cap (ABI §8)\n"
+      (layout.Blob.bss_base + layout.Blob.bss_length);
+  let image = Linker.link ~code_base:layout.Blob.code_base all in
+  (* the data section, pointer relocs patched to absolute addresses (ABI §6) *)
+  let data = Bytes.sub globals.Globals.image 0 data_size in
+  List.iter
+    (fun (off, target) ->
+       let v =
+         match target with
+         | Globals.Data t -> layout.Blob.data_base + t
+         | Globals.Code name -> Linker.sym_addr image name
+       in
+       Bytes.set_int32_le data off (Int32.of_int v))
+    globals.Globals.relocs;
+  (* entries: 0 until the crt0 thunks exist (hello blob) *)
+  let entry name =
+    match List.assoc_opt name image.Linker.symbols with
+    | Some off -> layout.Blob.code_base + (4 * off) - base
+    | None -> 0
+  in
+  let blob =
+    Blob.emit
+      ~layout
+      ~code:image.Linker.code
+      ~data
+      ~entries:(entry "Init", entry "Tick", entry "KeyIn")
+  in
+  let oc = open_out_bin !out in
+  output_bytes oc blob;
+  close_out oc;
+  let map = !out ^ ".map" in
+  let oc = open_out map in
+  Printf.fprintf oc "# %s — symbol map (absolute byte addresses)\n" !out;
+  Printf.fprintf
+    oc
+    "# base 0x%X  code 0x%X  data 0x%X  bss 0x%X+%d  image %d B\n"
+    layout.Blob.base
+    layout.Blob.code_base
+    layout.Blob.data_base
+    layout.Blob.bss_base
+    layout.Blob.bss_length
+    layout.Blob.image_length;
+  List.iter
+    (fun (name, off) ->
+       Printf.fprintf oc "0x%06X %s\n" (layout.Blob.code_base + (4 * off)) name)
+    image.Linker.symbols;
+  close_out oc;
+  Printf.printf
+    "link:    code %d words · data %d B · bss %d B · image %d B @ 0x%X\n"
+    code_words
+    data_size
+    bss_size
+    layout.Blob.image_length
+    base;
+  Printf.printf "emit:    %s (+ %s)\n" !out map
 ;;
