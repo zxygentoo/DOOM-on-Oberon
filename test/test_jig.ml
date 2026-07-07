@@ -750,6 +750,21 @@ let samples =
        return v.c[3]; }"
     , "ulc"
     , 1 (* union LOCAL: slotted (aggregate), punned through the frame slot *) )
+    (* constant-float folds: a compile-time double expression under an int cast — the
+       automap zoom idiom — computes at compile time; no float reaches runtime, and gcc
+       folds the same expressions with real doubles, so the diff checks the arithmetic. *)
+  ; ( "int ff1(int x){ return (int)(0.7 * 65536) + x; }"
+    , "ff1"
+    , 1 (* the AM_LevelInit shape: 45875 + x *) )
+  ; ( "int ff2(int x){ return (int)(65536 / 1.02) + (int)(1.02 * 65536) + x; }"
+    , "ff2"
+    , 1 (* the AM_Responder shapes — constant float DIVISION and multiplication *) )
+  ; ( "int ff3(int x){ return (char)(1.5 * 200) + x; }"
+    , "ff3"
+    , 1 (* width-exact narrowing through the fold: (char)300 = 44 (char unsigned) *) )
+  ; ( "int ff4(int x){ return (int)(-0.7 * 65536) + x; }"
+    , "ff4"
+    , 1 (* negative: truncates toward zero, -45875 (not floor's -45876) *) )
     (* varargs (ABI §3 "for free"): the s4.1b marshaller leaves EVERY argument in the
        caller's home area, so va_start = FP + 4*n_formals and va_arg walks memory. The
        oracle side compiles the same headerless __builtin_* source with gcc's own

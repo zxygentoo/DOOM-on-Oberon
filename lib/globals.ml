@@ -68,10 +68,28 @@ let rec int_core (e : C.exp) : int option =
   | None ->
     (match e with
      | C.CastE (_, t, e') when C.isPointerType t || C.isIntegralType t ->
-       (match int_core e' with
-        | Some _ as n -> n
-        | None ->
-          if C.isIntegralType t then Option.map int_of_float (float_const e') else None)
+       let v =
+         match int_core e' with
+         | Some _ as n -> n
+         | None ->
+           if C.isIntegralType t then Option.map int_of_float (float_const e') else None
+       in
+       (* width-exact: a narrowing integer cast wraps exactly as the machine will —
+          needed since gen_expr folds these too (a value, not a width-carrying slot) *)
+       Option.map
+         (fun v ->
+            let bits = if C.isPointerType t then 32 else C.bitsSizeOf t in
+            if bits >= 32
+            then v
+            else (
+              let x = v land ((1 lsl bits) - 1) in
+              let signed =
+                match C.unrollType t with
+                | C.TInt (ik, _) -> C.isSigned ik
+                | _ -> false
+              in
+              if signed && x land (1 lsl (bits - 1)) <> 0 then x - (1 lsl bits) else x))
+         v
      | _ -> None)
 
 (* the double-expression evaluator behind the fixed-point fold; mirrors what gcc's own

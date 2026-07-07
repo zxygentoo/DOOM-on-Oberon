@@ -36,6 +36,13 @@ type t =
 (** No globals at all (the default for bare {!Fundec.compile} calls). *)
 val no_globals : t
 
+(** Evaluate a compile-time integer constant: integer arithmetic through any cast chain
+    (width-exact — narrowing casts wrap as the machine will), and constant *double*
+    expressions under an integer cast, truncating toward zero — the automap zoom idiom
+    [(int)(1.02*FRACUNIT)]. The s8 initializer evaluator, shared with {!Fundec}'s
+    constant-cast fold; [None] = not a compile-time constant. *)
+val int_core : GoblintCil.exp -> int option
+
 (** Lay out every global definition ([GVar]) of a (merged) file. Never raises for an
     individual unplaceable global — those land in [skipped]. *)
 val from_file : GoblintCil.file -> t

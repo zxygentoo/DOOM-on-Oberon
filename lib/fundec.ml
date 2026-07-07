@@ -423,11 +423,22 @@ let rec gen_expr ctx (e : C.exp) : reg =
        param resolves to its frame slot (s4.3); a register var can't be address-taken (that
        would have slotted it), so a non-slotted local reaching gen_addr is an internal error. *)
     materialize_addr ctx lv
-  | C.CastE (_, t, e') ->
+  | C.CastE (_, t, e') as whole ->
     Check.check_unsupported_types t;
-    if C.bitsSizeOf t >= 32
-    then gen_expr ctx e' (* same-width or widening: the 32-bit value is unchanged *)
-    else gen_narrow ctx t e'
+    (* Fold a compile-time constant cast — crucially including a constant *double*
+       expression under an int cast, the automap zoom idiom (int)(1.02*FRACUNIT): the
+       value is computed HERE, truncating toward zero, and no float ever reaches
+       runtime — the ABI §4 float ban stays airtight for everything live. Non-constant
+       operands fall through, and a float one still refuses in the recursion. *)
+    (match Globals.int_core (C.constFold true whole) with
+     | Some n ->
+       let r = alloc_scratch ctx in
+       load_const ctx r n;
+       r
+     | None ->
+       if C.bitsSizeOf t >= 32
+       then gen_expr ctx e' (* same-width or widening: the 32-bit value is unchanged *)
+       else gen_narrow ctx t e')
   | C.UnOp (op, e', t) ->
     Check.check_unsupported_types t;
     gen_unop ctx op e'
