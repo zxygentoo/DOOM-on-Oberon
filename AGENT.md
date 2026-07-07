@@ -358,10 +358,14 @@ cleanest 32-bit ISA proved exactly the gentle introduction predicted —
 built in ~30 slices over three days, each trusted only once the
 differential jig (234 samples / 11 030 cases) matched gcc. With the 1c host
 reference build landed (`14f92c7` — the anchor of the golden-frame and
-desync oracles), what remains on the critical path to the first frame is
-pure 1d infrastructure: the emulator's 24-bit himem patch (vendor), the sim
-harness that preloads blob+WAD (incl. the oracle instrumentation — golden
-dumper, gametic checksum), the WAD chunk splitter — and then performance
+desync oracles) and the emulator's himem widening landed (upstream
+`f52d904`, pinned at `f59df92`: 16 MiB default, kernel worldview and fb
+window untouched — the emulator-side mirror of 2a; `test_blob` now runs the
+blob envelope + crt0 excursion at the real `BLOB_BASE 0x100000` /
+`STACK_TOP 0x300000`), what remains on the critical path to the first frame
+is the rest of the 1d infrastructure: the sim/emulator harness that
+preloads blob+WAD (incl. the oracle instrumentation — golden dumper,
+gametic checksum), the WAD chunk splitter — and then performance
 work chosen by measurement (`-timedemo` survived the float ban precisely to
 be that instrument), not by guess: the §4 allocator ladder (local →
 linear-scan) and the 1a hand-rolled hot loops are the two levers, and 1d's
@@ -377,8 +381,9 @@ phases later.
 
 And the verification triangle is already in the barn: the vendored OCaml
 emulator (`vendor/oberon-risc-emu-ocaml`, lockstep-tested against the core
-since Phase 4) needs only the 24-bit map patch — an hour in OCaml, the same
-widening 2a does in silicon — to load blobs. That makes it track 1's
+since Phase 4) got its 24-bit map patch — the same widening 2a does in
+silicon (upstream `f52d904`, 2026-07-08) — and loads blobs in himem at the
+ABI addresses today. That makes it track 1's
 everyday target (full DOOM at near-realtime, vs 10 s/frame in Cyclesim),
 with Cyclesim as the cycle-accurate check and silicon as the truth. Any two
 disagreeing localizes the bug: emulator ≠ Cyclesim is a machine or model
