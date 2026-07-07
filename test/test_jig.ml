@@ -739,6 +739,30 @@ let samples =
        return v.c[3]; }"
     , "ulc"
     , 1 (* union LOCAL: slotted (aggregate), punned through the frame slot *) )
+    (* varargs (ABI §3 "for free"): the s4.1b marshaller leaves EVERY argument in the
+       caller's home area, so va_start = FP + 4*n_formals and va_arg walks memory. The
+       oracle side compiles the same headerless __builtin_* source with gcc's own
+       varargs — two independent implementations of the same C semantics. *)
+  ; ( "int vsum0(int n, ...){ __builtin_va_list ap; int s = 0; __builtin_va_start(ap, \
+       n); while (n > 0) { s += __builtin_va_arg(ap, int); n--; } __builtin_va_end(ap); \
+       return s; } int vsum(int i){ return vsum0(3, i, i * 2, 7) + vsum0(0) * 10 + \
+       vsum0(1, i ^ 5); }"
+    , "vsum"
+    , 1 (* the shape itself: 0, 1, 3 variadic args *) )
+  ; ( "int vs6(int n, ...){ __builtin_va_list ap; int s = 0; __builtin_va_start(ap, n); \
+       while (n > 0) { s = s * 3 + __builtin_va_arg(ap, int); n--; } \
+       __builtin_va_end(ap); return s; } int vmix(int i){ return vs6(6, i, 2, 3, 4, 5, i \
+       & 7); }"
+    , "vmix"
+    , 1
+      (* 7 total args: the variadic walk crosses the register/stack slot boundary; a \
+           position-weighted fold catches any misordered slot *)
+    )
+  ; ( "int vf2(int a, int b, ...){ __builtin_va_list ap; int v; __builtin_va_start(ap, \
+       b); v = __builtin_va_arg(ap, int); __builtin_va_end(ap); return a * 100 + b * 10 \
+       + v; } int vshift(int i){ return vf2(1, 2, i & 7); }"
+    , "vshift"
+    , 1 (* two fixed params: the va_start anchor is FP+8, not FP+4 *) )
     (* code addresses (3b.1): a function's address exists only at link time, so &f is an
        Addr frag (expanded to the load_const pair at layout) and a fn-ptr initializer is
        a Code reloc (patched via sym_addr). An indirect call is BL-to-register: the
@@ -807,7 +831,9 @@ let libc_prelude =
    char *, unsigned long); extern char *strdup(const char *); extern int toupper(int); \
    extern int abs(int); extern int atoi(const char *); extern void *malloc(unsigned \
    long); extern void *calloc(unsigned long, unsigned long); extern void *realloc(void \
-   *, unsigned long); extern void free(void *); "
+   *, unsigned long); extern void free(void *); extern int snprintf(char *, unsigned \
+   long, const char *, ...); extern int vsnprintf(char *, unsigned long, const char *, \
+   __builtin_va_list); "
 ;;
 
 let libc_samples =
@@ -874,6 +900,29 @@ let libc_samples =
          realloc(p, 16); q[2] = 9; return q[0] + q[1] + q[2]; }"
       , "lrea"
       , 1 (* grow preserves the old prefix *) )
+      (* the printf core, diffed against glibc's: buffers pre-filled so bytes past the
+         NUL are deterministic on both sides, results folded as a checksum *)
+    ; ( "int vsn1(int i){ char b[40]; int k; int s; int r; memset(b, 7, 40); r = \
+         snprintf(b, 40, \"a=%d b=%u c=%x\", i, (unsigned)i, i & 255); s = r; for (k = \
+         0; k < 40; k++) s = s * 31 + b[k]; return s; }"
+      , "vsn1"
+      , 1 (* the basics: %d full-range (incl. INT_MIN), %u, %x *) )
+    ; ( "int vsn2(int i){ char b[8]; int k; int s; int r; memset(b, 9, 8); r = \
+         snprintf(b, 8, \"v=%d!\", i); s = r * 1000; for (k = 0; k < 8; k++) s = s * 31 \
+         + b[k]; return s; }"
+      , "vsn2"
+      , 1 (* truncation: returns the WOULD-BE length, buffer cut + NUL-terminated *) )
+    ; ( "int vsn3(int i){ char b[48]; int k; int s; int r; memset(b, 3, 48); r = \
+         snprintf(b, 48, \"[%05d][%-6d][%4x][%.3s]\", i, i & 63, i & 4095, \"abcdef\"); \
+         s = r; for (k = 0; k < 48; k++) s = s * 31 + b[k]; return s; }"
+      , "vsn3"
+      , 1 (* zero-pad (sign-aware), left-align, width, %s precision *) )
+    ; ( "int vsn4(int i){ char b[32]; int k; int s; int r; memset(b, 5, 32); r = \
+         snprintf(b, 32, \"[%c]%%[%s][%X]\", 'A' + (i & 7), (i & 1) ? \"yes\" : \"no\", \
+         (unsigned)i >> 16); s = r; for (k = 0; k < 32; k++) s = s * 31 + b[k]; return \
+         s; }"
+      , "vsn4"
+      , 1 (* %c, %%, %s branches, %X uppercase *) )
     ]
 ;;
 

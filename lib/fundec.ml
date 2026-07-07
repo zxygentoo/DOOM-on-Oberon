@@ -94,6 +94,12 @@ type ctx =
     (* CIL stmt [sid] -> backend label, for statements that are jump targets (case/default in a
        switch, or a goto/label). Find-or-create, so a forward jump and its target agree. *)
   ; func_end : int (* shared epilogue label every [return] branches to *)
+  ; is_vararg : bool (* the function's own type is variadic (va_start legality) *)
+  ; n_formals : int
+    (* named-parameter count: va_start anchors at FP + 4*n_formals — the slot after the
+       last named arg in the caller's home area, where the s4.1b marshaller left EVERY
+       argument in memory (the decoupled store-then-load), so the whole argument list
+       is contiguous at FP+0.. (ABI §3's "varargs for free") *)
   ; mutable max_used : reg
     (* highest register written (homes + scratch); the callee-saved
                               save set is R[first_callee_saved..max_used] (ABI §2/§3) *)
@@ -183,6 +189,7 @@ let classify_access (lv : C.lval) : access =
   let t = C.unrollType (C.typeOfLval lv) in
   match t with
   | (C.TInt _ | C.TEnum _ | C.TPtr _) when C.bitsSizeOf t = 32 -> Word
+  | C.TBuiltin_va_list _ -> Word (* one pointer into the caller's home area (ABI §3) *)
   | C.TInt (ik, _) when C.bitsSizeOf t = 8 -> Byte (C.isSigned ik)
   | C.TInt (ik, _) when C.bitsSizeOf t = 16 -> Half (C.isSigned ik)
   | C.TComp _ | C.TArray _ ->
@@ -787,6 +794,77 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
   free_scratch ctx base
 ;;
 
+(* Write scratch [r] into a scalar lval that may be a register-homed local — the
+   general gen_store path errors on those (a homed variable has no address); everything
+   else routes through the normal memory calculus. The va builtins need this because
+   CIL special-cases va_arg's &dst (no vaddrof), so the destination keeps its home. *)
+let store_lval ctx (lv : C.lval) (r : reg) =
+  match lv with
+  | C.Var v, C.NoOffset when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
+    let h = home ctx v in
+    if h <> r then emit ctx (mov_reg h r)
+  | _ -> gen_store ctx lv r
+;;
+
+(* The stdarg builtins (ABI §3: varargs for free). CIL hands va_start with the ap lval
+   only (the "last named argument" is implicit — we anchor on the callee's own formal
+   count); va_arg arrives pre-lowered to (ap, sizeof t, &dst); va_end vanishes.
+   va_list is ONE POINTER into the caller's home area: va_start = FP + 4*n_formals,
+   va_arg = load a word and advance — default promotions make every legal variadic
+   argument exactly one word (char/short widen to int, float would be double = banned). *)
+let gen_va_builtin ctx name (args : C.exp list) =
+  let as_ap e =
+    match e with
+    | C.Lval lv -> lv
+    | _ -> unsupported "va builtin: va_list argument is not an lval — unexpected shape"
+  in
+  match name, args with
+  | "__builtin_va_start", [ ap ] ->
+    if not ctx.is_vararg
+    then unsupported "va_start in a non-variadic function — unexpected shape";
+    let r = alloc_scratch ctx in
+    emit ctx (alu R.Add r fp_reg (R.Imm (4 * ctx.n_formals)));
+    store_lval ctx (as_ap ap) r;
+    free_scratch ctx r
+  | "__builtin_va_end", [ _ ] -> () (* nothing to release: ap is a plain pointer *)
+  | "__builtin_va_copy", [ dst; src ] ->
+    let r = gen_expr ctx (C.Lval (as_ap src)) in
+    store_lval ctx (as_ap dst) r;
+    free_scratch ctx r
+  | "__builtin_va_arg", [ ap; size_e; dst_addr ] ->
+    (match C.getInteger (C.constFold true size_e) with
+     | Some c when C.Cilint.int_of_cilint c = 4 -> ()
+     | Some _ ->
+       unsupported
+         "va_arg of a non-word type (variadic args promote to 4 bytes; ABI §4 bans \
+          64-bit and double)"
+     | None -> unsupported "va_arg: non-constant size — unexpected shape");
+    let rec strip e =
+      match e with
+      | C.CastE (_, _, e') -> strip e'
+      | e -> e
+    in
+    let dst_lv =
+      match strip dst_addr with
+      | C.AddrOf lv -> lv
+      | _ -> unsupported "va_arg: destination is not &lval — unexpected shape"
+    in
+    let ap_lv = as_ap ap in
+    (* v = the word ap points at *)
+    let p = gen_expr ctx (C.Lval ap_lv) in
+    let v = alloc_scratch ctx in
+    emit ctx (R.Load { size = R.W; a = v; base = p; off = 0 });
+    store_lval ctx dst_lv v;
+    free_scratch ctx v;
+    (* ap += 4, via a fresh register: [p] may BE ap's home — never mutate in place *)
+    let p2 = alloc_scratch ctx in
+    emit ctx (alu R.Add p2 p (R.Imm 4));
+    free_scratch ctx p;
+    store_lval ctx ap_lv p2;
+    free_scratch ctx p2
+  | _ -> unsupported "stdarg builtin %s — unexpected shape" name
+;;
+
 (* Whole-aggregate copy (s4.4): [dst = src] for struct-typed lvals — CIL keeps [a = b] a single
    struct-typed Set with an lval RHS. Byte-wise memory copy, unrolled over the compile-time
    size: alignment-agnostic on purpose, because these structs are often sub-word-aligned
@@ -839,6 +917,11 @@ let gen_instr ctx (i : C.instr) =
     let r = gen_expr ctx e in
     gen_store ctx lv r;
     free_scratch ctx r
+  | C.Call (_, C.Lval (C.Var f, C.NoOffset), args, _, _)
+    when String.length f.vname >= 13 && String.sub f.vname 0 13 = "__builtin_va_" ->
+    (* stdarg builtins inline — they must never become real calls (a BL to va_start
+       would clobber the very registers and stack shape it is asking about) *)
+    gen_va_builtin ctx f.vname args
   | C.Call (lvopt, fexp, args, _, _) ->
     (* Call, direct or indirect; args 1-4 in R0-R3, args 5+ on the stack, scalar/void
        return in R0 (ABI §3). Marshal through the outgoing area: evaluate each arg with the
@@ -1175,9 +1258,15 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
      home area is owed for them. *)
   let has_div = calls_runtime_helper fd in
   let leaf = call_info = None && not has_div in
-  (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and reads
-     them at FP+16.. (below). The naive-alloc register ceiling still applies via [assign]. *)
-  let needs_fp = List.length fd.sformals > 4 in
+  (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and
+     reads them at FP+16.. (below). A variadic callee needs FP unconditionally: va_start
+     anchors at FP + 4*n_formals (the home-area slot after the last named argument). *)
+  let is_vararg =
+    match C.unrollType fd.svar.vtype with
+    | C.TFun (_, _, va, _) -> va
+    | _ -> false
+  in
+  let needs_fp = List.length fd.sformals > 4 || is_vararg in
   let outgoing_area =
     match call_info with
     | None -> 0
@@ -1266,6 +1355,8 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     ; loops = []
     ; stmt_labels = Hashtbl.create 16
     ; func_end = 0
+    ; is_vararg
+    ; n_formals = List.length fd.sformals
     ; max_used =
         !next - 1 (* the last home; scratch (and so the save set) grow from here *)
     }

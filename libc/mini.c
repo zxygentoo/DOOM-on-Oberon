@@ -214,3 +214,136 @@ char *strdup(const char *s)
     if (p) memcpy(p, s, n);
     return p;
 }
+
+/* ---- the printf core: vsnprintf/snprintf (varargs slice) ----
+ *
+ * va_list is CIL's __builtin_va_list — one pointer into the caller's home area, where
+ * our marshaller leaves every argument in memory (ABI §3's "varargs for free"). The
+ * emitters share bounded-buffer state through a pointed-to struct: passing buf/cap/pos
+ * separately would push helpers past the naive allocator's 6 register homes.
+ *
+ * Subset (everything DOOM's format strings use): flags '-' '0' · width · precision for
+ * %s · l/h length modifiers consumed as no-ops (long = int under ILP32) · conversions
+ * d i u x X c s p %%. Unknown conversions print as "%<c>" — visible, never silent.
+ * glibc-compatible corners on purpose (the jig diffs against the real thing): %s of
+ * NULL prints "(null)"; snprintf returns the WOULD-BE length and always NUL-terminates
+ * a nonempty buffer. */
+
+typedef __builtin_va_list va_list;
+
+typedef struct sn_state {
+    char *buf;
+    size_t cap;
+    size_t pos;
+} sn_t;
+
+static void sn_chr(sn_t *st, int ch)
+{
+    if (st->cap && st->pos < st->cap - 1) st->buf[st->pos] = (char)ch;
+    st->pos++;
+}
+
+static void sn_str(sn_t *st, const char *s, int prec, int width, int left)
+{
+    int len = 0;
+    int k = 0;
+    if (!s) s = "(null)";
+    while (s[len] && (prec < 0 || len < prec)) len++;
+    if (!left) while (width > len) { sn_chr(st, ' '); width--; }
+    while (k < len) { sn_chr(st, s[k]); k++; }
+    while (width > len) { sn_chr(st, ' '); width--; }
+    /* the pad-after loop no-ops when right-aligned: the pad-before consumed width */
+}
+
+/* flags bits: 1 = negative (emit '-'), 2 = zero-pad, 4 = left-align, 8 = uppercase */
+static void sn_num(sn_t *st, unsigned v, unsigned base, int flags, int width)
+{
+    char d[12];
+    int len = 0;
+    const char *digs = (flags & 8) ? "0123456789ABCDEF" : "0123456789abcdef";
+    int total;
+    if (v == 0) d[len++] = '0';
+    while (v) { d[len++] = digs[v % base]; v = v / base; }
+    total = len + ((flags & 1) ? 1 : 0);
+    /* C99 padding order: spaces before the sign, zeros after it; '-' wins over '0' */
+    if (!(flags & 4) && !(flags & 2))
+        while (width > total) { sn_chr(st, ' '); width--; }
+    if (flags & 1) sn_chr(st, '-');
+    if (!(flags & 4) && (flags & 2))
+        while (width > total) { sn_chr(st, '0'); width--; }
+    while (len > 0) { len--; sn_chr(st, d[len]); }
+    while (width > total) { sn_chr(st, ' '); width--; }
+}
+
+int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
+{
+    sn_t st;
+    st.buf = buf;
+    st.cap = n;
+    st.pos = 0;
+    while (*fmt) {
+        char c = *fmt++;
+        int flags = 0;
+        int width = 0;
+        int prec = -1;
+        if (c != '%') { sn_chr(&st, c); continue; }
+        for (;;) {
+            if (*fmt == '-') { flags |= 4; fmt++; }
+            else if (*fmt == '0') { flags |= 2; fmt++; }
+            else break;
+        }
+        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
+        }
+        while (*fmt == 'l' || *fmt == 'h') fmt++;   /* no-ops under ILP32 */
+        c = *fmt++;
+        if (c == 0) break;                          /* trailing '%': stop quietly */
+        if (c == 'd' || c == 'i') {
+            int v = __builtin_va_arg(ap, int);
+            unsigned u = (unsigned)v;
+            int fl = flags;
+            if (v < 0) { fl |= 1; u = 0u - u; }     /* INT_MIN-safe magnitude */
+            sn_num(&st, u, 10, fl, width);
+        } else if (c == 'u') {
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 10, flags, width);
+        } else if (c == 'x') {
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, width);
+        } else if (c == 'X') {
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags | 8, width);
+        } else if (c == 'p') {
+            sn_chr(&st, '0');
+            sn_chr(&st, 'x');
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, 0);
+        } else if (c == 'c') {
+            if (!(flags & 4)) while (width > 1) { sn_chr(&st, ' '); width--; }
+            sn_chr(&st, __builtin_va_arg(ap, int));
+            while (width > 1) { sn_chr(&st, ' '); width--; }
+        } else if (c == 's') {
+            sn_str(&st, __builtin_va_arg(ap, const char *), prec, width, flags & 4);
+        } else if (c == '%') {
+            sn_chr(&st, '%');
+        } else {
+            sn_chr(&st, '%');                       /* unknown: visible, never silent */
+            sn_chr(&st, c);
+        }
+    }
+    if (n) {
+        size_t t = st.pos;
+        if (t > n - 1) t = n - 1;
+        buf[t] = 0;
+    }
+    return (int)st.pos;
+}
+
+int snprintf(char *buf, size_t n, const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+    __builtin_va_start(ap, fmt);
+    r = vsnprintf(buf, n, fmt, ap);
+    __builtin_va_end(ap);
+    return r;
+}
