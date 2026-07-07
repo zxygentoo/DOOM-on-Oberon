@@ -206,8 +206,13 @@ B    LNK                                  ; back to the stub
 
 Signatures: `Init(wad_addr, cfg_addr) → 0 | error code`;
 `Tick() → 0 continue | 1 quit`; `KeyIn(ev)` (enqueues; v1 blob also polls
-UART itself, §6 of AGENT.md). `exit()`/`I_Error` set status in the shared
-page and return through the thunk — never halt.
+UART itself, §6 of AGENT.md) — `ev = pressed | doomkey << 8`, the §8
+ring/wire byte order. `exit()`/`I_Error` set status in the shared
+page and return through the thunk — never halt (realized as a
+setjmp-shaped unwind: each entry arms a jmp_buf of the callee-saved state
+R6–R12/SP/LNK; `exit` restores it and the entry returns normally).
+In v1, `cfg_addr` is the §8 SHARED page (the blob also reaches it through
+its baked link-time binding).
 
 ## 8. Himem layout v1 (the constants page)
 
@@ -233,8 +238,9 @@ test (BSP recursion worst case) is the insurance.
 SHARED page (v1 fields; rest reserved):
 `+0` magic · `+4` version · `+8` flags (reserved) · `+12` blob status
 (0 running, 1 quit, negative = I_Error code) · `+16` frame counter
-(heartbeat) · `+20` key ring head · `+24` tail · `+32…` ring of 2-byte
-events (make/break, code), 256 entries.
+(heartbeat, incremented by `Tick`) · `+20` key ring head · `+24` tail ·
+`+28` WAD length in bytes (stub writes before `Init`) · `+32…` ring of
+2-byte events (make/break, code), 256 entries.
 
 Key-ring discipline (v1; a §10 non-breaking clarification of the fields
 above): head and tail are free-running u32 counters, masked at use

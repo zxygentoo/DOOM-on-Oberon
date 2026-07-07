@@ -208,4 +208,36 @@ let umod_obj : L.obj =
   }
 ;;
 
-let objs = [ div_obj; mod_obj; udiv_obj; umod_obj ]
+let stw a base off = ins (R.Store { size = R.W; a; base; off })
+let ldw a base off = ins (R.Load { size = R.W; a; base; off })
+
+(* __setjmp / __longjmp — the exit escape (ABI §7: exit/I_Error return through
+   the thunk, never halt). A jmp_buf on this ABI is exactly the callee-saved
+   state: R6-R11 (the homes), R12 (FP), R14 (SP), R15 (LNK) — nine words at the
+   buffer in R0. DB (R13) has no slot: crt0 sets it once and nothing ever writes
+   it. __longjmp's "second return" is just the reload: the restored LNK IS the
+   __setjmp call site, so B LNK lands there with R0 = val — and the entry
+   function's own epilogue then unwinds normally from its untouched frame (SP
+   came back with the buffer). The caller guarantees val <> 0 (exit passes 1).
+   Under naive allocation this is C-clean, not just classically clean: every
+   live-across-call local sits in a home register, so a longjmp restores locals
+   to their setjmp-time values — the shape C's semantics permit. *)
+let jmp_buf_regs = [ 6; 7; 8; 9; 10; 11; 12; 14; 15 ]
+
+let setjmp_obj : L.obj =
+  { L.name = "__setjmp"
+  ; frags =
+      List.mapi (fun i r -> stw r 0 (4 * i)) jmp_buf_regs
+      @ [ alu R.Mov 0 0 (R.Imm 0); ret ]
+  }
+;;
+
+let longjmp_obj : L.obj =
+  { L.name = "__longjmp"
+  ; frags =
+      List.mapi (fun i r -> ldw r 0 (4 * i)) jmp_buf_regs
+      @ [ alu R.Mov 0 0 (R.Reg 1); ret (* ret = B LNK: the restored R15 *) ]
+  }
+;;
+
+let objs = [ div_obj; mod_obj; udiv_obj; umod_obj; setjmp_obj; longjmp_obj ]

@@ -27,6 +27,17 @@ let libc_path name =
   List.find Sys.file_exists [ "libc/" ^ name; "../libc/" ^ name; "../../libc/" ^ name ]
 ;;
 
+(* The jig-side fakes: the blob entries Init/Tick call doomgeneric_Create/Tick,
+   which the real tree defines but the jig's libc-only merge does not — two no-op
+   stand-ins keep the link whole and make the REAL entries runnable in the
+   emulator (doomcc never sees these; it links the real doomgeneric.c). The fake
+   Create deliberately does NOT call DG_Init: its banner printf would spin on the
+   UART tx-ready bit the bare jig emulator never raises. *)
+let port_fakes =
+  "void doomgeneric_Tick(void) { } void doomgeneric_Create(int argc, char **argv) { \
+   (void)argc; (void)argv; }"
+;;
+
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
    body plus the data/bss image the runner drops at DB before each run ---- *)
 let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
@@ -47,6 +58,7 @@ let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
          then
            [ Frontend.parse_file (libc_path "doomgeneric_oberon.c")
            ; Frontend.parse_file (libc_path "dither.c")
+           ; Frontend.parse_string ~name:"port_fakes" port_fakes
            ]
          else [])
         ~name:fname
@@ -1158,7 +1170,10 @@ let port_prelude =
    *pressed, unsigned char *key); extern unsigned int DG_GetTicksMs(); extern void \
    DG_SleepMs(unsigned int ms); extern void DG_DrawFrame(void); extern void \
    __dg_build_lut(const unsigned char *pal); extern void __dg_dither(const unsigned char \
-   *src, int w, int h, unsigned int *dst, int stride); "
+   *src, int w, int h, unsigned int *dst, int stride); extern int Init(int wad_addr, int \
+   cfg_addr); extern int Tick(void); extern void KeyIn(int ev); extern void exit(int \
+   status); extern int __setjmp(unsigned int *env); extern void __longjmp(unsigned int \
+   *env, int val); extern unsigned int __exit_env[9]; "
 ;;
 
 (* ---- self-checks (port slice): the DG_ hooks' machine surface — the SHARED-page
@@ -1224,6 +1239,57 @@ let port_selfchecks =
             doubling). Second pass: same frame, dst = oc+3, stride = -1 — the
             bottom-up flip as the machine uses it, same words mirror-ordered. *)
        , [ 0, 255; 4, 255 ] )
+     ; ( "unsigned int env1[9]; int jhelp(int n){ if (n == 0) __longjmp(env1, 42); \
+          return jhelp(n - 1) + 1; } int sj1(int i){ int r; int acc; acc = 0; r = \
+          __setjmp(env1); acc = acc + 1; if (r == 0) { jhelp(3); return -1; } return r * \
+          10 + acc + (i - i); }"
+       , "sj1"
+         (* __setjmp returns 0 first, then the __longjmp val (42) from 3 calls
+            deep. [acc] pins OUR restore semantics: it lives in a home register,
+            so the longjmp rewinds it to its setjmp-time value (0) and the
+            re-executed increment makes it 1 -> 42*10 + 1. (C calls such locals
+            indeterminate; the implementation is allowed to be this.) The
+            runner's R6-R11 sentinels also verify the whole unwind preserved
+            the entry's callee-saved contract. *)
+       , [ 0, 421; 6, 421 ] )
+     ; ( "int diver(int n, int s){ if (n == 0) exit(s); return diver(n - 1, s) + 1; } \
+          int ext1(int i){ int r; *(volatile int *)(__shared_base + 12) = 0; r = \
+          __setjmp(__exit_env); if (r == 0) { diver(4, i); return -1; } return r * 1000 \
+          + *(volatile int *)(__shared_base + 12) + (i - i); }"
+       , "ext1"
+         (* the REAL exit() from 4 calls deep: longjmp val 1, and the §8 status
+            mapping — exit(0) writes 1 (clean quit), nonzero passes through
+            (I_Error's -1 stays negative): 1000 + status *)
+       , [ 0, 1001; 7, 1007; -3, 997 ] )
+     ; ( "typedef struct _IO_FILE FILE; extern FILE *fopen(const char *, const char *); \
+          extern unsigned long fread(void *, unsigned long, unsigned long, FILE *); \
+          unsigned char wadbuf[16] = {73,87,65,68,1,2,3,4,5,6,7,8,9,10,11,12}; int \
+          in1(int i){ FILE *f; unsigned char b[4]; int r; *(volatile unsigned int \
+          *)(__shared_base + 28) = 16; r = Init((int)wadbuf, 0); if (r != 0) return -1; \
+          f = fopen(\"doom1.wad\", \"rb\"); if (!f) return -2; fread(b, 1, 4, f); return \
+          b[0] + b[1] * 1000 + b[3] * 100000 + (i - i); }"
+       , "in1"
+         (* the REAL Init, happy path (Create faked to a no-op): reads the WAD
+            length from SHARED +28, registers the memory file under the exact
+            -iwad name, returns 0; then fopen/fread proves the registration —
+            'I'(73) + 'W'(87)*1000 + 'D'(68)*100000 *)
+       , [ 0, 6887073; 2, 6887073 ] )
+     ; ( "int tk1(int i){ int a; int b; unsigned int hb; *(volatile unsigned int \
+          *)(__shared_base + 16) = 0; a = Tick(); b = Tick(); hb = *(volatile unsigned \
+          int *)(__shared_base + 16); return a + b * 10 + (int)hb * 100 + (i - i); }"
+       , "tk1"
+         (* the REAL Tick twice (doomgeneric_Tick faked): returns 0 both times
+            and the §8 +16 heartbeat reads 2 *)
+       , [ 0, 200; 1, 200 ] )
+     ; ( "int ki1(int i){ int p; unsigned char k; int r; KeyIn(173 * 256 + 1); KeyIn(32 \
+          * 256); r = 0; if (DG_GetKey(&p, &k)) r = p * 1000 + k; if (DG_GetKey(&p, &k)) \
+          r = r * 10000 + p * 1000 + k; if (DG_GetKey(&p, &k)) r = -1; return r + (i - \
+          i); }"
+       , "ki1"
+         (* the REAL KeyIn -> ring -> DG_GetKey round trip: ev = pressed |
+            key << 8 — make of 173 then break of 32, drained in order:
+            (1*1000+173)*10000 + (0*1000+32) *)
+       , [ 0, 11730032; 4, 11730032 ] )
      ]
 ;;
 
