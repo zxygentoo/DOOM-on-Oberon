@@ -133,14 +133,16 @@ let bcc ctx cond neg l = ctx.rev_frags <- L.Bcc (cond, neg, l) :: ctx.rev_frags
 let jmp ctx l = ctx.rev_frags <- L.Jmp l :: ctx.rev_frags
 let call ctx name = ctx.rev_frags <- L.Call name :: ctx.rev_frags
 
+(* Raised (not [Unsupported]) when an expression needs more simultaneous scratch
+   registers than the pool holds: [compile] catches it, rewrites the function to
+   three-address form ([flatten_fundec]) and retries — the temporaries become
+   ordinary locals, which the landed spilling rungs park in frame slots. *)
+exception Scratch_exhausted
+
 let alloc_scratch ctx =
   let rec find r =
     if r > ctx.scratch_hi
-    then
-      unsupported
-        "out of registers (naive alloc, scratch R%d-R%d full) — needs spilling"
-        ctx.scratch_lo
-        ctx.scratch_hi
+    then raise Scratch_exhausted
     else if ctx.scratch_free.(r)
     then (
       ctx.scratch_free.(r) <- false;
@@ -1261,9 +1263,132 @@ let calls_runtime_helper (fd : C.fundec) : bool =
   !found
 ;;
 
+(* ---- three-address flattening: the scratch-exhaustion fallback ----
+
+   A statement whose expression tree needs more simultaneous temporaries than the
+   scratch pool holds (a deep arithmetic chain, spilled-local loads + ROR masks +
+   the div-area protocol all live at once) cannot compile under naive allocation.
+   The fix is not smarter scratch juggling but a smaller problem: rewrite the
+   BODY so every statement is [tmp = atom op atom] — each fresh temporary is an
+   ordinary CIL local, so the first six take home registers and the rest ride the
+   rung-1 spill slots (machinery landed at perf 1). Worst-case scratch need per
+   flattened statement is a handful — deterministically inside the pool.
+
+   Applied only as [compile]'s retry after [Scratch_exhausted] (3 functions in
+   the DOOM tree), so the other ~1200 keep their tighter unflattened code.
+   Statement identity is preserved — skinds are mutated in place — so goto
+   targets and switch cases (which reference statements physically) stay valid;
+   a hoisted prelude lands UNDER the original statement's label, which is
+   correct: jumping there must re-evaluate the condition's operands. *)
+let flatten_fundec (fd : C.fundec) : unit =
+  (* compiles while holding at most a scratch or two: constants (incl. interned
+     strings), sizeof (a folded constant), a register-eligible variable, or a
+     cast of one *)
+  let is_atom (e : C.exp) : bool =
+    match e with
+    | C.Const _ | C.SizeOf _ | C.SizeOfE _ | C.SizeOfStr _ -> true
+    | C.Lval (C.Var _, C.NoOffset) -> true
+    | C.CastE (_, _, C.Lval (C.Var _, C.NoOffset)) | C.CastE (_, _, C.Const _) -> true
+    | _ -> false
+  in
+  let prelude : C.instr list ref = ref [] in
+  let hoist loc (e : C.exp) : C.exp =
+    let tmp = C.makeTempVar fd ~name:"__ta" (C.typeOf e) in
+    prelude := C.Set ((C.Var tmp, C.NoOffset), e, loc, loc) :: !prelude;
+    C.Lval (C.Var tmp, C.NoOffset)
+  in
+  (* [flat] returns an ATOM (hoisting a shallowed node if needed); [shallow]
+     rewrites one operator level over atomized children — the form a statement's
+     top node is allowed to keep *)
+  let rec flat loc (e : C.exp) : C.exp =
+    if is_atom e then e else hoist loc (shallow loc e)
+  and shallow loc (e : C.exp) : C.exp =
+    match e with
+    | C.BinOp (op, a, b, t) -> C.BinOp (op, flat loc a, flat loc b, t)
+    | C.UnOp (op, a, t) -> C.UnOp (op, flat loc a, t)
+    | C.CastE (k, t, a) -> C.CastE (k, t, flat loc a)
+    | C.Lval lv -> C.Lval (flat_lval loc lv)
+    | C.AddrOf lv -> C.AddrOf (flat_lval loc lv)
+    | C.StartOf lv -> C.StartOf (flat_lval loc lv)
+    | e -> e (* atoms and shapes codegen refuses regardless *)
+  (* an lval keeps its structure (a struct copy must stay a copy; AddrOf needs
+     the lval itself) — only the embedded address math atomizes *)
+  and flat_lval loc ((host, off) : C.lval) : C.lval =
+    let host' =
+      match host with
+      | C.Mem e -> C.Mem (flat loc e)
+      | C.Var _ as v -> v
+    in
+    host', flat_off loc off
+  and flat_off loc (o : C.offset) : C.offset =
+    match o with
+    | C.NoOffset -> C.NoOffset
+    | C.Field (f, rest) -> C.Field (f, flat_off loc rest)
+    | C.Index (e, rest) -> C.Index (flat loc e, flat_off loc rest)
+  in
+  (* per instr: atomize into a cleared prelude, emit prelude ++ shallow instr *)
+  let do_instr (i : C.instr) : C.instr list =
+    prelude := [];
+    let i' =
+      match i with
+      | C.Set (lv, e, loc, eloc) -> C.Set (flat_lval loc lv, shallow loc e, loc, eloc)
+      | C.Call (ret, f, args, loc, eloc) ->
+        (* args become full atoms: the marshaller loads them while R0-R3 (and an
+           indirect target) are claimed, so no arg may need deep evaluation *)
+        let f' =
+          match f with
+          | C.Lval (C.Var _, C.NoOffset) -> f (* direct call *)
+          | C.Lval lv -> C.Lval (flat_lval loc lv)
+          | e -> e
+        in
+        C.Call (Option.map (flat_lval loc) ret, f', List.map (flat loc) args, loc, eloc)
+      | i -> i
+    in
+    List.rev !prelude @ [ i' ]
+  in
+  (* a statement expression's prelude wraps in a Block via skind mutation: the
+     stmt object (and its labels / case markers) is untouched *)
+  let flat_top loc (e : C.exp) : C.instr list * C.exp =
+    prelude := [];
+    let e' = shallow loc e in
+    List.rev !prelude, e'
+  in
+  let rec do_stmt (s : C.stmt) : unit =
+    match s.skind with
+    | C.Instr il -> s.skind <- C.Instr (List.concat_map do_instr il)
+    | C.If (e, b1, b2, l1, l2) ->
+      do_block b1;
+      do_block b2;
+      let pre, e' = flat_top l1 e in
+      let k = C.If (e', b1, b2, l1, l2) in
+      s.skind
+      <- (if pre = []
+          then k
+          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+    | C.Switch (e, b, cases, l1, l2) ->
+      do_block b;
+      let pre, e' = flat_top l1 e in
+      let k = C.Switch (e', b, cases, l1, l2) in
+      s.skind
+      <- (if pre = []
+          then k
+          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+    | C.Return (Some e, loc, eloc) ->
+      let pre, e' = flat_top loc e in
+      let k = C.Return (Some e', loc, eloc) in
+      s.skind
+      <- (if pre = []
+          then k
+          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+    | C.Block b | C.Loop (b, _, _, _, _) -> do_block b
+    | _ -> ()
+  and do_block (b : C.block) : unit = List.iter do_stmt b.bstmts in
+  do_block fd.sbody
+;;
+
 (* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
    [Linker.link] lays this out with any callees and resolves branches and calls. ---- *)
-let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
+let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   let return_type =
     match fd.svar.vtype with
     | C.TFun (rt, _, _, _) -> rt
@@ -1560,4 +1685,16 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
       @ param_setup)
   in
   { L.name = fd.svar.vname; frags = prologue @ List.rev ctx.rev_frags }
+;;
+
+let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
+  try compile_once ~globals fd with
+  | Scratch_exhausted ->
+    (* the three-address retry: flatten the body (temporaries become ordinary
+       locals -> homes/spill slots) and compile again. Only the functions that
+       actually exhaust the pool pay the temp-heavy lowering. *)
+    flatten_fundec fd;
+    (try compile_once ~globals fd with
+     | Scratch_exhausted ->
+       unsupported "out of registers even after three-address flattening — internal error")
 ;;

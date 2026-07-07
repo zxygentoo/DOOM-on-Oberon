@@ -940,6 +940,36 @@ let samples =
       (* the PadRejectArray byte-extract shape verbatim: __udiv, __umod and
          __lsr composing in one frame through the shared div area *)
     )
+    (* ---- three-address flattening (the scratch-exhaustion retry): each
+       right-nested chain over MEMORY leaves holds one loaded scratch per
+       nesting level, so at 14+ levels no 12-register pool can compile it
+       unflattened — a green diff PROVES the Scratch_exhausted -> flatten ->
+       recompile path ran, no instrumentation needed. ---- *)
+  ; ( "int gde[16] = { 5, 9, 2, 7, 1, 8, 3, 6, 4, 10, 11, 12, 13, 14, 15, 16 }; int \
+       deep1(int a){ return gde[0] - (gde[1] - (gde[2] - (gde[3] - (gde[4] - (gde[5] - \
+       (gde[6] - (gde[7] - (gde[8] - (gde[9] - (gde[10] - (gde[11] - (gde[12] - (gde[13] \
+       - (gde[14] - (gde[15] + a))))))))))))))); }"
+    , "deep1"
+    , 1 (* 16 held global loads deep — the pure exhaustion shape *) )
+  ; ( "int gdf[16] = { 5, 9, 2, 7, 1, 8, 3, 6, 4, 10, 11, 12, 13, 14, 15, 16 }; int \
+       deep2(int a){ return gdf[0] - (gdf[1] - (gdf[2] - (gdf[3] - (gdf[4] - (gdf[5] - \
+       (gdf[6] - (gdf[7] - (gdf[8] - (gdf[9] - (gdf[10] - (gdf[11] - (gdf[12] - (gdf[13] \
+       / ((a & 7) + 2)))))))))))))); }"
+    , "deep2"
+    , 1
+      (* a DIVISION at the bottom of the chain: flattening must compose with
+         the div-area protocol (the helper call gets atomized operands) *)
+    )
+  ; ( "int gdg[16] = { 5, 9, 2, 7, 1, 8, 3, 6, 4, 10, 11, 12, 13, 14, 15, 16 }; int \
+       dh3(int x, int y){ return x * 2 + y; } int deep3(int a){ return dh3(gdg[0] - \
+       (gdg[1] - (gdg[2] - (gdg[3] - (gdg[4] - (gdg[5] - (gdg[6] - (gdg[7] - (gdg[8] - \
+       (gdg[9] - (gdg[10] - (gdg[11] - (gdg[12] - (gdg[13] - gdg[14]))))))))))))), \
+       gdg[15] - (gdg[14] - (gdg[13] - (gdg[12] + a)))); }"
+    , "deep3"
+    , 1
+      (* deep expressions as CALL ARGUMENTS: hoisted temps meet the arg
+         marshaller (args must be atoms while R0-R3 are claimed) *)
+    )
   ]
 ;;
 
