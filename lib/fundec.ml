@@ -85,6 +85,9 @@ type ctx =
   ; scratch_lo : reg (* low end of the scratch pool: above the homes (leaf), or the *)
   ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
   ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
+  ; home_regs : bool array
+    (* which registers are homes (split shape): inside the widened scratch range but
+       permanently reserved — is_scratch/free_scratch must never treat them as pool *)
   ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
   ; mutable loops : (int option * int) list
     (* enclosing loops/switches, innermost first: (continue target, break target). A loop has
@@ -152,7 +155,7 @@ let alloc_scratch ctx =
 (* Only R[scratch_lo..scratch_hi] are scratches — the homes and DB (R13) must never be
    freed; DB would even index past scratch_free. The bounds let every consumer of an
    address uniformly "free the base" (a no-op for DB and homes). *)
-let is_scratch ctx r = r >= ctx.scratch_lo && r <= ctx.scratch_hi
+let is_scratch ctx r = r >= ctx.scratch_lo && r <= ctx.scratch_hi && not ctx.home_regs.(r)
 let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 
 let home ctx (v : C.varinfo) =
@@ -644,9 +647,14 @@ and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg 
   emit ctx (R.Store { size = R.W; a = rb; base = sp_reg; off = ctx.div_base + 4 });
   free_scratch ctx ra;
   free_scratch ctx rb;
+  (* Save set = busy CALLER-SAVED scratches only (R0-R5). Homes and widened-pool
+     scratches live in callee-saved R6-R11, which the helpers preserve by the ABI §5
+     contract (their bodies touch R0-R3 + H) — saving them would also overflow the
+     6-slot div area. Compact homes in R0-R5 can't occur here: has_div forces the
+     split shape (s7), so anything busy below R6 is a true scratch. *)
   let busy =
     List.filter
-      (fun r -> not ctx.scratch_free.(r))
+      (fun r -> r < first_callee_saved && not ctx.scratch_free.(r))
       (List.init (ctx.scratch_hi - ctx.scratch_lo + 1) (fun i -> ctx.scratch_lo + i))
   in
   List.iteri
@@ -1283,15 +1291,11 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     | None -> 0
     | Some n -> 4 * max 4 n
   in
-  let div_area = if has_div then 32 else 0 in
-  (* locals region base: above the outgoing area and the div area *)
-  let slots_base = outgoing_area + div_area in
   (* s4.3: a variable that can't live in a register — an aggregate, or a scalar whose address
      is taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
-     above the outgoing area. Addressed SP-relative: the offset ([slots_base]+off) is known
-     here, before body codegen fixes the save set — which an FP-relative offset couldn't be
-     (it subtracts the frame size). Params as well as locals (step 2): an address-taken param
-     keeps its register home (where it arrives) and the prologue spills it into its slot. *)
+     above the outgoing and div areas. Addressed SP-relative: the offset ([slots_base]+off) is
+     known before body codegen fixes the save set — which an FP-relative offset couldn't be
+     (it subtracts the frame size). *)
   let slots = Hashtbl.create 8 in
   let locals_size = ref 0 in
   let needs_slot (v : C.varinfo) =
@@ -1309,49 +1313,54 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
   let alloc_slot (v : C.varinfo) = if needs_slot v then add_slot v in
   List.iter alloc_slot fd.sformals;
   List.iter alloc_slot fd.slocals;
-  (* Non-leaf: homes go to callee-saved R6-R11 (survive calls), scratch to caller-saved
-     R0-R5. Leaf: today's model — homes R0.., scratch above them. *)
-  let home_base = if leaf then 0 else first_callee_saved in
+  (* The unified register model (spilling rungs 2-3): every function gets AT LEAST six
+     scratch registers. The compact shape — homes from R0, scratch above, zero-cost
+     frames — survives only where it honors that: leaves with <= 6 register candidates.
+     Everything else takes the SPLIT shape: homes in callee-saved R6-R11 (survive calls;
+     for a demoted big leaf they merely cost saves), locals past six spill to slots
+     (rung 1), params past six spill via a prologue copy from their arrival point, and
+     scratch WIDENS to R0-R5 plus every unused home register — sound because a busy
+     split-shape scratch in R6-R11 is callee-saved (real calls preserve it by contract)
+     and the div-area protocol saves whatever is busy regardless. *)
+  let n_candidates =
+    List.length fd.sformals
+    + List.length
+        (List.filter (fun (v : C.varinfo) -> not (Hashtbl.mem slots v.vid)) fd.slocals)
+  in
+  let compact = leaf && n_candidates <= first_callee_saved in
+  let home_base = if compact then 0 else first_callee_saved in
   let homes = Hashtbl.create 16 in
   let next = ref home_base in
   let assign (v : C.varinfo) =
     Hashtbl.replace homes v.vid !next;
     incr next
   in
-  (* Params are always homed: a spilled param needs its incoming value stored to its slot in the
-     prologue (a prologue-store extension) — deferred. More params than homes still refuses. *)
+  (* Params: a home while they fit (a vaddrof-slotted param keeps one too — its arrival
+     register, spilled to the slot by the prologue, s4.3 step 2); past the budget they
+     are slot-only, and the prologue routes the arrival straight to the slot. Since the
+     first six formals take the six split-shape homes, a spilled param's index is >= 6,
+     i.e. it arrived on the stack at FP+4i. *)
   List.iter
     (fun (v : C.varinfo) ->
-       if !next > max_reg
-       then
-         unsupported
-           "too many params (>%d homes) for naive alloc — param spilling deferred"
-           (max_reg - home_base + 1);
-       assign v)
+       if !next <= max_reg
+       then assign v
+       else if not (Hashtbl.mem slots v.vid)
+       then add_slot v)
     fd.sformals;
-  (* Locals: a register home while they fit, else SPILL to a frame slot (naive local allocation,
-     §4 rung 1). A spilled local is just a slotted local — the s4.3 memory routing already
-     loads/stores it on use, and its slot is its single canonical location, so control-flow
-     merges need no reconciliation (exactly like a register home). Non-leaf only: its scratch
-     pool is fixed at R0-R5 regardless of how many homes we use, so spilling never starves
-     expression evaluation. A leaf grows scratch *above* its homes, so leaf spilling needs a
-     scratch reservation first — deferred (and only 10 functions). *)
+  (* Locals: a register home while they fit, else spill (rung 1) — in BOTH shapes now:
+     a demoted leaf spills like a non-leaf, its >= 6 scratch guaranteed by the split. *)
   List.iter
     (fun (v : C.varinfo) ->
        if not (Hashtbl.mem slots v.vid)
-       then
-         if !next <= max_reg
-         then assign v
-         else if leaf
-         then
-           unsupported
-             "too many params+locals (>%d regs) — leaf spilling deferred"
-             (max_reg - home_base + 1)
-         else add_slot v)
+       then if !next <= max_reg then assign v else add_slot v)
     fd.slocals;
-  let scratch_lo, scratch_hi =
-    if leaf then !next, max_reg else 0, first_callee_saved - 1
-  in
+  let scratch_lo, scratch_hi = if compact then !next, max_reg else 0, max_reg in
+  (* the div area (s7): 2 operand words + at most six saves — only busy CALLER-SAVED
+     scratches (R0-R5) need saving at a helper call; callee-saved R6-R11, homes and
+     widened scratches alike, survive by the helpers' ABI §5 contract *)
+  let div_area = if has_div then 32 else 0 in
+  (* locals region base: above the outgoing area and the div area *)
+  let slots_base = outgoing_area + div_area in
   let ctx =
     { rev_frags = []
     ; homes
@@ -1361,7 +1370,14 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
     ; globals
     ; scratch_lo
     ; scratch_hi
-    ; scratch_free = Array.make (max_reg + 1) true
+    ; scratch_free =
+        (let a = Array.make (max_reg + 1) true in
+         if not compact then Hashtbl.iter (fun _ r -> a.(r) <- false) homes;
+         a)
+    ; home_regs =
+        (let a = Array.make (max_reg + 1) false in
+         if not compact then Hashtbl.iter (fun _ r -> a.(r) <- true) homes;
+         a)
     ; next_label = 1 (* label 0 is func_end *)
     ; loops = []
     ; stmt_labels = Hashtbl.create 16
@@ -1454,26 +1470,49 @@ let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
         List.concat
           (List.mapi
              (fun i (v : C.varinfo) ->
-                let h = Hashtbl.find homes v.vid in
-                let place =
+                match Hashtbl.find_opt homes v.vid, Hashtbl.find_opt slots v.vid with
+                | Some h, slot_opt ->
+                  let place =
+                    if i < 4
+                    then
+                      if compact
+                      then [] (* compact: the home IS the arrival register Ri *)
+                      else [ L.Ins (mov_reg h i) ]
+                    else
+                      [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ]
+                  in
+                  (* an address-taken param (s4.3 step 2): once it lands in its home,
+                     spill the home into its slot — the slot is its canonical location
+                     for body access, whether it arrived in a register or on the stack *)
+                  let spill =
+                    match slot_opt with
+                    | Some off ->
+                      [ L.Ins
+                          (R.Store
+                             { size = R.W; a = h; base = sp_reg; off = slots_base + off })
+                      ]
+                    | None -> []
+                  in
+                  place @ spill
+                | None, Some off ->
+                  (* a SPILLED param (no home, rungs 2-3): route the arrival straight to
+                     the slot. In practice i >= 6 (the first six formals took the homes),
+                     so it arrived on the stack; the register branch is kept for shape
+                     robustness. R5 is safe as the shuttle: scratch, not an arrival
+                     register for any spilled index, and dead this early in the prologue. *)
                   if i < 4
-                  then if leaf then [] else [ L.Ins (mov_reg h i) ]
-                  else
-                    [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ]
-                in
-                (* an address-taken param (s4.3 step 2): once it lands in its home, spill the
-                   home into its slot — the slot is its canonical location for body access. The
-                   home carries it whether it arrived in a register (i<4) or on the stack. *)
-                let spill =
-                  match Hashtbl.find_opt slots v.vid with
-                  | Some off ->
+                  then
                     [ L.Ins
                         (R.Store
-                           { size = R.W; a = h; base = sp_reg; off = slots_base + off })
+                           { size = R.W; a = i; base = sp_reg; off = slots_base + off })
                     ]
-                  | None -> []
-                in
-                place @ spill)
+                  else
+                    [ L.Ins (R.Load { size = R.W; a = 5; base = fp_reg; off = 4 * i })
+                    ; L.Ins
+                        (R.Store
+                           { size = R.W; a = 5; base = sp_reg; off = slots_base + off })
+                    ]
+                | None, None -> assert false (* every formal is homed or slotted *))
              fd.sformals)
       in
       (L.Ins (alu R.Sub sp_reg sp_reg (R.Imm frame)) :: saves)

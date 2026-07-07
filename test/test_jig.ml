@@ -750,6 +750,37 @@ let samples =
        return v.c[3]; }"
     , "ulc"
     , 1 (* union LOCAL: slotted (aggregate), punned through the frame slot *) )
+    (* the spilling rungs (2-3): >6 params spill via a prologue copy from FP+4i; a big
+       leaf DEMOTES to the split shape (homes R6-R11, spills, >= 6 scratch) — the
+       runner's R6-R11 sentinels verify its new save obligation; and scratch WIDENS to
+       unused home registers, so deep expressions get up to 12-homes temporaries. *)
+  ; ( "int p7(int a,int b,int c,int d,int e,int f,int g){ return a + b*2 + c*3 + d*4 + \
+       e*5 + f*6 + g*7; }"
+    , "p7"
+    , 7
+      (* 7 params, leaf -> demoted split: a..f homed, g SPILLED (arrives FP+24, \
+           prologue-copied to its slot); position-weighted so a wrong slot shows *)
+    )
+  ; ( "int add1(int x){ return x + 1; } int p8(int a,int b,int c,int d,int e,int f,int \
+       g,int h){ return add1(a) + b*2 + c*3 + d*4 + e*5 + f*6 + g*7 + h*8; }"
+    , "p8"
+    , 8 (* 8 params, non-leaf: g and h both spilled, live across the call *) )
+  ; ( "int ldeep(int a){ int t0=a+1; int t1=a+2; int t2=a+3; int t3=a+4; int t4=a+5; int \
+       t5=a+6; int t6=a+7; int t7=a+8; int t8=a+9; int t9=a+10; int t10=a+11; int \
+       t11=a+12; int t12=a+13; return t0*1 + t1*2 + t2*3 + t3*4 + t4*5 + t5*6 + t6*7 + \
+       t7*8 + t8*9 + t9*10 + t10*11 + t11*12 + t12*13 + a; }"
+    , "ldeep"
+    , 1
+      (* 14 register candidates in a LEAF -> demoted: 6 homes + 8 spills, saves \
+           R6-R11 (sentinel-checked), no LNK save (still a leaf) *)
+    )
+  ; ( "int h1(int x){ return x; } int sdeep(int a, int b){ int r = h1(a); return r + \
+       ((a+1) + ((b+2) + ((a+3) + ((b+4) + ((a+5) + ((b+6) + (b*a))))))); }"
+    , "sdeep"
+    , 2
+      (* right-nested: 7+ simultaneous live temporaries — over the old fixed 6-reg \
+           pool, inside the widened one (3 homes -> 9 scratch) *)
+    )
     (* constant-float folds: a compile-time double expression under an int cast — the
        automap zoom idiom — computes at compile time; no float reaches runtime, and gcc
        folds the same expressions with real doubles, so the diff checks the arithmetic. *)
