@@ -7,6 +7,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 SRCDIR=vendor/doomgeneric/doomgeneric
+# Local source patches (patches/*.patch): the vendor tree is a fetched clone
+# (gitignored), so our few source changes live as reviewed patch files applied
+# idempotently here — a fresh clone and an already-patched tree both converge.
+# Currently: 0001 replaces G_CheckDemoStatus's float fps with integer
+# tenths (the ABI §4 float ban; -timedemo stays alive as the 1d fps benchmark).
+for p in patches/*.patch; do
+  git -C vendor/doomgeneric apply --reverse --check "$PWD/$p" 2>/dev/null \
+    || git -C vendor/doomgeneric apply "$PWD/$p"
+done
 mkdir -p out/i
 rm -f out/i/*.i
 srcs=$(sed -n 's/^SRC_DOOM = //p' "$SRCDIR/Makefile")

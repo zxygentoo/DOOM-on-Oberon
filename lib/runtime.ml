@@ -240,4 +240,29 @@ let longjmp_obj : L.obj =
   }
 ;;
 
-let objs = [ div_obj; mod_obj; udiv_obj; umod_obj; setjmp_obj; longjmp_obj ]
+(* __lsr: R0 = R0 >>u R1 — the variable-count logical shift (s5.2b inlines the
+   constant-count case). RISC5 has no LSR, so: ROR right by n (the n high bits
+   wrap around to the top), then mask them off with (1 << (32-n)) - 1. n = 0 is
+   the corner — the mask expression would shift by 32 — so it returns identity
+   over one branch. Counts >= 32 are C UB; ROR/LSL read the low 5 bits of a
+   register count, so they alias mod 32. *)
+let lsr_obj : L.obj =
+  let l_ret = 0 in
+  { L.name = "__lsr"
+  ; frags =
+      [ alu R.Mov 2 0 (R.Reg 1) (* flags <- n *)
+      ; bcc R.Eq l_ret (* n = 0: x >> 0 = x *)
+      ; alu R.Ror 0 0 (R.Reg 1) (* bits [n..31] land at [0..31-n]; n junk bits on top *)
+      ; alu R.Mov 2 0 (R.Imm 32)
+      ; alu R.Sub 2 2 (R.Reg 1) (* 32 - n in [1, 31] *)
+      ; alu R.Mov 3 0 (R.Imm 1)
+      ; alu R.Lsl 3 3 (R.Reg 2)
+      ; alu R.Sub 3 3 (R.Imm 1) (* mask = 2^(32-n) - 1 *)
+      ; alu R.And 0 0 (R.Reg 3)
+      ; L.Label l_ret
+      ; ret
+      ]
+  }
+;;
+
+let objs = [ div_obj; mod_obj; udiv_obj; umod_obj; lsr_obj; setjmp_obj; longjmp_obj ]

@@ -231,6 +231,57 @@ char *strdup(const char *s)
     return p;
 }
 
+/* ---- the glibc ctype/errno seam (host-header artifacts) ----
+ *
+ * The host-preprocessed .i files expand isspace()/isdigit() & co. into
+ * (*__ctype_b_loc())[c] & _ISxxx — glibc's classification-table protocol — and
+ * errno into *__errno_location(). The table is 384 unsigned shorts indexed from
+ * -128 (so isspace(EOF) is legal; the negative side and 128..255 read 0 in the
+ * C locale), built lazily from ASCII range checks to the _ISbit() flag layout
+ * the .i enums carry (_ISupper 0x100 ... _ISgraph 0x8000; low byte _ISblank
+ * 0x01, _IScntrl 0x02, _ISpunct 0x04, _ISalnum 0x08). The jig diffs the whole
+ * flag word against the genuine glibc table, so it cannot drift.
+ *
+ * errno: one int, never set by this libc — the tree's one live read is
+ * M_FileExists's errno == EISDIR probe after a failed fopen, and 0 correctly
+ * answers "not a directory". */
+
+static unsigned short __ctype_tab[384];
+static const unsigned short *__ctype_tab_ptr;
+
+const unsigned short **__ctype_b_loc(void)
+{
+    if (!__ctype_tab_ptr) {
+        int c;
+        for (c = 0; c < 256; c++) {
+            unsigned short f = 0;
+            if (c >= 'A' && c <= 'Z') f |= 0x100;             /* _ISupper */
+            if (c >= 'a' && c <= 'z') f |= 0x200;             /* _ISlower */
+            if (f) f |= 0x400 | 0x08;                         /* _ISalpha, _ISalnum */
+            if (c >= '0' && c <= '9') f |= 0x800 | 0x08;      /* _ISdigit, _ISalnum */
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                || (c >= 'A' && c <= 'F'))
+                f |= 0x1000;                                  /* _ISxdigit */
+            if (c == ' ' || (c >= 9 && c <= 13)) f |= 0x2000; /* _ISspace */
+            if (c >= 32 && c < 127) f |= 0x4000;              /* _ISprint */
+            if (c > 32 && c < 127) f |= 0x8000;               /* _ISgraph */
+            if (c == ' ' || c == 9) f |= 0x01;                /* _ISblank */
+            if (c < 32 || c == 127) f |= 0x02;                /* _IScntrl */
+            if ((f & 0x8000) && !(f & 0x08)) f |= 0x04;       /* _ISpunct */
+            __ctype_tab[128 + c] = f;
+        }
+        __ctype_tab_ptr = __ctype_tab + 128;
+    }
+    return &__ctype_tab_ptr;
+}
+
+static int __errno_storage;
+
+int *__errno_location(void)
+{
+    return &__errno_storage;
+}
+
 /* ---- the printf core: vsnprintf/snprintf (varargs slice) ----
  *
  * va_list is CIL's __builtin_va_list — one pointer into the caller's home area, where

@@ -1,0 +1,37 @@
+diff --git a/doomgeneric/g_game.c b/doomgeneric/g_game.c
+index 9954d78..04429ae 100644
+--- a/doomgeneric/g_game.c
++++ b/doomgeneric/g_game.c
+@@ -2249,22 +2249,24 @@ boolean G_CheckDemoStatus (void)
+ { 
+     int             endtime; 
+ 	 
+-    if (timingdemo) 
+-    { 
+-        float fps;
++    if (timingdemo)
++    {
++        int fps10;
+         int realtics;
+ 
+-	endtime = I_GetTime (); 
++	endtime = I_GetTime ();
+         realtics = endtime - starttime;
+-        fps = ((float) gametic * TICRATE) / realtics;
++        if (realtics < 1)
++            realtics = 1;
++        fps10 = (gametic * TICRATE * 10) / realtics;
+ 
+         // Prevent recursive calls
+         timingdemo = false;
+         demoplayback = false;
+ 
+-	I_Error ("timed %i gametics in %i realtics (%f fps)",
+-                 gametic, realtics, fps);
+-    } 
++	I_Error ("timed %i gametics in %i realtics (%d.%d fps)",
++                 gametic, realtics, fps10 / 10, fps10 % 10);
++    }
+ 	 
+     if (demoplayback) 
+     { 

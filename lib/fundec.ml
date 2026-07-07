@@ -492,7 +492,14 @@ let rec gen_expr ctx (e : C.exp) : reg =
          d)
        else unsupported "unsigned >> by %d — shift count outside 0..31 (undefined in C)" n
      | None ->
-       unsupported "unsigned >> by a variable count (ROR + runtime mask) — later slice")
+       (* variable count: the __lsr Runtime helper (ROR + the (1<<(32-n))-1 mask
+          with its n=0 corner) through the s7 div-area protocol — a
+          backend-generated mid-expression call, exactly like a division *)
+       gen_helper_call2
+         ctx
+         "__lsr"
+         (fun () -> gen_expr ctx e1)
+         (fun () -> gen_expr ctx e2))
   | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
@@ -1221,7 +1228,8 @@ let call_arity (fd : C.fundec) : int option =
 ;;
 
 (* Does the body contain a construct that lowers to a Runtime helper call (ABI §5) — a
-   [/] or [%], or a ptr−ptr whose element size isn't a power of two? A yes sizes the div
+   [/] or [%], a ptr−ptr whose element size isn't a power of two, or an unsigned [>>]
+   by a variable count (__lsr)? A yes sizes the div
    area into the frame and forces the non-leaf shape (the BL clobbers LNK and the
    caller-saved scratch pool). Division hides in any expression position (an index, a
    condition, a call argument), so this is a visitor, not a statement walk like
@@ -1235,6 +1243,10 @@ let calls_runtime_helper (fd : C.fundec) : bool =
       method! vexpr e =
         (match e with
          | C.BinOp ((C.Div | C.Mod), _, _, _) -> found := true
+         | C.BinOp (C.Shiftrt, _, e2, t)
+           when is_unsigned_int t && C.getInteger (C.constFold true e2) = None ->
+           (* must mirror gen_expr's routing: only unsigned + variable count calls *)
+           found := true
          | C.BinOp (C.MinusPP, e1, _, _) ->
            (* must mirror gen_ptr_arith's routing exactly: only the non-pow-2 case calls *)
            (try if pow2_log (pointee_size (C.typeOf e1)) = None then found := true with

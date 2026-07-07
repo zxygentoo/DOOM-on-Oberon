@@ -924,6 +924,22 @@ let samples =
       (* a CompoundInit over bitfields: the serializer must write ONE byte per
            field (the declared uint32 width would clobber the neighbors) *)
     )
+  ; ( "int usrv(int a, int n){ return (unsigned int)a >> (n & 31); }"
+    , "usrv"
+    , 2
+      (* unsigned >> by a VARIABLE count -> the __lsr Runtime helper (ROR +
+         runtime mask) through the div-area protocol; full-range a includes the
+         top-bit values that separate logical from arithmetic, and n & 31
+         sweeps the n = 0 identity corner *)
+    )
+  ; ( "unsigned int rp[4] = { 0x11223344u, 0x55667788u, 0x99aabbccu, 0xddeeff00u }; int \
+       padrj(int i){ unsigned int k; unsigned int s; s = 0; for (k = 0; k < 16; k++) { s \
+       = s * 31 + ((rp[k / 4] >> ((k % 4) * 8)) & 0xff); } return s + (i - i); }"
+    , "padrj"
+    , 1
+      (* the PadRejectArray byte-extract shape verbatim: __udiv, __umod and
+         __lsr composing in one frame through the shared div area *)
+    )
   ]
 ;;
 
@@ -1063,6 +1079,21 @@ let libc_samples =
          s; }"
       , "vsn4"
       , 1 (* %c, %%, %s branches, %X uppercase *) )
+    ; ( "extern const unsigned short **__ctype_b_loc(void); int ct1(int c){ return \
+         (int)((*__ctype_b_loc())[c & 255]); }"
+      , "ct1"
+      , 1
+        (* the glibc classification-table protocol: OUR lazily-built table vs
+           the genuine glibc one, the WHOLE flag word per character — any bit
+           our builder gets wrong (in either direction) diverges *)
+      )
+    ; ( "extern const unsigned short **__ctype_b_loc(void); int ct2(int c){ return \
+         (int)((*__ctype_b_loc())[(c & 255) - 128]); }"
+      , "ct2"
+      , 1
+        (* the negative index side, -128..127 — glibc allows isspace(EOF), so
+           the table must extend below 0 (all zero in the C locale) *)
+      )
     ]
 ;;
 
@@ -1149,6 +1180,16 @@ let libc_selfchecks =
       (* two live handles, SEEK_CUR, read-at-EOF (0 items, dest untouched),
          out-of-range seek fails without moving: 6 + 0 + 8*100 - 1000 + 10000 + 1 *)
     , [ 0, 9807; 9, 9807 ] )
+  ; ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
+       struct _IO_FILE FILE; extern FILE *fopen(const char *, const char *); extern int \
+       *__errno_location(void); int er1(int i){ FILE *f; *__errno_location() = 0; f = \
+       fopen(\"nope\", \"rb\"); return (f == 0) + (*__errno_location() == 0) * 2 + (i - \
+       i); }"
+    , "er1"
+      (* the M_FileExists shape: a failed fopen leaves errno 0 (this libc never
+         sets it), so the tree's errno == EISDIR probe correctly answers "not a
+         directory" *)
+    , [ 0, 3; 5, 3 ] )
   ]
 ;;
 
