@@ -19,10 +19,23 @@ open Doomcc_core
 
 let u32 x = x land 0xFFFF_FFFF
 
+(* the mini-libc (1c): merged with a sample the way doomcc merges it with the DOOM
+   tree. Parsed fresh per sample (Mergecil renames statics in its inputs); the gcc
+   oracle side never sees it — our memcpy diffs against the REAL glibc. The path chain
+   covers dune's two working directories (repo root for exec, test/ for runtest). *)
+let libc_path () =
+  List.find Sys.file_exists [ "libc/mini.c"; "../libc/mini.c"; "../../libc/mini.c" ]
+;;
+
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
    body plus the data/bss image the runner drops at DB before each run ---- *)
-let dcc_compile ~src ~fname =
+let dcc_compile ?(libc = false) ~src ~fname () =
   let file = Frontend.parse_string ~name:fname src in
+  let file =
+    if libc
+    then Frontend.merge [ file; Frontend.parse_file (libc_path ()) ] ~name:fname
+    else file
+  in
   let globals = Globals.from_file file in
   (* compile every function in the snippet; link with the entry [fname] first so it lands at
      offset 0 (where the Runner starts) and its callees follow — including the Runtime
@@ -53,7 +66,14 @@ let gcc_compile ~src ~fname ~arity : string =
   let exe = cfile ^ ".exe" in
   let oc = open_out cfile in
   output_string oc src;
-  output_string oc "\n#include <stdio.h>\n#include <stdlib.h>\n";
+  (* the driver's two needs, declared rather than #included: headers would re-typedef
+     size_t as -m32's unsigned int and clash with the libc samples' unsigned-long
+     prototypes (which mirror the host-preprocessed .i files CIL merges against) *)
+  output_string
+    oc
+    "\n\
+     extern int printf(const char *, ...);\n\
+     extern long strtol(const char *, char **, int);\n";
   let params =
     List.init arity (fun i -> Printf.sprintf "(int)strtol(argv[%d],0,10)" (i + 1))
   in
@@ -769,6 +789,94 @@ let rejects =
   ]
 ;;
 
+(* ---- mini-libc samples (1c): compiled WITH libc/mini.c merged in on our side, and
+   against the host's real glibc on the oracle side — our memcpy vs the genuine
+   article. Authorship notes: strcmp-family results are sign-normalized ((r>0)-(r<0):
+   C leaves the magnitude unspecified); str* pointer results convert to indexes or
+   null-flags before crossing the diff; the heap globals bind the bump arena inside
+   emulator RAM (glibc ignores them and uses its own heap). *)
+let libc_prelude =
+  "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; extern void \
+   *memcpy(void *, const void *, unsigned long); extern void *memmove(void *, const void \
+   *, unsigned long); extern void *memset(void *, int, unsigned long); extern unsigned \
+   long strlen(const char *); extern int strcmp(const char *, const char *); extern int \
+   strncmp(const char *, const char *, unsigned long); extern int strcasecmp(const char \
+   *, const char *); extern int strncasecmp(const char *, const char *, unsigned long); \
+   extern char *strchr(const char *, int); extern char *strrchr(const char *, int); \
+   extern char *strstr(const char *, const char *); extern char *strncpy(char *, const \
+   char *, unsigned long); extern char *strdup(const char *); extern int toupper(int); \
+   extern int abs(int); extern int atoi(const char *); extern void *malloc(unsigned \
+   long); extern void *calloc(unsigned long, unsigned long); extern void *realloc(void \
+   *, unsigned long); extern void free(void *); "
+;;
+
+let libc_samples =
+  List.map
+    (fun (src, name, arity) -> libc_prelude ^ src, name, arity)
+    [ ( "int mcp(int i){ char b[8]; memcpy(b, \"ABCDEFG\", 8); return b[i & 7]; }"
+      , "mcp"
+      , 1 (* memcpy from a string literal into a frame buffer *) )
+    ; ( "int mmv(int i){ char b[10]; int k; for (k = 0; k < 10; k++) b[k] = k + (i & 7); \
+         if (i & 1) memmove(b + 2, b, 6); else memmove(b, b + 2, 6); return b[i & 7]; }"
+      , "mmv"
+      , 1 (* overlapping moves, both directions — the memmove reason-for-being *) )
+    ; ( "int mst(int i){ char b[8]; memset(b, i, 6); b[6] = 7; return b[i & 7]; }"
+      , "mst"
+      , 1 (* memset truncates the fill byte; b[6..7] untouched past n *) )
+    ; ( "int xlen(int i){ char b[10]; int n = i & 7; int k; for (k = 0; k < n; k++) b[k] \
+         = 'a'; b[n] = 0; return (int)strlen(b) * 10 + (int)strlen(\"hello\"); }"
+      , "xlen"
+      , 1 )
+    ; ( "int xcmp(int i){ char b[4]; b[0] = 'a'; b[1] = 'a' + (i & 3); b[2] = 0; int r = \
+         strcmp(b, \"ab\"); int s = strncmp(b, \"ab\", 1); return ((r > 0) - (r < 0)) * \
+         10 + ((s > 0) - (s < 0)); }"
+      , "xcmp"
+      , 1 (* sign-normalized: C leaves the magnitude unspecified *) )
+    ; ( "int xcas(int i){ int r = strcasecmp(\"MiXeD\", \"mixed\"); int s = \
+         strncasecmp(\"ABc\", (i & 1) ? \"abd\" : \"abc\", 3); return ((r > 0) - (r < \
+         0)) * 10 + ((s > 0) - (s < 0)); }"
+      , "xcas"
+      , 1 )
+    ; ( "int xchr(int i){ const char *s = \"hello\"; char *p = strchr(s, \"lox\"[(i & 3) \
+         % 3]); char *q = strrchr(s, 'l'); return (p ? (int)(p - s) : -1) * 10 + (q ? \
+         (int)(q - s) : -1); }"
+      , "xchr"
+      , 1 (* found / not-found / rightmost — results as indexes, never raw pointers *) )
+    ; ( "int xstr(int i){ const char *h = \"the cat sat\"; char *p = strstr(h, (i & 1) ? \
+         \"cat\" : \"dog\"); char *q = strstr(h, \"\"); return (p ? (int)(p - h) : -1) * \
+         10 + (q ? (int)(q - h) : -1); }"
+      , "xstr"
+      , 1 (* hit, miss, and the empty-needle rule *) )
+    ; ( "int xncp(int i){ char b[6]; memset(b, 0x55, 6); strncpy(b, \"ab\", 5); return \
+         b[(i & 7) % 6]; }"
+      , "xncp"
+      , 1 (* the NUL-padding rule: b[2..4] zeroed, b[5] still 0x55 *) )
+    ; ( "int xdup(int i){ char src[4]; src[0] = 'x'; src[1] = 'y' + (i & 1); src[2] = 0; \
+         char *p = strdup(src); src[0] = '!'; return p[0] * 100 + p[1]; }"
+      , "xdup"
+      , 1 (* the copy is independent: mutating src can't reach it *) )
+    ; ( "int xcnv(int i){ char b[8]; b[0] = ' '; b[1] = (i & 1) ? '-' : '+'; b[2] = '4'; \
+         b[3] = '2'; b[4] = (i & 2) ? 'x' : '7'; b[5] = 0; return atoi(b) * 10 + \
+         toupper(\"aZ4\"[(i & 3) % 3]) + abs(i & 15); }"
+      , "xcnv"
+      , 1 (* atoi: spaces, signs, trailing junk; toupper across cases; abs *) )
+    ; ( "int lmal(int i){ int *a = malloc(12); int *b = malloc(8); a[0] = i; a[2] = i + \
+         2; b[0] = i * 3; return a[0] + a[2] + b[0] + (((int)a & 7) == 0) + (((int)b & \
+         7) == 0); }"
+      , "lmal"
+      , 1 (* two live blocks, no overlap; 8-alignment as a boolean (glibc -m32 agrees) *)
+      )
+    ; ( "int lcal(int i){ int *p = calloc(4, 4); int k; int s = 0; for (k = 0; k < 4; \
+         k++) s += p[k]; p[1] = i; return s * 100 + p[1]; }"
+      , "lcal"
+      , 1 (* calloc zeroes — against a poisoned bump arena that would show through *) )
+    ; ( "int lrea(int i){ int *p = malloc(8); p[0] = i; p[1] = i ^ 5; int *q = \
+         realloc(p, 16); q[2] = 9; return q[0] + q[1] + q[2]; }"
+      , "lrea"
+      , 1 (* grow preserves the old prefix *) )
+    ]
+;;
+
 (* a random 32-bit signed arg, plus the edge values every sample is probed with *)
 let r32 () =
   let b () = Random.bits () in
@@ -781,8 +889,8 @@ let nrand = 40
 
 (* one sample: compile with both backends, diff R0 over edge + random arg-tuples;
    returns (run cases, mismatches) for the caller to total up *)
-let check_sample (src, fname, arity) : int * int =
-  let body, data = dcc_compile ~src ~fname in
+let check_sample ?(libc = false) (src, fname, arity) : int * int =
+  let body, data = dcc_compile ~libc ~src ~fname () in
   let exe = gcc_compile ~src ~fname ~arity in
   let tuples =
     List.map (fun v -> List.init arity (fun _ -> v)) edges
@@ -815,7 +923,7 @@ let check_sample (src, fname, arity) : int * int =
 
 (* one reject: the gate must raise Unsupported rather than miscompile; returns 1 if it leaked *)
 let check_reject (src, fname) : int =
-  match dcc_compile ~src ~fname with
+  match dcc_compile ~src ~fname () with
   | exception Check.Unsupported msg ->
     Printf.printf "  reject %-6s ✓ (%s)\n" fname msg;
     0
@@ -826,21 +934,22 @@ let check_reject (src, fname) : int =
 
 let () =
   Random.init 0x51ce;
-  let total, sample_fails =
+  let fold libc (cases, fails) list =
     List.fold_left
       (fun (cases, fails) sample ->
-         let c, f = check_sample sample in
+         let c, f = check_sample ~libc sample in
          cases + c, fails + f)
-      (0, 0)
-      samples
+      (cases, fails)
+      list
   in
+  let total, sample_fails = fold true (fold false (0, 0) samples) libc_samples in
   let fails =
     sample_fails + List.fold_left (fun acc r -> acc + check_reject r) 0 rejects
   in
   Printf.printf
     "diff jig: %d run cases across %d samples + %d gate rejects, %d failures\n"
     total
-    (List.length samples)
+    (List.length samples + List.length libc_samples)
     (List.length rejects)
     fails;
   if fails > 0 then exit 1
