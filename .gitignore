@@ -3,3 +3,6 @@ _build/
 _opam/
 *.blob
 *.blob.map
+doom1.wad
+host/build/
+host/doomgeneric
