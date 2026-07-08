@@ -167,7 +167,29 @@ extern void __longjmp(unsigned int *env, int val);
    arm it directly when testing exit(). */
 unsigned int __exit_env[9];
 
-static char *__argv[3] = { "doom", "-iwad", "doom1.wad" };
+/* The DOOM command line (ABI §8, SHARED +1024): the loader writes the raw
+ * command tail verbatim — an Oberon stub byte-copies Oberon.Par's text up to
+ * '~', the harness its -args string; no parsing happens on the loader side.
+ * Init prepends the three baked words and tokenizes the tail on blanks IN
+ * PLACE (the split writes the NULs), so the region belongs to the blob after
+ * Init and myargv's pointers stay valid: the SHARED page persists. A zeroed
+ * page (the stub's obligation) is the empty tail — argc stays 3. */
+enum { ARGV_MAX = 16 };   /* Frontc parses these files cpp-free: no #define */
+
+static char *__argv[ARGV_MAX] = { "doom", "-iwad", "doom1.wad" };
+
+/* Non-static so the jig pins it directly (pcl1). */
+int __parse_cmdline(char *s, char **argv, int argc, int max)
+{
+    for (;;) {
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s == 0 || argc >= max) return argc;
+        argv[argc] = s;
+        argc++;
+        while (*s && *s != ' ' && *s != '\t') s++;
+        if (*s) { *s = 0; s++; }
+    }
+}
 
 void exit(int status)
 {
@@ -186,7 +208,8 @@ int Init(int wad_addr, int cfg_addr)
        never as storage; -iwad pins the exact name D_FindWADByName will fopen */
     __file_register("doom1.wad", (const void *)wad_addr,
                     *(volatile unsigned int *)(__shared_base + 28));
-    doomgeneric_Create(3, __argv);
+    doomgeneric_Create(__parse_cmdline(__shared_base + 1024, __argv, 3, ARGV_MAX),
+                       __argv);
     return 0;
 }
 

@@ -48,6 +48,7 @@ let ticks = ref 10
 let dump_every = ref 1
 let steps_per_ms = ref 44_000
 let max_steps = ref 2_000_000_000
+let blob_args = ref ""
 let inputs = ref []
 
 let rec parse_args = function
@@ -55,6 +56,15 @@ let rec parse_args = function
   | "-dump-every" :: n :: rest -> set_int dump_every n rest
   | "-steps-per-ms" :: n :: rest -> set_int steps_per_ms n rest
   | "-max-steps" :: n :: rest -> set_int max_steps n rest
+  | "-args" :: s :: rest ->
+    (* the DOOM command tail, written verbatim to SHARED +1024 (ABI §8) before
+       Init — e.g. -args "-timedemo demo1". Under -timedemo the engine runs
+       singletics (one gametic per Tick, one render each), so the heartbeat IS
+       the gametic counter and -dump-every dumps at exact gametics; the run
+       finishes through G_CheckDemoStatus's I_Error ("timed N gametics ..." on
+       the console, SHARED status negative) — that unwind is the SUCCESS path. *)
+    blob_args := s;
+    parse_args rest
   | a :: rest ->
     inputs := a :: !inputs;
     parse_args rest
@@ -183,6 +193,14 @@ let () =
     ram.(w) <- 0
   done;
   ram.((shared_base + 28) / 4) <- String.length wad;
+  (* the command tail (§8 +1024): raw bytes + NUL, exactly as the stub will *)
+  if String.length !blob_args > 0
+  then (
+    if String.length !blob_args > 3000
+    then fail "doomrun: -args longer than the §8 command-tail region";
+    let tail = Bytes.make ((String.length !blob_args + 4) land lnot 3) '\000' in
+    Bytes.blit_string !blob_args 0 tail 0 (String.length !blob_args);
+    load_image ram (shared_base + 1024) tail);
   (* UART console: tx always ready (status bit 1), rx never; printf -> stdout *)
   M.set_serial
     m

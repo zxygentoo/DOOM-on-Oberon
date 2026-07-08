@@ -34,8 +34,9 @@ let libc_path name =
    Create deliberately does NOT call DG_Init: its banner printf would spin on the
    UART tx-ready bit the bare jig emulator never raises. *)
 let port_fakes =
-  "void doomgeneric_Tick(void) { } void doomgeneric_Create(int argc, char **argv) { \
-   (void)argc; (void)argv; }"
+  "int __fake_argc; char __fake_a3; char __fake_a4; void doomgeneric_Tick(void) { } \
+   void doomgeneric_Create(int argc, char **argv) { __fake_argc = argc; __fake_a3 = \
+   argc > 3 ? argv[3][0] : 0; __fake_a4 = argc > 4 ? argv[4][4] : 0; }"
 ;;
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
@@ -1382,6 +1383,31 @@ let port_selfchecks =
             key << 8 — make of 173 then break of 32, drained in order:
             (1*1000+173)*10000 + (0*1000+32) *)
        , [ 0, 11730032; 4, 11730032 ] )
+     ; ( "extern int __parse_cmdline(char *s, char **argv, int argc, int max); int \
+          pcl1(int i){ char b[32]; char *av[8]; const char *t = \"  -timedemo  \
+          demo1\"; int k; int n; int r; for (k = 0; t[k]; k++) b[k] = t[k]; b[k] = 0; \
+          n = __parse_cmdline(b, av, 3, 8); r = n; if (av[3][0] == '-' && av[3][1] == \
+          't' && av[3][8] == 'o' && av[3][9] == 0) r = r + 10; if (av[4][0] == 'd' && \
+          av[4][4] == '1' && av[4][5] == 0) r = r + 100; return r + (i - i); }"
+       , "pcl1"
+         (* the tokenizer alone: leading/multiple blanks skipped, two tokens
+            appended after the baked 3 (n = 5), each NUL-terminated in place —
+            5 + 10 + 100 *)
+       , [ 0, 115; 9, 115 ] )
+     ; ( "extern int __fake_argc; extern char __fake_a3; extern char __fake_a4; \
+          unsigned char wb2[8] = {1,2,3,4,5,6,7,8}; int pcl2(int i){ char *tail; const \
+          char *t = \"-timedemo demo1\"; int k; int e0; int e1; int r; tail = \
+          __shared_base + 1024; *(volatile unsigned int *)(__shared_base + 28) = 8; \
+          tail[0] = 0; r = Init((int)wb2, 0); if (r != 0) return -1; e0 = __fake_argc; \
+          for (k = 0; t[k]; k++) tail[k] = t[k]; tail[k] = 0; r = Init((int)wb2, 0); if \
+          (r != 0) return -2; e1 = __fake_argc; return e0 * 10000 + e1 * 100 + \
+          (__fake_a3 == '-') * 10 + (__fake_a4 == '1') + (i - i); }"
+       , "pcl2"
+         (* the REAL Init end to end (Create faked to a recorder): an empty
+            SHARED tail keeps argc = 3; the written tail reaches Create as
+            argc = 5 with argv[3] = -timedemo, argv[4] = demo1 (its [4] = '1')
+            — 3*10000 + 5*100 + 10 + 1 *)
+       , [ 0, 30511; 3, 30511 ] )
      ]
 ;;
 

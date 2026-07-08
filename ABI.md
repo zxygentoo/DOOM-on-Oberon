@@ -240,7 +240,13 @@ SHARED page (v1 fields; rest reserved):
 (0 running, 1 quit, negative = I_Error code) · `+16` frame counter
 (heartbeat, incremented by `Tick`) · `+20` key ring head · `+24` tail ·
 `+28` WAD length in bytes (stub writes before `Init`) · `+32…` ring of
-2-byte events (make/break, code), 256 entries.
+2-byte events (make/break, code), 256 entries · `+1024…` the **command
+tail**: NUL-terminated text, ≤ 3 KB — the loader writes the raw tail
+verbatim before `Init` (a zeroed page is the empty tail; no parsing on the
+loader side — an Oberon stub byte-copies `Oberon.Par`'s text up to `~`, the
+harness copies its `-args` string). `Init` prepends the baked
+`doom -iwad doom1.wad` and tokenizes on blanks **in place** (writing NULs),
+so the region belongs to the blob after `Init` — `myargv` points into it.
 
 Key-ring discipline (v1; a §10 non-breaking clarification of the fields
 above): head and tail are free-running u32 counters, masked at use
