@@ -333,3 +333,11 @@ let from_file (file : C.file) : t =
     !string_blits;
   { offsets; skipped; strings; relocs = !relocs; image; data_size }
 ;;
+
+let offset_of_name (t : t) (file : C.file) (name : string) : int option =
+  List.find_map
+    (function
+      | C.GVar (v, _, _) when v.C.vname = name -> Hashtbl.find_opt t.offsets v.C.vid
+      | _ -> None)
+    file.C.globals
+;;

@@ -46,3 +46,8 @@ val int_core : GoblintCil.exp -> int option
 (** Lay out every global definition ([GVar]) of a (merged) file. Never raises for an
     individual unplaceable global — those land in [skipped]. *)
 val from_file : GoblintCil.file -> t
+
+(** The DB-relative offset of the global named [name] in [file] — the seam hand-rolled
+    code (the 1a drawers) uses to reach C-side data (dither's LUT + threshold map).
+    [None] if no such global is defined or it was skipped. *)
+val offset_of_name : t -> GoblintCil.file -> string -> int option

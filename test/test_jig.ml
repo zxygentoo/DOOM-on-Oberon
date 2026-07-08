@@ -70,6 +70,20 @@ let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
      offset 0 (where the Runner starts) and its callees follow — including the Runtime
      helpers (ABI §5: __div &c.), linked into every program exactly as the real blob will *)
   let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) in
+  (* the 1a drawer swap, exactly as doomcc does it: when a sample links dither.c
+     (~port), the hand-rolled __dg_dither replaces the compiled one — so kd1/kd2/
+     dd1/dd2 exercise the SHIPPED hand code, diffed against gcc compiling the C spec *)
+  let objs =
+    match
+      ( Globals.offset_of_name globals file "__dg_lum"
+      , Globals.offset_of_name globals file "__dg_bn64" )
+    with
+    | Some lum_off, Some bn_off
+      when List.exists (fun (o : Linker.obj) -> o.Linker.name = "__dg_dither") objs ->
+      List.filter (fun (o : Linker.obj) -> o.Linker.name <> "__dg_dither") objs
+      @ [ Drawers.dither ~lum_off ~bn_off ]
+    | _ -> objs
+  in
   let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
   let image =
     Linker.link ~code_base:(Runner.code_base * 4) (entry @ rest @ Runtime.objs)

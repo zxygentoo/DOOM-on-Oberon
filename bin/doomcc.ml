@@ -105,6 +105,22 @@ let () =
      stub so the layout closes, and the list is printed: it IS the mini-libc worklist.
      Entry offsets stay 0 until the crt0 thunks land (the hello-blob slice). *)
   let objs = List.rev !objs @ Runtime.objs in
+  (* the 1a drawer swap: the flat profile priced __dg_dither at 38% of the frame under
+     naive codegen; the hand-rolled obj (lib/drawers.ml, ~10 instrs/px) replaces the
+     compiled one. dither.c's C version stays the spec — the jig diffs the hand code
+     against gcc compiling it, the golden oracle against the glibc-built host frames. *)
+  let objs =
+    match
+      ( Globals.offset_of_name globals merged "__dg_lum"
+      , Globals.offset_of_name globals merged "__dg_bn64" )
+    with
+    | Some lum_off, Some bn_off
+      when List.exists (fun (o : Linker.obj) -> o.Linker.name = "__dg_dither") objs ->
+      Printf.printf "drawers: __dg_dither hand-rolled (1a) — compiled version replaced\n";
+      List.filter (fun (o : Linker.obj) -> o.Linker.name <> "__dg_dither") objs
+      @ [ Drawers.dither ~lum_off ~bn_off ]
+    | _ -> objs
+  in
   let defined = Hashtbl.create 256 in
   List.iter (fun (o : Linker.obj) -> Hashtbl.replace defined o.Linker.name ()) objs;
   let missing = Hashtbl.create 64 in
