@@ -1,0 +1,32 @@
+diff --git a/doomgeneric/i_video.c b/doomgeneric/i_video.c
+index 84bebde..3f1ca3d 100644
+--- a/doomgeneric/i_video.c
++++ b/doomgeneric/i_video.c
+@@ -289,6 +289,14 @@ void I_InitGraphics (void)
+     /* Allocate screen to draw to */
+ 	I_VideoBuffer = (byte*)Z_Malloc (SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);  // For DOOM to draw on
+ 
++#ifdef CMAP256
++    /* fb_scaling == 1 and pixel_t == byte: the DG buffer can BE the DOOM
++       compositing buffer — I_FinishUpdate's whole-frame copy disappears */
++    if (fb_scaling == 1) {
++        DG_ScreenBuffer = (pixel_t *)I_VideoBuffer;
++    }
++#endif
++
+ 	screenvisible = true;
+ 
+     extern void I_InitInput(void);
+@@ -337,6 +345,12 @@ void I_FinishUpdate (void)
+     line_in  = (unsigned char *) I_VideoBuffer;
+     line_out = (unsigned char *) DG_ScreenBuffer;
+ 
++    if (line_out == line_in) {
++        /* aliased (CMAP256, fb_scaling 1): nothing to copy */
++        DG_DrawFrame();
++        return;
++    }
++
+     y = SCREENHEIGHT;
+ 
+     while (y--)
