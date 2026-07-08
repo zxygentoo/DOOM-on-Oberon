@@ -65,3 +65,11 @@ opam exec --switch=5.2.0+ox -- dune exec --root $D/sim ./doom_sim.exe -- \
 
 `dune runtest` from the repo root never enters this directory; the vendored
 design's own inline tests run upstream, not here.
+
+## Gametic convention
+
+Under `-timedemo` (singletics) the heartbeat counts Ticks and gametic =
+heartbeat + 1: `-ticks N` parks the machine with gametic N+1 on the screen.
+To compare against `golden_gNNNNN.fbw`, run `-ticks N-1` (or generate the
+host frame at N+1). Verified 2026-07-09: `-ticks 100` ≡ host gametic 101,
+bit-identical.

@@ -138,6 +138,7 @@ let blob_args = ref ""
 let fbw = ref ""
 let max_mcycles = ref 4000
 let chunk = 500_000
+let profile_out = ref ""
 let inputs = ref []
 
 let rec parse = function
@@ -153,10 +154,90 @@ let rec parse = function
   | "-max-mcycles" :: n :: r ->
     max_mcycles := int_of_string n;
     parse r
+  | "-profile" :: p :: r ->
+    (* the CYCLE-attribution profiler (the fps campaign's instrument): sample
+       the core's traced [pc] register every cycle from the first Tick on
+       (Init excluded, doomrun's -profile convention) and attribute the cycle
+       to that instruction address — a stalled instruction holds PC, so
+       memory-stall cycles land exactly where they are paid. Aggregated by
+       doom.blob.map symbol at exit; dividing by doomrun's per-symbol INSTR
+       profile yields per-function CPI, which is what prices the cache lever. *)
+    profile_out := p;
+    parse r
   | a :: r ->
     inputs := a :: !inputs;
     parse r
   | [] -> ()
+;;
+
+(* doom.blob.map: "# ..." headers, then "0xADDR name" per code symbol, ascending
+   (doomrun's parser, ported) *)
+let parse_map path =
+  let syms = ref [] in
+  In_channel.with_open_text path (fun ic ->
+    try
+      while true do
+        let line = input_line ic in
+        if String.length line > 0 && line.[0] <> '#'
+        then (
+          match String.index_opt line ' ' with
+          | Some sp ->
+            let addr = int_of_string (String.sub line 0 sp) in
+            let name = String.sub line (sp + 1) (String.length line - sp - 1) in
+            syms := (addr, name) :: !syms
+          | None -> ())
+      done
+    with
+    | End_of_file -> ());
+  Array.of_list (List.rev !syms)
+;;
+
+let write_profile ~map_path ~counts ~base_word ~outside ~ticks_run out =
+  let syms = parse_map map_path in
+  let n = Array.length syms in
+  let s_cyc = Array.make n 0 in
+  let total = ref 0 in
+  let si = ref 0 in
+  Array.iteri
+    (fun w c ->
+       if c > 0
+       then (
+         let addr = (base_word + w) * 4 in
+         while !si + 1 < n && fst syms.(!si + 1) <= addr do
+           incr si
+         done;
+         s_cyc.(!si) <- s_cyc.(!si) + c;
+         total := !total + c))
+    counts;
+  let order = Array.init n (fun i -> i) in
+  Array.sort (fun a b -> compare s_cyc.(b) s_cyc.(a)) order;
+  Out_channel.with_open_text out (fun oc ->
+    let p fmt = Printf.fprintf oc fmt in
+    let pct x = 100.0 *. float_of_int x /. float_of_int (max 1 (!total + outside)) in
+    p
+      "# doom_sim cycle profile — %d cycles in blob code over %d ticks (%d cyc/tick), \
+       %d (%.1f%%) outside the blob\n"
+      !total
+      ticks_run
+      (!total / max 1 ticks_run)
+      outside
+      (pct outside);
+    p "#  rank    cycles     %%    cum%%  name\n";
+    let cum = ref 0 in
+    Array.iteri
+      (fun rank i ->
+         if rank < 45 && s_cyc.(i) > 0
+         then (
+           cum := !cum + s_cyc.(i);
+           p
+             "%6d %9d  %5.1f  %5.1f  %s\n"
+             (rank + 1)
+             s_cyc.(i)
+             (pct s_cyc.(i))
+             (pct !cum)
+             (snd syms.(i))))
+      order);
+  Printf.eprintf "doom_sim: cycle profile -> %s\n%!" out
 ;;
 
 let () =
@@ -223,12 +304,38 @@ let () =
   let init_cycles = ref 0 in
   let last_hb = ref 0 in
   let tick_marks = ref [] (* (heartbeat, cycles) at each observed change *) in
+  (* -profile state: the traced core PC (a 22-bit WORD address), a counter per
+     blob code word (header word +12 = bss start, absolute), an outside bucket *)
+  let pc_node =
+    if !profile_out = ""
+    then None
+    else (
+      match Cyclesim.lookup_node_or_reg_by_name sim "pc" with
+      | Some n -> Some n
+      | None -> fail "doom_sim: -profile: no traced node named \"pc\"")
+  in
+  let base_word = (blob_base + 64) / 4 in
+  let bss_start =
+    Int32.to_int (String.get_int32_le blob 12) land 0xFFFF_FFFF
+  in
+  let counts = Array.make (max 1 ((bss_start / 4) - base_word)) 0 in
+  let outside = ref 0 in
   let t0 = Unix.gettimeofday () in
   (try
      while !cycles < !max_mcycles * 1_000_000 do
-       for _ = 1 to chunk do
-         Cyclesim.cycle sim
-       done;
+       (match pc_node with
+        | Some node when !init_done ->
+          for _ = 1 to chunk do
+            Cyclesim.cycle sim;
+            let w = Cyclesim.Node.to_int node - base_word in
+            if w >= 0 && w < Array.length counts
+            then counts.(w) <- counts.(w) + 1
+            else incr outside
+          done
+        | _ ->
+          for _ = 1 to chunk do
+            Cyclesim.cycle sim
+          done);
        cycles := !cycles + chunk;
        let m = shared 8
        and hb = shared 16 in
@@ -290,5 +397,14 @@ let () =
       Bytes.set_int32_le b (4 * w) (Int32.of_int (peek_word (fb_base_word + w)))
     done;
     Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
-    Printf.eprintf "doom_sim: fb -> %s\n%!" !fbw)
+    Printf.eprintf "doom_sim: fb -> %s\n%!" !fbw);
+  if !profile_out <> ""
+  then
+    write_profile
+      ~map_path:(blob_path ^ ".map")
+      ~counts
+      ~base_word
+      ~outside:!outside
+      ~ticks_run:(shared 16)
+      !profile_out
 ;;

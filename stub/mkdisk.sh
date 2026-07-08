@@ -11,6 +11,12 @@
 # result boots on the vendored OCaml emulator (16 MiB himem machine):
 #   dune exec --root vendor/oberon-risc-emu-ocaml bin/risc.exe -- DOOM.dsk
 #
+# Real hardware (Nexys 4, the 2a bitstream): the .dsk is a filesystem-only image
+# (first word 0x9B1EA38D); BootLoad reads the FS from SD block 0x80000 (BootLoad.Mod
+# FSoffset), image byte 0 = block 0x80002 (the emulator's disk.ml applies the same
+# rebase in software). Raw device, no partitioning; SW0 off (on = serial boot):
+#   sudo dd if=DOOM.dsk of=/dev/sdX bs=512 seek=524290 conv=fsync status=progress
+#
 # Usage: stub/mkdisk.sh [output.dsk]   (env: RS=, OA= to relocate the tool repos)
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
