@@ -342,6 +342,172 @@ let column ~off ~str : L.obj =
   }
 ;;
 
+(* ---- __dg_dither_fs (drawer #4, the legibility pass's out2 kernel) --------------
+   The C spec is dither.c's __dg_dither_fs: fullscreen 320x200 -> 1024x768, out2
+   decisions (two blue-noise rows per source line, alternating over the 3-4 output
+   rows), the sorted-cut rank trick per (bn row, word phase, slot). This is that C
+   register-scheduled: the compiled kernel pays ~120 instrs per slot re-deriving
+   multi-dim indices; here a slot is ~17-20 — the cut/mask slabs are base registers
+   and every slot's cut/mask/src offsets are IMMEDIATES in the unrolled pair body.
+   K-aware: 3-cut slots skip the padded 255 compare (it can never fire).
+
+   void __dg_dither_fs(const u8 *src, u32 *dst, int stride)
+     args: R0=src  R1=dst  R2=stride (words)
+
+   Frame (SUB SP,72): +0..15 the ABI §3 home area (live during the one-time
+   BL __dg_fs_build) · +16..36 R6..R11 · +40 LNK · +44/48/52 the args parked
+   across the init call · +56 sy · +60 acc (Bresenham) · +64 b2 (B-pass second
+   target row) · +68 adv (dst line advance, rep*stride4)
+
+   Registers, steady: R2 stride4 · R5 &__dg_lum · R6 dst line · R11 src line.
+   Per row-pass: R3 cut slab (&cut[bnrow]) · R4 mask slab · R0 src cursor ·
+   R8 out1 · R1 out2 · R7 pairs left · R10 bits · R9 lum · R12/R15 temps.
+
+   The slot step (cut offsets 4s, mask offsets 20s, src offsets s — s = p*10+j):
+     LDB R12,[R0+s]; ADD R12,R5,R12; LDB R9,[R12]     lum
+     MOV R15,0                                         rank
+     Kx: LDB R12,[R3,4s+c]; SUB R12,R12,R9; ADD' R15,R15,0
+         (C = cut < lum strict, the s5.2 convention; loads leave C alone)
+     LSL R15,2; ADD R15,R4,R15; LDW R12,[R15,20s]; IOR R10,R10,R12
+   A-pass rows land at dst and dst+2*stride4; B-pass at dst+stride4 and b2 —
+   b2 = dst+3*stride4 when the line deals 4 rows, else = the B row again (a
+   harmless duplicate store beats a branch in the row loop). *)
+
+let xw_fs = [| 3; 3; 3; 3; 4; 3; 3; 3; 3; 4 |]
+
+let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
+  let l_line = 0
+  and l_rep3 = 1
+  and l_bres = 2
+  and l_pair_a = 3
+  and l_pair_b = 4
+  and l_inited = 5 in
+  let slot s =
+    [ ldb 12 0 s; alu R.Add 12 5 (R.Reg 12); ldb 9 12 0; movi 15 0 ]
+    @ List.concat_map
+        (fun c ->
+           [ ldb 12 3 ((4 * s) + c)
+           ; alu R.Sub 12 12 (R.Reg 9)
+           ; alu ~u:true R.Add 15 15 (R.Imm 0)
+           ])
+        (List.init xw_fs.(s mod 10) Fun.id)
+    @ [ alu R.Lsl 15 15 (R.Imm 2)
+      ; alu R.Add 15 4 (R.Reg 15)
+      ; ldw 12 15 (20 * s)
+      ; alu R.Ior 10 10 (R.Reg 12)
+      ]
+  in
+  let word p =
+    (movi 10 0 :: List.concat_map slot (List.init 10 (fun j -> (10 * p) + j)))
+    @ [ stw 10 8 0; stw 10 1 0; alu R.Add 8 8 (R.Imm 4); alu R.Add 1 1 (R.Imm 4) ]
+  in
+  let pair_loop l =
+    [ L.Label l ]
+    @ word 0
+    @ word 1
+    @ [ alu R.Add 0 0 (R.Imm 20); alu R.Sub 7 7 (R.Imm 1); bcc_not R.Eq l ]
+  in
+  (* R12 = bn row on entry; leaves R3 = &cut[row], R4 = &mask[row] *)
+  let slabs =
+    [ alu R.Mul 15 12 (R.Imm 80) ]
+    @ load_const2 3 cut_off
+    @ [ alu R.Add 3 13 (R.Reg 3); alu R.Add 3 3 (R.Reg 15); alu R.Mul 15 12 (R.Imm 400) ]
+    @ load_const2 4 mask_off
+    @ [ alu R.Add 4 13 (R.Reg 4); alu R.Add 4 4 (R.Reg 15) ]
+  in
+  let bn_row_from_sy =
+    [ ldw 12 14 56; alu R.Lsl 12 12 (R.Imm 1); alu R.And 12 12 (R.Imm 63) ]
+  in
+  { L.name = "__dg_dither_fs"
+  ; frags =
+      [ alu R.Sub 14 14 (R.Imm 72)
+      ; stw 6 14 16
+      ; stw 7 14 20
+      ; stw 8 14 24
+      ; stw 9 14 28
+      ; stw 10 14 32
+      ; stw 11 14 36
+      ; stw 15 14 40
+      ; stw 0 14 44
+      ; stw 1 14 48
+      ; stw 2 14 52
+      ; ldw 12 13 ready_off
+      ; L.Bcc (R.Eq, true, l_inited)
+      ; L.Call "__dg_fs_build" (* one-time; the home area at SP+0 is its *)
+      ; L.Label l_inited (* ABI §3 due *)
+      ; ldw 11 14 44 (* src line *)
+      ; ldw 6 14 48 (* dst line *)
+      ; ldw 2 14 52
+      ; alu R.Lsl 2 2 (R.Imm 2) (* stride4 *)
+      ]
+      @ load_const2 5 lum_off
+      @ [ alu R.Add 5 13 (R.Reg 5)
+        ; movi 12 0
+        ; stw 12 14 56 (* sy = 0 *)
+        ; stw 12 14 60 (* acc = 0 *)
+        ; L.Label l_line
+          (* acc += 96 then 3 subs fold to t = acc+21; a 4th row iff t >= 25 *)
+        ; ldw 12 14 60
+        ; alu R.Add 12 12 (R.Imm 21)
+        ; alu R.Sub 15 12 (R.Imm 25)
+        ; L.Bcc (R.Cs, false, l_rep3)
+        ; alu R.Sub 12 12 (R.Imm 25) (* rep = 4 *)
+        ; stw 12 14 60
+        ; alu R.Lsl 15 2 (R.Imm 2)
+        ; stw 15 14 68 (* adv = 4*stride4 *)
+        ; alu R.Lsl 15 2 (R.Imm 1)
+        ; alu R.Add 15 15 (R.Reg 2)
+        ; alu R.Add 15 6 (R.Reg 15)
+        ; stw 15 14 64 (* b2 = dst + 3*stride4 *)
+        ; L.Jmp l_bres
+        ; L.Label l_rep3
+        ; stw 12 14 60 (* rep = 3 *)
+        ; alu R.Lsl 15 2 (R.Imm 1)
+        ; alu R.Add 15 15 (R.Reg 2)
+        ; stw 15 14 68 (* adv = 3*stride4 *)
+        ; alu R.Add 15 6 (R.Reg 2)
+        ; stw 15 14 64 (* b2 = the B row again (dup store) *)
+        ; L.Label l_bres
+        ]
+      @ bn_row_from_sy (* A: bn row = (2*sy) & 63 *)
+      @ slabs
+      @ [ mov 8 6 (* out1 = dst row 0 *)
+        ; alu R.Lsl 15 2 (R.Imm 1)
+        ; alu R.Add 1 6 (R.Reg 15) (* out2 = dst row 2 *)
+        ; mov 0 11
+        ; movi 7 16
+        ]
+      @ pair_loop l_pair_a
+      @ bn_row_from_sy
+      @ [ alu R.Add 12 12 (R.Imm 1) (* B: bn row = 2*sy + 1 (2*sy is even: no wrap) *) ]
+      @ slabs
+      @ [ alu R.Add 8 6 (R.Reg 2) (* out1 = dst row 1 *)
+        ; ldw 1 14 64 (* out2 = b2 *)
+        ; mov 0 11
+        ; movi 7 16
+        ]
+      @ pair_loop l_pair_b
+      @ [ alu R.Add 11 11 (R.Imm 320)
+        ; ldw 12 14 68
+        ; alu R.Add 6 6 (R.Reg 12)
+        ; ldw 12 14 56
+        ; alu R.Add 12 12 (R.Imm 1)
+        ; stw 12 14 56
+        ; alu R.Sub 15 12 (R.Imm 200)
+        ; bcc_not R.Eq l_line
+        ; ldw 6 14 16
+        ; ldw 7 14 20
+        ; ldw 8 14 24
+        ; ldw 9 14 28
+        ; ldw 10 14 32
+        ; ldw 11 14 36
+        ; ldw 15 14 40
+        ; alu R.Add 14 14 (R.Imm 72)
+        ; ret
+        ]
+  }
+;;
+
 (* Build every drawer whose data symbols resolve; each is independent — a sample
    (or a tree) lacking a drawer's globals simply keeps its compiled version. *)
 let build ~(off : string -> int option) ~(str : string -> int option) : L.obj list =
@@ -355,5 +521,12 @@ let build ~(off : string -> int option) ~(str : string -> int option) : L.obj li
     | Exit -> []
   in
   let dither_b ~off ~str:_ = dither ~lum_off:(off "__dg_lum") ~bn_off:(off "__dg_bn64") in
-  try_build dither_b @ try_build span @ try_build column
+  let dither_fs_b ~off ~str:_ =
+    dither_fs
+      ~lum_off:(off "__dg_lum")
+      ~cut_off:(off "__dg_fs_cut")
+      ~mask_off:(off "__dg_fs_mask")
+      ~ready_off:(off "__dg_fs_ready")
+  in
+  try_build dither_b @ try_build dither_fs_b @ try_build span @ try_build column
 ;;

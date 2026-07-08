@@ -1506,11 +1506,19 @@ let port_selfchecks =
    LUT and the flag reads cleared. Two full blits ~3M instrs: its own list,
    run with an explicit step budget.
 
-   kdf pins the fullscreen kernel's SEMANTICS from the endpoints only (lum 0
-   never fires, 255 always — map-agnostic): the 3/3/3/3/4 replication masks
-   (white source px 0/4/9 -> word 0xF000F007, LSB leftmost), the Bresenham
-   3-vs-4 line dealing (source line 0 -> 3 output lines, line 1 -> 4 — acc
-   96/25), and the stride-as-flip contract at the machine's -32. *)
+   kdf pins the fullscreen kernel's SEMANTICS in two passes. Pass 1, endpoints
+   only (lum 0 never fires, 255 always — map- and granularity-agnostic): the
+   3/3/3/3/4 slot masks (white source px 0/4/9 -> word 0xF000F007, LSB
+   leftmost), the Bresenham 3-vs-4 line dealing (source line 0 -> 3 output
+   lines, line 1 -> 4 — acc 96/25), and the stride-as-flip contract at the
+   machine's -32. Pass 2, a mid-tone: out2 decisions (the legibility pass)
+   mean a source line's replicated rows ALTERNATE between bn rows 2*sy and
+   2*sy+1 — a gray-50 source px (gray maps to itself under ANY sum-256
+   weights, so the vector survives weight changes) over bn rows 0/1, cols 0-2
+   ({15,85,28} fires bits 0+2 at lum 50; {149,186,126} fires none) must yield
+   words 0x5, 0, 0x5 on the line's three output rows — the exact out2
+   fingerprint: per-source would replicate 0x5,0x5,0x5, and full per-output
+   would read bn row 2 ({215,145,180}) for 0x5,0,0. *)
 let port_selfchecks_big =
   [ ( port_prelude
       ^ "unsigned char sbuf[64000]; int kd2(int i){ unsigned int *fb; int k; int r; fb = \
@@ -1530,15 +1538,19 @@ let port_selfchecks_big =
   ; ( port_prelude
       ^ "unsigned char fpal[1024]; unsigned char fsrc[64000]; unsigned int ofb[24576]; \
          int kdf(int i){ int k; int r; for (k = 0; k < 1024; k++) fpal[k] = 0; fpal[4] = \
-         255; fpal[5] = 255; fpal[6] = 255; __dg_build_lut(fpal); for (k = 0; k < 64000; \
-         k++) fsrc[k] = 0; fsrc[0] = 1; fsrc[4] = 1; fsrc[9] = 1; for (k = 320; k < 640; \
-         k++) fsrc[k] = 1; __dg_dither_fs(fsrc, ofb + 767 * 32, -32); r = (ofb[767 * 32] \
-         == 0xF000F007u); r += (ofb[766 * 32] == 0xF000F007u) * 2; r += (ofb[765 * 32] \
-         == 0xF000F007u) * 4; r += (ofb[767 * 32 + 1] == 0) * 8; r += (ofb[764 * 32] == \
-         0xFFFFFFFFu) * 16; r += (ofb[761 * 32 + 31] == 0xFFFFFFFFu) * 32; r += (ofb[760 \
-         * 32] == 0) * 64; r += (ofb[0] == 0) * 128; return r + (i - i); }"
+         255; fpal[5] = 255; fpal[6] = 255; fpal[8] = 50; fpal[9] = 50; fpal[10] = 50; \
+         __dg_build_lut(fpal); for (k = 0; k < 64000; k++) fsrc[k] = 0; fsrc[0] = 1; \
+         fsrc[4] = 1; fsrc[9] = 1; for (k = 320; k < 640; k++) fsrc[k] = 1; \
+         __dg_dither_fs(fsrc, ofb + 767 * 32, -32); r = (ofb[767 * 32] == 0xF000F007u); \
+         r += (ofb[766 * 32] == 0xF000F007u) * 2; r += (ofb[765 * 32] == 0xF000F007u) * \
+         4; r += (ofb[767 * 32 + 1] == 0) * 8; r += (ofb[764 * 32] == 0xFFFFFFFFu) * 16; \
+         r += (ofb[761 * 32 + 31] == 0xFFFFFFFFu) * 32; r += (ofb[760 * 32] == 0) * 64; \
+         r += (ofb[0] == 0) * 128; fsrc[0] = 2; fsrc[4] = 0; fsrc[9] = 0; for (k = 320; \
+         k < 640; k++) fsrc[k] = 0; __dg_dither_fs(fsrc, ofb + 767 * 32, -32); r += \
+         (ofb[767 * 32] == 5) * 256; r += (ofb[766 * 32] == 0) * 512; r += (ofb[765 * \
+         32] == 5) * 1024; return r + (i - i); }"
     , "kdf"
-    , [ 0, 255; 2, 255 ] )
+    , [ 0, 2047; 2, 2047 ] )
   ]
 ;;
 
@@ -1688,7 +1700,9 @@ let () =
   let total, sample_fails =
     self_fold
       ~port:true
-      ~steps:8_000_000
+        (* two fullscreen blits per sample; the compiled per-output kernel runs
+         ~30M instrs each until the 1a hand-roll lands — budget for it *)
+      ~steps:90_000_000
       (self_fold
          ~port:true
          (self_fold

@@ -287,13 +287,18 @@ static const unsigned char __dg_bn64[64 * 64] = {
 /* Rebuild the LUT from a 256-entry BGRA byte palette — the raw bytes of
  * i_video's struct color[256]: b at +0, g at +1, r at +2 (the byte-aligned :8
  * little-endian layout the jig's bf1 sample pins). Weights sum to 256, so
- * full white maps to 255 exactly. */
+ * full white maps to 255 exactly — and any GRAY maps to itself under any
+ * sum-256 weights, which is what keeps walls/floors invariant across weight
+ * changes. (150,80,26) replaced ITU-601's (77,150,29) in the 2026-07-09
+ * legibility pass, chosen on lab contact sheets: DOOM's UI text, HUD numbers
+ * and messages are PURE RED, which ITU put at ~26%-white — unreadable in the
+ * dither; red-weighted luminance lifts text to ~50% while grays don't move. */
 void __dg_build_lut(const unsigned char *pal)
 {
     int i;
     for (i = 0; i < 256; i++) {
-        __dg_lum[i] = (unsigned char)((77 * pal[4 * i + 2] + 150 * pal[4 * i + 1]
-                                       + 29 * pal[4 * i]) >> 8);
+        __dg_lum[i] = (unsigned char)((150 * pal[4 * i + 2] + 80 * pal[4 * i + 1]
+                                       + 26 * pal[4 * i]) >> 8);
     }
 }
 
@@ -332,46 +337,115 @@ void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int 
  *
  * Scale 3.2 x 3.84 — and 3.84/3.2 = 1.2, exactly VGA mode 13h's pixel aspect:
  * DOOM authored 320x200 for a 4:3 CRT, so the full stretch RESTORES the
- * original proportions (the 2x2 kernel's square pixels were the squished
- * rendition). Still ONE dither decision per source pixel, replicated into
- * 3-or-4 output columns and 3-or-4 output lines:
- *   - horizontally, 10 source px fill exactly one 32-bit word (3+3+3+3+4
- *     bits, twice) — the per-position replication masks below, LSB leftmost;
- *   - vertically, 25 source lines fill exactly 96 output lines — a Bresenham
- *     accumulator deals the 3s and 4s (200 lines -> 768 exactly).
- * Same contract as above: [dst] = the screen top-left word, [stride] = words
- * per screen line DOWNWARD (the machine passes -32; the jig, small positives
- * into plain arrays). */
+ * original proportions. Geometry: 10 source px fill exactly one 32-bit word
+ * (3+3+3+3+4 bits, twice; LSB leftmost), 25 source lines fill exactly 96
+ * output lines (a Bresenham accumulator deals the 3s and 4s, 200 -> 768).
+ *
+ * Decisions are fine-grained on BOTH axes (the 2026-07-09 legibility pass;
+ * chosen on lab contact sheets over per-source replication, which cannot
+ * render 8-px menu glyphs at 3.2x3.84 chunk size at any contrast — the quit
+ * prompt was invisible): horizontally per OUTPUT pixel, vertically TWO
+ * decision rows per source line — a source line's 3-or-4 output rows
+ * alternate between blue-noise rows (2*sy)&63 and (2*sy+1)&63 ("out2" on the
+ * lab sheets: indistinguishable from full per-output in the game frames at
+ * half the cost; full per-output was 3.84x the decisions for text-crispness
+ * no one could tell apart at play distance).
+ *
+ * The trick that makes output-granular decisions affordable: the blue-noise
+ * thresholds under one source pixel's 3-or-4 output bits are FIXED per
+ * (bn row, word phase, slot) — so a one-time, palette- and frame-independent
+ * table stores them SORTED with prefix-OR masks, and a source pixel's whole
+ * contribution collapses to rank(L) = how many sorted cuts its luminance
+ * exceeds (4 branchless compares) + one mask fetch: 128,000 rank lookups per
+ * frame (2 rows x 320 px x 200 lines) instead of 786,432 pixel compares.
+ *
+ * Same contract as the 2x2 kernel: [dst] = the screen top-left word, [stride]
+ * = words per screen line DOWNWARD (the machine passes -32; the jig, small
+ * positives into plain arrays). */
 
-static const unsigned int __dg_m10[10] = {
-    0x00000007u, 0x00000038u, 0x000001C0u, 0x00000E00u, 0x0000F000u,
-    0x00070000u, 0x00380000u, 0x01C00000u, 0x0E000000u, 0xF0000000u,
-};
+/* slot j of a word covers XW[j] output bits starting at bit XOFF[j] */
+static const int __dg_xw[10] = { 3, 3, 3, 3, 4, 3, 3, 3, 3, 4 };
+static const int __dg_xoff[10] = { 0, 3, 6, 9, 12, 16, 19, 22, 25, 28 };
+
+/* [row & 63][word & 1][slot]: sorted cuts (K=3 slots padded with 255 — L can
+ * never exceed it) and mask[rank] = the slot's bits for that many fired cuts */
+static unsigned char __dg_fs_cut[64][2][10][4];
+static unsigned int __dg_fs_mask[64][2][10][5];
+static int __dg_fs_ready;
+
+static void __dg_fs_build(void)
+{
+    int r, p, j, k, n, best;
+    for (r = 0; r < 64; r++) {
+        for (p = 0; p < 2; p++) {
+            for (j = 0; j < 10; j++) {
+                unsigned char t[4];
+                unsigned int b[4];
+                int kk = __dg_xw[j];
+                for (k = 0; k < kk; k++) {
+                    t[k] = __dg_bn64[64 * r + 32 * p + __dg_xoff[j] + k];
+                    b[k] = 1u << (__dg_xoff[j] + k);
+                }
+                /* selection sort the (cut, bit) pairs — at most 4 */
+                for (n = 0; n < kk; n++) {
+                    unsigned char tt;
+                    unsigned int bb;
+                    best = n;
+                    for (k = n + 1; k < kk; k++)
+                        if (t[k] < t[best]) best = k;
+                    tt = t[n]; t[n] = t[best]; t[best] = tt;
+                    bb = b[n]; b[n] = b[best]; b[best] = bb;
+                }
+                __dg_fs_mask[r][p][j][0] = 0;
+                for (n = 0; n < kk; n++) {
+                    __dg_fs_cut[r][p][j][n] = t[n];
+                    __dg_fs_mask[r][p][j][n + 1] = __dg_fs_mask[r][p][j][n] | b[n];
+                }
+                for (n = kk; n < 4; n++) {
+                    __dg_fs_cut[r][p][j][n] = 255;
+                    __dg_fs_mask[r][p][j][n + 1] = __dg_fs_mask[r][p][j][kk];
+                }
+            }
+        }
+    }
+    __dg_fs_ready = 1;
+}
 
 void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
 {
-    int sy, k, j, sx, rep, acc;
-    unsigned int line[32];
+    int sy, k, j, sx, rep, acc, i;
+    unsigned int rowbuf[2][32];
+    if (!__dg_fs_ready)
+        __dg_fs_build();
     acc = 0;
     for (sy = 0; sy < 200; sy++) {
-        const unsigned char *row = __dg_bn64 + 64 * (sy & 63);
-        sx = 0;
-        for (k = 0; k < 32; k++) {
-            unsigned int bits = 0;
-            for (j = 0; j < 10; j++) {
-                if (__dg_lum[src[sx]] > row[sx & 63])
-                    bits |= __dg_m10[j];
-                sx++;
+        for (i = 0; i < 2; i++) {
+            int r = (2 * sy + i) & 63;
+            const unsigned char (*cut)[10][4] = __dg_fs_cut[r];
+            const unsigned int (*mask)[10][5] = __dg_fs_mask[r];
+            sx = 0;
+            for (k = 0; k < 32; k++) {
+                const unsigned char (*c)[4] = cut[k & 1];
+                const unsigned int (*m)[5] = mask[k & 1];
+                unsigned int bits = 0;
+                for (j = 0; j < 10; j++) {
+                    int lum = __dg_lum[src[sx]];
+                    bits |= m[j][(lum > c[j][0]) + (lum > c[j][1])
+                                 + (lum > c[j][2]) + (lum > c[j][3])];
+                    sx++;
+                }
+                rowbuf[i][k] = bits;
             }
-            line[k] = bits;
         }
         acc += 96;
         rep = 0;
         while (acc >= 25) { acc -= 25; rep++; }   /* 3 or 4 output lines */
+        i = 0;
         while (rep--) {
             for (k = 0; k < 32; k++)
-                dst[k] = line[k];
+                dst[k] = rowbuf[i & 1][k];
             dst += stride;
+            i++;
         }
         src += 320;
     }

@@ -24,6 +24,13 @@ val span : off:(string -> int) -> str:(string -> int) -> Linker.obj
 (** [R_DrawColumn] — drawer #3 (15.9% at ~17 instrs/px compiled; hand loop 11). *)
 val column : off:(string -> int) -> str:(string -> int) -> Linker.obj
 
+(** [dither_fs] — drawer #4: the fullscreen out2 kernel (the 2026-07-09 legibility
+    pass). The compiled C paid ~120 instrs per (bn row, phase, slot) rank lookup —
+    93% of the frame; the hand pair body runs ~17-20 per slot, every cut/mask/src
+    offset an immediate, 3-cut slots skipping the padded 255 compare. Calls the C
+    initializer [__dg_fs_build] once via the ready flag. *)
+val dither_fs : lum_off:int -> cut_off:int -> mask_off:int -> ready_off:int -> Linker.obj
+
 (** Every drawer whose data symbols resolve ([off] = {!Globals.offset_of_name},
     [str] = the interned-string table): each independent, missing symbols skip that
     drawer. The caller replaces same-named compiled objs with these at link set. *)
