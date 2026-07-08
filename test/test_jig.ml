@@ -970,6 +970,17 @@ let samples =
       (* deep expressions as CALL ARGUMENTS: hoisted temps meet the arg
          marshaller (args must be atoms while R0-R3 are claimed) *)
     )
+  ; ( "int bpad[20000]; int btab[8]; int biga(int i){ int k; int *p; for (k = 0; k < 8; \
+       k++) btab[k] = k * 1000 + 7; p = &btab[i & 7]; return p[0]; }"
+    , "biga"
+    , 1
+      (* &global[variable] as a VALUE with the global past the 16-bit
+         ALU-immediate horizon (80 KB pad): materialize_addr must build the
+         offset constant in a register DISTINCT from the DB+index partial sum.
+         fopen's &__handles[h] — the first 1d bring-up bug: the two-instr
+         load_const shared base's register and the ADD doubled the offset.
+         Plain accesses ride the 20-bit mem-op offset and never see it. *)
+    )
   ]
 ;;
 
@@ -1109,6 +1120,16 @@ let libc_samples =
          s; }"
       , "vsn4"
       , 1 (* %c, %%, %s branches, %X uppercase *) )
+    ; ( "int vsn5(int i){ char b[40]; int k; int s; int r; memset(b, 7, 40); r = \
+         snprintf(b, 40, \"[%.3d][%.3d][%.0d][%6.3d][%.2x]\", i & 63, -(i & 63), i & 1, \
+         i & 255, i & 255); s = r; for (k = 0; k < 40; k++) s = s * 31 + b[k]; return \
+         s; }"
+      , "vsn5"
+      , 1
+        (* INTEGER precision (%.3d — HU_Init's STCFN font names, the second 1d
+           bring-up bug: unpadded STCFN33 missed the lump): zero-extend to
+           min digits, sign outside, %.0d of 0 prints nothing, width composes,
+           precision defeats the zero flag — all diffed against genuine glibc *) )
     ; ( "extern const unsigned short **__ctype_b_loc(void); int ct1(int c){ return \
          (int)((*__ctype_b_loc())[c & 255]); }"
       , "ct1"

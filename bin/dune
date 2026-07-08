@@ -13,3 +13,11 @@
 (executable
  (name wadsplit)
  (libraries doomcc_core))
+
+; doomrun — the 1d emulator harness: doom.blob + doom1.wad -> himem, the SHARED
+; page, a UART console, and the Init/Tick loop with PGM frame dumps. The stub's
+; role, played host-side. See bin/doomrun.ml.
+
+(executable
+ (name doomrun)
+ (libraries emu))

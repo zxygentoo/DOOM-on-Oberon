@@ -217,7 +217,7 @@ its baked link-time binding).
 ## 8. Himem layout v1 (the constants page)
 
 Oberon owns `[0, 1 MB)` — stock kernel, 1 MB worldview, never touches
-himem. Top of the 16 MiB space (`≥ 0xE00000`) is left untouched (ROM/MMIO
+himem. Top of the 16 MiB space (`≥ 0xE01000`) is left untouched (ROM/MMIO
 decode territory + margin).
 
 | Base | End | Size | Contents |
@@ -229,7 +229,7 @@ decode territory + margin).
 | `0x310000` | `0x320000` | 64 KB | **back buffer** (320×200×8 = 64 000 B) |
 | `0x320000` | `0x400000` | 896 KB | spare (wipe buffers, LUTs, growth) |
 | `0x400000` | `0xA00000` | 6 MB | **zone** (DOOM's Z_Malloc block) |
-| `0xA00000` | `0xE00000` | 4 MB | **WAD** (chunks concatenated by stub) |
+| `0xA00000` | `0xE01000` | 4 MB + 4 KB | **WAD** (chunks concatenated by stub; the real shareware WAD is 4 196 020 B — 1 716 past 4 MiB, so the window carries one extra page) |
 
 No hardware guard pages exist; the blob/stack gap is convention. A stack
 that grows past `0x2C0000` corrupts .bss silently — the jig's stack-depth

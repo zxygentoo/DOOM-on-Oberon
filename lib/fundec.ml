@@ -786,18 +786,27 @@ and materialize_addr ctx (lv : C.lval) : reg =
   let base, off = gen_addr ctx lv in
   if off = 0 && is_scratch ctx base
   then base
-  else (
+  else if off >= 0 && off <= 0xFFFF
+  then (
+    (* one instruction reads base then writes d, so d may reuse base's register *)
     free_scratch ctx base;
     let d = alloc_scratch ctx in
     if off = 0
     then emit ctx (mov_reg d base)
-    else if off >= 0 && off <= 0xFFFF
-    then emit ctx (alu R.Add d base (R.Imm off))
-    else (
-      let c = alloc_scratch ctx in
-      load_const ctx c off;
-      emit ctx (alu R.Add d base (R.Reg c));
-      free_scratch ctx c);
+    else emit ctx (alu R.Add d base (R.Imm off));
+    d)
+  else (
+    (* past the 16-bit immediate the constant builds in TWO instructions, so it
+       needs a register distinct from base — base stays live until the constant
+       stands. (Freeing base first let load_const land ON it and the ADD doubled
+       the offset: fopen's &__handles[h], the first 1d bring-up bug — biga is
+       the jig gate.) d may then reuse either: the ADD is one instruction. *)
+    let c = alloc_scratch ctx in
+    load_const ctx c off;
+    free_scratch ctx c;
+    free_scratch ctx base;
+    let d = alloc_scratch ctx in
+    emit ctx (alu R.Add d base (R.Reg c));
     d)
 
 and gen_load ctx (lv : C.lval) : reg =

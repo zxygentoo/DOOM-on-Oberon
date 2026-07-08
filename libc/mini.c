@@ -322,15 +322,22 @@ static void sn_str(sn_t *st, const char *s, int prec, int width, int left)
     /* the pad-after loop no-ops when right-aligned: the pad-before consumed width */
 }
 
-/* flags bits: 1 = negative (emit '-'), 2 = zero-pad, 4 = left-align, 8 = uppercase */
-static void sn_num(sn_t *st, unsigned v, unsigned base, int flags, int width)
+/* flags bits: 1 = negative (emit '-'), 2 = zero-pad, 4 = left-align, 8 = uppercase.
+ * prec >= 0 is the C99 integer precision: minimum digit count (zero-extended),
+ * and it defeats the '0' flag; %.0d of 0 prints no digits (glibc-exact). The
+ * digit buffer caps the effective precision at 11 — past any 32-bit value, and
+ * DOOM's only precision use is the STCFN%.3d font names (HU_Init, found at 1d
+ * bring-up: unpadded "STCFN33" missed the lump). */
+static void sn_num(sn_t *st, unsigned v, unsigned base, int flags, int width, int prec)
 {
     char d[12];
     int len = 0;
     const char *digs = (flags & 8) ? "0123456789ABCDEF" : "0123456789abcdef";
     int total;
-    if (v == 0) d[len++] = '0';
+    if (prec >= 0) flags &= ~2;
+    if (v == 0 && prec != 0) d[len++] = '0';
     while (v) { d[len++] = digs[v % base]; v = v / base; }
+    while (len < prec && len < 11) d[len++] = '0';
     total = len + ((flags & 1) ? 1 : 0);
     /* C99 padding order: spaces before the sign, zeros after it; '-' wins over '0' */
     if (!(flags & 4) && !(flags & 2))
@@ -373,17 +380,17 @@ int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
             unsigned u = (unsigned)v;
             int fl = flags;
             if (v < 0) { fl |= 1; u = 0u - u; }     /* INT_MIN-safe magnitude */
-            sn_num(&st, u, 10, fl, width);
+            sn_num(&st, u, 10, fl, width, prec);
         } else if (c == 'u') {
-            sn_num(&st, __builtin_va_arg(ap, unsigned), 10, flags, width);
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 10, flags, width, prec);
         } else if (c == 'x') {
-            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, width);
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, width, prec);
         } else if (c == 'X') {
-            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags | 8, width);
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags | 8, width, prec);
         } else if (c == 'p') {
             sn_chr(&st, '0');
             sn_chr(&st, 'x');
-            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, 0);
+            sn_num(&st, __builtin_va_arg(ap, unsigned), 16, flags, 0, -1);
         } else if (c == 'c') {
             if (!(flags & 4)) while (width > 1) { sn_chr(&st, ' '); width--; }
             sn_chr(&st, __builtin_va_arg(ap, int));
