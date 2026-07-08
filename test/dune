@@ -4,9 +4,10 @@
 ;   test_jig    : compile small C leaves with doomcc_core, run in the emulator, diff vs host gcc
 ;   test_blob   : the 3b.2 envelope — emit a blob file, verify the ABI §7 header, load
 ;                 and run it in the emulator the way the stub will
+;   test_wadsplit : Wad.split invariants (§3 chunking — reassembly identity, PO caps)
 
 (tests
- (names test_runner test_jig test_blob)
+ (names test_runner test_jig test_blob test_wadsplit)
  (libraries emu doomcc_core unix)
  ; the jig merges the mini-libc sources at run time (test_jig's libc_path):
  ; declaring them makes them visible from the runtest cwd (_build/default/test,

@@ -4,9 +4,8 @@
     Sections, in file order: header (64 B) · code · data; bss is *reserved, not
     emitted* — the header carries its absolute start and length and the stub zeroes the
     range. DB points at [data_base]; the flat image links at [base] with no relocation
-    (v1). [base] defaults to ABI §8's BLOB_BASE 0x100000 at the call sites that mean the
-    real machine; the emulator's 1 MB RAM needs a smaller base until the 24-bit map
-    patch lands in the vendor, and the math is identical. *)
+    (v1). [base] is ABI §8's BLOB_BASE 0x100000 everywhere that means the real machine —
+    including the tests, since the vendored emulator's himem widening (f52d904). *)
 
 type layout =
   { base : int (** BLOB_BASE: where the header lands *)

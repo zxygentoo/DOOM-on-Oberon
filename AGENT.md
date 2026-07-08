@@ -286,7 +286,7 @@ proven end-to-end.
 |---|---|---|
 | **2a** ✅ | 24-bit board decode + wide cache tags; himem visible | ✅ **LANDED on `develop` (2026-07-05, `caf942d`)** — the three board masks (`Cellram`/`Cache`/`Framebuf`) widened to the full 16 MiB; `lib/` core byte-identical (Phase-8 proofs untouched). Goldens byte-identical (`0xb9bdbf56…`), `@bench_boot` mirror 0-mismatch, 5 himem unit tests green; timing closes (WNS +0.147 ns @ 60 MHz); boots clean on hardware. Physical `MemAdr[22:0]` pins + XDC were already wired → no top/XDC change |
 | **2b** | Oberon-07 prototypes of the DG hooks: dither-blit on the real panel (LUT, Bayer look, the 25% budget), ms timer, UART key queue + host-side serial agent | eyeballs on silicon; measured blit cycles vs §5's estimate; key make/break echoed end-to-end |
-| **2c** | stub loader: blob file + WAD chunks → himem (host-side chunk splitter included); header parse; `.bss` zero | loads a crafted image; himem contents verified |
+| **2c** ◐ | stub loader: blob file + WAD chunks → himem (host-side chunk splitter included); header parse; `.bss` zero. ◐ the host-side halves exist (2026-07-08): the chunk splitter (`bin/wadsplit.ml`) and the header-parse/bss-zero protocol rehearsed by `test_blob` at the real addresses; the Oberon-side `DOOM.Mod` stub itself is unwritten | loads a crafted image; himem contents verified |
 
 **Milestone — hello blob** (closes tracks 2+3): a hand-assembled blob through
 the full path — stub loads it, stack switches to himem, R12–R15 saved, writes
@@ -362,10 +362,15 @@ desync oracles) and the emulator's himem widening landed (upstream
 `f52d904`, pinned at `f59df92`: 16 MiB default, kernel worldview and fb
 window untouched — the emulator-side mirror of 2a; `test_blob` now runs the
 blob envelope + crt0 excursion at the real `BLOB_BASE 0x100000` /
-`STACK_TOP 0x300000`), what remains on the critical path to the first frame
-is the rest of the 1d infrastructure: the sim/emulator harness that
-preloads blob+WAD (incl. the oracle instrumentation — golden dumper,
-gametic checksum), the WAD chunk splitter — and then performance
+`STACK_TOP 0x300000`), and the WAD chunk splitter landed (`lib/wad.ml` +
+`bin/wadsplit.ml`: §3's ≤3 MiB byte-range chunks under the PO file cap
+3 210 912 = 64 direct + 12×256 indirect KB − the 352 B header; name
+sequence `doom1.wad.0`, `.1`, … is the manifest the stub walks;
+`test_wadsplit` pins the invariants and the real WAD splits into 2 chunks,
+reassembly md5-verified against the shareware pin), what remains on the
+critical path to the first frame is one artifact: the sim/emulator harness
+that preloads blob+WAD (incl. the oracle instrumentation — golden dumper,
+gametic checksum) — and then performance
 work chosen by measurement (`-timedemo` survived the float ban precisely to
 be that instrument), not by guess: the §4 allocator ladder (local →
 linear-scan) and the 1a hand-rolled hot loops are the two levers, and 1d's

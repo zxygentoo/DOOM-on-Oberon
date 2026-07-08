@@ -1,7 +1,15 @@
 ; doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
-; The shape of the full pipeline: front (parse + amalgamate) and per-function codegen are
-; real; the instr-level linker + blob emit (ABI §6 / 3b) are stubbed. See bin/doomcc.ml.
+; The full pipeline: front (parse + amalgamate), per-function codegen, the instr-level
+; linker + crt0 thunks, and the ABI §7 blob file + symbol map. See bin/doomcc.ml.
 
 (executable
  (name doomcc)
  (libraries doomcc_core goblint-cil emu))
+
+; wadsplit — host-side WAD chunk splitter (AGENT.md §3): DOOM1.WAD -> <=3 MiB
+; byte-range chunk files the PO filesystem can hold; the stub concatenates them
+; into himem at init. See bin/wadsplit.ml.
+
+(executable
+ (name wadsplit)
+ (libraries doomcc_core))
