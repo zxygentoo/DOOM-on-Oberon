@@ -110,16 +110,26 @@ let () =
      compiled one. dither.c's C version stays the spec — the jig diffs the hand code
      against gcc compiling it, the golden oracle against the glibc-built host frames. *)
   let objs =
-    match
-      ( Globals.offset_of_name globals merged "__dg_lum"
-      , Globals.offset_of_name globals merged "__dg_bn64" )
-    with
-    | Some lum_off, Some bn_off
-      when List.exists (fun (o : Linker.obj) -> o.Linker.name = "__dg_dither") objs ->
-      Printf.printf "drawers: __dg_dither hand-rolled (1a) — compiled version replaced\n";
-      List.filter (fun (o : Linker.obj) -> o.Linker.name <> "__dg_dither") objs
-      @ [ Drawers.dither ~lum_off ~bn_off ]
-    | _ -> objs
+    let off name = Globals.offset_of_name globals merged name in
+    let str l = Hashtbl.find_opt globals.Globals.strings l in
+    let drawers =
+      List.filter
+        (fun (d : Linker.obj) ->
+           List.exists (fun (o : Linker.obj) -> o.Linker.name = d.Linker.name) objs)
+        (Drawers.build ~off ~str)
+    in
+    if drawers = []
+    then objs
+    else (
+      List.iter
+        (fun (d : Linker.obj) ->
+           Printf.printf
+             "drawers: %s hand-rolled (1a) — compiled version replaced\n"
+             d.Linker.name)
+        drawers;
+      let names = List.map (fun (d : Linker.obj) -> d.Linker.name) drawers in
+      List.filter (fun (o : Linker.obj) -> not (List.mem o.Linker.name names)) objs
+      @ drawers)
   in
   let defined = Hashtbl.create 256 in
   List.iter (fun (o : Linker.obj) -> Hashtbl.replace defined o.Linker.name ()) objs;

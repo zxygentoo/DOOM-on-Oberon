@@ -74,15 +74,20 @@ let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
      (~port), the hand-rolled __dg_dither replaces the compiled one — so kd1/kd2/
      dd1/dd2 exercise the SHIPPED hand code, diffed against gcc compiling the C spec *)
   let objs =
-    match
-      ( Globals.offset_of_name globals file "__dg_lum"
-      , Globals.offset_of_name globals file "__dg_bn64" )
-    with
-    | Some lum_off, Some bn_off
-      when List.exists (fun (o : Linker.obj) -> o.Linker.name = "__dg_dither") objs ->
-      List.filter (fun (o : Linker.obj) -> o.Linker.name <> "__dg_dither") objs
-      @ [ Drawers.dither ~lum_off ~bn_off ]
-    | _ -> objs
+    let off name = Globals.offset_of_name globals file name in
+    let str l = Hashtbl.find_opt globals.Globals.strings l in
+    let drawers =
+      List.filter
+        (fun (d : Linker.obj) ->
+           List.exists (fun (o : Linker.obj) -> o.Linker.name = d.Linker.name) objs)
+        (Drawers.build ~off ~str)
+    in
+    if drawers = []
+    then objs
+    else (
+      let names = List.map (fun (d : Linker.obj) -> d.Linker.name) drawers in
+      List.filter (fun (o : Linker.obj) -> not (List.mem o.Linker.name names)) objs
+      @ drawers)
   in
   let entry, rest = List.partition (fun o -> o.Linker.name = fname) objs in
   let image =
@@ -995,6 +1000,60 @@ let samples =
          fopen's &__handles[h] — the first 1d bring-up bug: the two-instr
          load_const shared base's register and the ADD doubled the offset.
          Plain accesses ride the 20-bit mem-op offset and never see it. *)
+    )
+  ; ( "unsigned char stex[4096]; unsigned char scm[256]; unsigned char sfb[1280]; \
+       unsigned char *ylookup[204]; int columnofs[324]; int ds_y; int ds_x1; int ds_x2; \
+       unsigned char *ds_colormap; unsigned char *ds_source; int ds_xfrac; int ds_yfrac; \
+       int ds_xstep; int ds_ystep; void I_Error(const char *f, ...) { (void)f; } void \
+       R_DrawSpan(void) { unsigned int position, step; unsigned char *dest; int count; \
+       int spot; unsigned int xtemp, ytemp; if (ds_x2 < ds_x1 || ds_x1 < 0 || ds_x2 >= \
+       320 || (unsigned)ds_y > 200) { I_Error(\"R_DrawSpan: %i to %i at %i\", ds_x1, \
+       ds_x2, ds_y); } position = ((ds_xfrac << 10) & 0xffff0000) | ((ds_yfrac >> 6) & \
+       0x0000ffff); step = ((ds_xstep << 10) & 0xffff0000) | ((ds_ystep >> 6) & \
+       0x0000ffff); dest = ylookup[ds_y] + columnofs[ds_x1]; count = ds_x2 - ds_x1; do { \
+       ytemp = (position >> 4) & 0x0fc0; xtemp = (position >> 26); spot = xtemp | ytemp; \
+       *dest++ = ds_colormap[ds_source[spot]]; position += step; } while (count--); } \
+       int spanj(int i) { int k; int s; for (k = 0; k < 4096; k++) stex[k] = (unsigned \
+       char)(k * 13 + i); for (k = 0; k < 256; k++) scm[k] = (unsigned char)(255 - k + \
+       (i & 7)); for (k = 0; k < 1280; k++) sfb[k] = 0; for (k = 0; k < 204; k++) \
+       ylookup[k] = sfb + ((k & 3) * 320); for (k = 0; k < 324; k++) columnofs[k] = k; \
+       ds_y = i & 127; ds_x1 = (i >> 3) & 63; ds_x2 = ds_x1 + ((i >> 9) & 31); \
+       ds_colormap = scm; ds_source = stex; ds_xfrac = (i & 0xFFFFF) * 3; ds_yfrac = (i \
+       & 0xFFFFF) * 5 + 7; ds_xstep = (i & 1023) - 512; ds_ystep = ((i >> 2) & 1023) - \
+       256; R_DrawSpan(); s = 0; for (k = 0; k < 1280; k++) s = s * 31 + sfb[k]; return \
+       s; }"
+    , "spanj"
+    , 1
+      (* drawer #2's gate: the HAND R_DrawSpan (swapped in because the sample
+         defines every ds_* symbol) vs gcc compiling the same .i body — random
+         fracs/steps (signed >>6 included), spans up to 32 px, whole-buffer
+         hash. Valid inputs only; the RANGECHECK path links via the sample's
+         I_Error *)
+    )
+  ; ( "unsigned char ctex[128]; unsigned char ccm[256]; unsigned char cfb[1280]; \
+       unsigned char *ylookup[204]; int columnofs[324]; int dc_x; int dc_yl; int dc_yh; \
+       int dc_iscale; int dc_texturemid; unsigned char *dc_colormap; unsigned char \
+       *dc_source; int centery; void I_Error(const char *f, ...) { (void)f; } void \
+       R_DrawColumn(void) { int count; unsigned char *dest; int frac; int fracstep; \
+       count = dc_yh - dc_yl; if (count < 0) return; if ((unsigned)dc_x >= 320 || dc_yl \
+       < 0 || dc_yh >= 200) I_Error(\"R_DrawColumn: %i to %i at %i\", dc_yl, dc_yh, \
+       dc_x); dest = ylookup[dc_yl] + columnofs[dc_x]; fracstep = dc_iscale; frac = \
+       dc_texturemid + (dc_yl - centery) * fracstep; do { *dest = \
+       dc_colormap[dc_source[(frac >> 16) & 127]]; dest += 320; frac += fracstep; } \
+       while (count--); } int colj(int i) { int k; int s; for (k = 0; k < 128; k++) \
+       ctex[k] = (unsigned char)(k * 29 + i); for (k = 0; k < 256; k++) ccm[k] = \
+       (unsigned char)(k * 7 + (i & 15)); for (k = 0; k < 1280; k++) cfb[k] = 0; for (k \
+       = 0; k < 204; k++) ylookup[k] = cfb + ((k & 3) * 320); for (k = 0; k < 324; k++) \
+       columnofs[k] = k & 255; dc_yl = i & 63; dc_yh = dc_yl + ((i >> 6) & 3); dc_x = (i \
+       >> 8) & 255; dc_iscale = (i & 0x3FFFF) - 0x20000; dc_texturemid = (i >> 1) & \
+       0xFFFFF; centery = 100; dc_colormap = ccm; dc_source = ctex; R_DrawColumn(); s = \
+       0; for (k = 0; k < 1280; k++) s = s * 31 + cfb[k]; return s; }"
+    , "colj"
+    , 1
+      (* drawer #3's gate: the HAND R_DrawColumn vs gcc on the same .i body —
+         negative and positive iscale, the (dc_yl - centery) * fracstep MUL,
+         320-stride dest walk, count < 0 early return unreachable here but
+         the count+1 iteration shape fully exercised *)
     )
   ]
 ;;

@@ -144,3 +144,216 @@ let dither ~lum_off ~bn_off : L.obj =
         ]
   }
 ;;
+
+(* ---- R_DrawSpan / R_DrawColumn (drawers #2/#3) ----------------------------------
+   The r_draw.c bodies (RANGECHECK included — it is compiled into the shipped .i),
+   register-scheduled. Both share the shape: load the ds_*/dc_* state once into
+   registers (the C already hoists what it can; the remaining tax was pure naive
+   expression codegen), then a tight do-while. Logical >> is ROR+mask (s5.2b);
+   signed >> is ASR; the unsigned compares read C after SUB (s5.2). Loops run
+   count+1 iterations (C's post-decrement while (count--)).
+
+   Frame: SUB SP,36 — [0..15] the ABI §3 outgoing home area (live during the
+   RANGECHECK I_Error call), [16] R6, [20] R7, [24] LNK. I_Error never returns
+   (the port's setjmp-shaped exit), but the error block still parks after the BL. *)
+
+let bl_sym name = L.Call name
+let ldw_db a off = ldw a 13 off
+let bcc c l = L.Bcc (c, false, l)
+let bcc_not c l = L.Bcc (c, true, l)
+
+let span ~off ~str : L.obj =
+  let ds_y = off "ds_y"
+  and ds_x1 = off "ds_x1"
+  and ds_x2 = off "ds_x2"
+  and ds_colormap = off "ds_colormap"
+  and ds_source = off "ds_source"
+  and ds_xfrac = off "ds_xfrac"
+  and ds_yfrac = off "ds_yfrac"
+  and ds_xstep = off "ds_xstep"
+  and ds_ystep = off "ds_ystep"
+  and ylookup = off "ylookup"
+  and columnofs = off "columnofs"
+  and fmt = str "R_DrawSpan: %i to %i at %i" in
+  let l_loop = 0
+  and l_err = 1
+  and l_park = 2 in
+  { L.name = "R_DrawSpan"
+  ; frags =
+      [ alu R.Sub 14 14 (R.Imm 36)
+      ; stw 6 14 16
+      ; stw 7 14 20
+      ; stw 15 14 24 (* RANGECHECK (compiled into the shipped .i) *)
+      ; ldw_db 0 ds_x2
+      ; ldw_db 1 ds_x1
+      ; alu R.Sub 2 0 (R.Reg 1) (* count = ds_x2 - ds_x1 *)
+      ; bcc R.Lt l_err (* ds_x2 < ds_x1 *)
+      ; alu R.Sub 3 1 (R.Imm 0)
+      ; bcc R.Lt l_err (* ds_x1 < 0 *)
+      ; alu R.Sub 3 0 (R.Imm 320)
+      ; bcc_not R.Lt l_err (* ds_x2 >= 320 (nonneg here: signed ok) *)
+      ; ldw_db 3 ds_y
+      ; movi 0 200
+      ; alu R.Sub 0 0 (R.Reg 3)
+      ; bcc R.Cs l_err (* C: 200 < ds_y unsigned = (unsigned)ds_y > 200 *)
+      ; alu R.Add 7 2 (R.Imm 1)
+        (* iterations = count + 1 *)
+        (* position = ((ds_xfrac<<10) & 0xffff0000) | ((ds_yfrac>>6) & 0xffff) *)
+      ; ldw_db 2 ds_xfrac
+      ; alu R.Lsl 2 2 (R.Imm 10)
+      ]
+      @ load_const2 1 0xFFFF_0000
+      @ [ alu R.And 2 2 (R.Reg 1)
+        ; ldw_db 0 ds_yfrac
+        ; alu R.Asr 0 0 (R.Imm 6) (* signed >> *)
+        ; alu R.And 0 0 (R.Imm 0xFFFF)
+        ; alu R.Ior 2 2 (R.Reg 0) (* step, same shape (mask still in R1) *)
+        ; ldw_db 3 ds_xstep
+        ; alu R.Lsl 3 3 (R.Imm 10)
+        ; alu R.And 3 3 (R.Reg 1)
+        ; ldw_db 0 ds_ystep
+        ; alu R.Asr 0 0 (R.Imm 6)
+        ; alu R.And 0 0 (R.Imm 0xFFFF)
+        ; alu R.Ior 3 3 (R.Reg 0) (* dest = ylookup[ds_y] + columnofs[ds_x1] *)
+        ; ldw_db 0 ds_y
+        ; alu R.Lsl 0 0 (R.Imm 2)
+        ; alu R.Add 0 13 (R.Reg 0)
+        ; ldw 6 0 ylookup
+        ; ldw_db 0 ds_x1
+        ; alu R.Lsl 0 0 (R.Imm 2)
+        ; alu R.Add 0 13 (R.Reg 0)
+        ; ldw 0 0 columnofs
+        ; alu R.Add 6 6 (R.Reg 0)
+        ; ldw_db 4 ds_source
+        ; ldw_db 5 ds_colormap
+        ; L.Label l_loop (* spot = ((position>>4) & 0x0fc0) | (position>>26) *)
+        ; alu R.Ror 0 2 (R.Imm 4)
+        ; alu R.And 0 0 (R.Imm 0x0FC0)
+        ; alu R.Ror 1 2 (R.Imm 26)
+        ; alu R.And 1 1 (R.Imm 0x3F)
+        ; alu R.Ior 0 0 (R.Reg 1) (* *dest++ = ds_colormap[ds_source[spot]] *)
+        ; alu R.Add 0 4 (R.Reg 0)
+        ; ldb 0 0 0
+        ; alu R.Add 0 5 (R.Reg 0)
+        ; ldb 0 0 0
+        ; ins (R.Store { size = R.B; a = 0; base = 6; off = 0 })
+        ; alu R.Add 6 6 (R.Imm 1)
+        ; alu R.Add 2 2 (R.Reg 3) (* position += step *)
+        ; alu R.Sub 7 7 (R.Imm 1)
+        ; bcc_not R.Eq l_loop
+        ; ldw 6 14 16
+        ; ldw 7 14 20
+        ; ldw 15 14 24
+        ; alu R.Add 14 14 (R.Imm 36)
+        ; ret
+        ; L.Label l_err
+        ; ldw_db 1 ds_x1
+        ; ldw_db 2 ds_x2
+        ; ldw_db 3 ds_y
+        ]
+      @ load_const2 0 fmt
+      @ [ alu R.Add 0 13 (R.Reg 0)
+        ; bl_sym "I_Error" (* never returns (setjmp-shaped exit) *)
+        ; L.Label l_park
+        ; L.Jmp l_park
+        ]
+  }
+;;
+
+let column ~off ~str : L.obj =
+  let dc_x = off "dc_x"
+  and dc_yl = off "dc_yl"
+  and dc_yh = off "dc_yh"
+  and dc_iscale = off "dc_iscale"
+  and dc_texturemid = off "dc_texturemid"
+  and dc_colormap = off "dc_colormap"
+  and dc_source = off "dc_source"
+  and centery = off "centery"
+  and ylookup = off "ylookup"
+  and columnofs = off "columnofs"
+  and fmt = str "R_DrawColumn: %i to %i at %i" in
+  let l_loop = 0
+  and l_err = 1
+  and l_park = 2
+  and l_out = 3 in
+  { L.name = "R_DrawColumn"
+  ; frags =
+      [ alu R.Sub 14 14 (R.Imm 36)
+      ; stw 6 14 16
+      ; stw 7 14 20
+      ; stw 15 14 24
+      ; ldw_db 0 dc_yh
+      ; ldw_db 1 dc_yl
+      ; alu R.Sub 7 0 (R.Reg 1) (* count = dc_yh - dc_yl *)
+      ; bcc R.Lt l_out
+        (* count < 0: return *)
+        (* RANGECHECK *)
+      ; ldw_db 2 dc_x
+      ; alu R.Sub 3 2 (R.Imm 320)
+      ; bcc_not R.Cs l_err (* ~C: dc_x >= 320 unsigned *)
+      ; alu R.Sub 3 1 (R.Imm 0)
+      ; bcc R.Lt l_err (* dc_yl < 0 *)
+      ; alu R.Sub 3 0 (R.Imm 200)
+      ; bcc_not R.Lt l_err (* dc_yh >= 200 *)
+      ; alu R.Add 7 7 (R.Imm 1)
+        (* iterations = count + 1 *)
+        (* dest = ylookup[dc_yl] + columnofs[dc_x] *)
+      ; alu R.Lsl 0 1 (R.Imm 2)
+      ; alu R.Add 0 13 (R.Reg 0)
+      ; ldw 6 0 ylookup
+      ; alu R.Lsl 0 2 (R.Imm 2)
+      ; alu R.Add 0 13 (R.Reg 0)
+      ; ldw 0 0 columnofs
+      ; alu R.Add 6 6 (R.Reg 0)
+        (* fracstep; frac = dc_texturemid + (dc_yl - centery) * fracstep *)
+      ; ldw_db 3 dc_iscale
+      ; ldw_db 0 centery
+      ; alu R.Sub 2 1 (R.Reg 0) (* dc_yl - centery *)
+      ; alu R.Mul 2 2 (R.Reg 3)
+      ; ldw_db 0 dc_texturemid
+      ; alu R.Add 2 0 (R.Reg 2) (* frac *)
+      ; ldw_db 4 dc_source
+      ; ldw_db 5 dc_colormap
+      ; L.Label l_loop
+      ; alu R.Ror 0 2 (R.Imm 16) (* (frac >> 16) & 127 *)
+      ; alu R.And 0 0 (R.Imm 127)
+      ; alu R.Add 0 4 (R.Reg 0)
+      ; ldb 0 0 0
+      ; alu R.Add 0 5 (R.Reg 0)
+      ; ldb 0 0 0
+      ; ins (R.Store { size = R.B; a = 0; base = 6; off = 0 })
+      ; alu R.Add 6 6 (R.Imm 320) (* dest += SCREENWIDTH *)
+      ; alu R.Add 2 2 (R.Reg 3) (* frac += fracstep *)
+      ; alu R.Sub 7 7 (R.Imm 1)
+      ; bcc_not R.Eq l_loop
+      ; L.Label l_out
+      ; ldw 6 14 16
+      ; ldw 7 14 20
+      ; ldw 15 14 24
+      ; alu R.Add 14 14 (R.Imm 36)
+      ; ret
+      ; L.Label l_err
+      ; ldw_db 1 dc_yl
+      ; ldw_db 2 dc_yh
+      ; ldw_db 3 dc_x
+      ]
+      @ load_const2 0 fmt
+      @ [ alu R.Add 0 13 (R.Reg 0); bl_sym "I_Error"; L.Label l_park; L.Jmp l_park ]
+  }
+;;
+
+(* Build every drawer whose data symbols resolve; each is independent — a sample
+   (or a tree) lacking a drawer's globals simply keeps its compiled version. *)
+let build ~(off : string -> int option) ~(str : string -> int option) : L.obj list =
+  let req f name =
+    match f name with
+    | Some v -> v
+    | None -> raise Exit
+  in
+  let try_build b =
+    try [ b ~off:(req off) ~str:(req str) ] with
+    | Exit -> []
+  in
+  let dither_b ~off ~str:_ = dither ~lum_off:(off "__dg_lum") ~bn_off:(off "__dg_bn64") in
+  try_build dither_b @ try_build span @ try_build column
+;;

@@ -16,3 +16,15 @@
     R0-R5 and R12 (blob-internal, outside every compiled allocation pool) beyond the
     standard caller-saved set; saves/restores R6-R11 + LNK. *)
 val dither : lum_off:int -> bn_off:int -> Linker.obj
+
+(** [R_DrawSpan] — drawer #2 (34.0% of the frame at ~20 instrs/px compiled; the hand
+    loop runs 13). Faithful to the shipped .i including the RANGECHECK I_Error path. *)
+val span : off:(string -> int) -> str:(string -> int) -> Linker.obj
+
+(** [R_DrawColumn] — drawer #3 (15.9% at ~17 instrs/px compiled; hand loop 11). *)
+val column : off:(string -> int) -> str:(string -> int) -> Linker.obj
+
+(** Every drawer whose data symbols resolve ([off] = {!Globals.offset_of_name},
+    [str] = the interned-string table): each independent, missing symbols skip that
+    drawer. The caller replaces same-named compiled objs with these at link set. *)
+val build : off:(string -> int option) -> str:(string -> int option) -> Linker.obj list
