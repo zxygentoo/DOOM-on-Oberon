@@ -17,6 +17,7 @@
 
 module M = Emu.Risc
 module F = Emu.Risc.For_tests
+module Isa = Emu.Risc5_isa
 module H = Emu.Headless
 
 (* ABI §8, the himem layout. *)
@@ -50,7 +51,12 @@ let steps_per_ms = ref 44_000
 let max_steps = ref 2_000_000_000
 let blob_args = ref ""
 let dump_at = ref ""
+let profile_out = ref ""
 let inputs = ref []
+
+(* -profile state: counts.(w) = executions of code word [base_word + w] *)
+let profile_counts = ref [||]
+let profile_base_word = ref 0
 
 let rec parse_args = function
   | "-ticks" :: n :: rest -> set_int ticks n rest
@@ -65,6 +71,14 @@ let rec parse_args = function
        finishes through G_CheckDemoStatus's I_Error ("timed N gametics ..." on
        the console, SHARED status negative) — that unwind is the SUCCESS path. *)
     blob_args := s;
+    parse_args rest
+  | "-profile" :: p :: rest ->
+    (* the emulator flat profile (the 1d perf campaign's Amdahl instrument):
+       count PC hits per code word during the Tick loop (Init excluded — the
+       frame is what matters), then aggregate by doom.blob.map symbol ranges
+       and weight the STATIC per-word opcode classes by the dynamic counts —
+       the exact dynamic instruction mix at zero per-step decode cost. *)
+    profile_out := p;
     parse_args rest
   | "-dump-at" :: s :: rest ->
     (* comma list of GAMETICS (needs -args "-timedemo demo1": singletics makes
@@ -140,6 +154,11 @@ let call_entry m name entry_addr ~r0 ~r1 =
       let pc_before = F.pc m in
       F.single_step m;
       incr total_steps;
+      (let c = !profile_counts in
+       if Array.length c > 0
+       then (
+         let w = pc_before - !profile_base_word in
+         if w >= 0 && w < Array.length c then c.(w) <- c.(w) + 1));
       if !total_steps mod !steps_per_ms = 0
       then (
         incr sim_ms;
@@ -165,6 +184,125 @@ let dump_raw m path =
     Bytes.set_int32_le b (4 * w) (Int32.of_int ram.(fb_word_base + w))
   done;
   Out_channel.with_open_bin path (fun oc -> Out_channel.output_bytes oc b)
+;;
+
+(* ---- the flat profile report ---- *)
+
+(* doom.blob.map: "# ..." header lines, then "0xADDR name" per code symbol,
+   ascending — a symbol owns [addr, next addr). *)
+let parse_map path =
+  let syms = ref [] in
+  In_channel.with_open_text path (fun ic ->
+    try
+      while true do
+        let line = input_line ic in
+        if String.length line > 0 && line.[0] <> '#'
+        then (
+          match String.index_opt line ' ' with
+          | Some sp ->
+            let addr = int_of_string (String.sub line 0 sp) in
+            let name = String.sub line (sp + 1) (String.length line - sp - 1) in
+            syms := (addr, name) :: !syms
+          | None -> ())
+      done
+    with
+    | End_of_file -> ());
+  Array.of_list (List.rev !syms)
+;;
+
+type klass =
+  | Load
+  | Store
+  | Branch
+  | Muldiv
+  | Alu
+
+let klass_of_word w =
+  match Isa.decode w with
+  | Isa.Load _ -> Load
+  | Isa.Store _ -> Store
+  | Isa.Branch _ -> Branch
+  | Isa.Alu { op = Isa.Mul | Isa.Div; _ } -> Muldiv
+  | Isa.Alu _ -> Alu
+;;
+
+let write_profile ~blob ~map_path ~ticks_run out =
+  let counts = !profile_counts in
+  let base_word = !profile_base_word in
+  let syms = parse_map map_path in
+  let n = Array.length syms in
+  let s_instr = Array.make n 0
+  and s_load = Array.make n 0
+  and s_store = Array.make n 0
+  and s_br = Array.make n 0
+  and s_md = Array.make n 0 in
+  let total = ref 0
+  and t_load = ref 0
+  and t_store = ref 0
+  and t_br = ref 0
+  and t_md = ref 0 in
+  (* counts ascend by address, so the symbol cursor walks monotonically *)
+  let si = ref 0 in
+  Array.iteri
+    (fun w c ->
+       if c > 0
+       then (
+         let addr = (base_word + w) * 4 in
+         while !si + 1 < n && fst syms.(!si + 1) <= addr do
+           incr si
+         done;
+         let k = klass_of_word (word_of_bytes blob (addr - blob_base)) in
+         s_instr.(!si) <- s_instr.(!si) + c;
+         total := !total + c;
+         let bump s t =
+           s.(!si) <- s.(!si) + c;
+           t := !t + c
+         in
+         match k with
+         | Load -> bump s_load t_load
+         | Store -> bump s_store t_store
+         | Branch -> bump s_br t_br
+         | Muldiv -> bump s_md t_md
+         | Alu -> ()))
+    counts;
+  let order = Array.init n (fun i -> i) in
+  Array.sort (fun a b -> compare s_instr.(b) s_instr.(a)) order;
+  Out_channel.with_open_text out (fun oc ->
+    let p fmt = Printf.fprintf oc fmt in
+    let pct x = 100.0 *. float_of_int x /. float_of_int (max 1 !total) in
+    p
+      "# doomrun flat profile — %d instrs over %d ticks (%d instrs/tick)\n"
+      !total
+      ticks_run
+      (!total / max 1 ticks_run);
+    p
+      "# mix: loads %.1f%%  stores %.1f%%  branches %.1f%%  mul/div %.1f%%  (mem total \
+       %.1f%%)\n"
+      (pct !t_load)
+      (pct !t_store)
+      (pct !t_br)
+      (pct !t_md)
+      (pct (!t_load + !t_store));
+    p "#  rank    instrs    %%    cum%%   ld%%   st%%   br%%  name\n";
+    let cum = ref 0 in
+    Array.iteri
+      (fun rank i ->
+         if rank < 45 && s_instr.(i) > 0
+         then (
+           cum := !cum + s_instr.(i);
+           let fp x = 100.0 *. float_of_int x /. float_of_int (max 1 s_instr.(i)) in
+           p
+             "%6d %9d %5.1f  %5.1f  %4.1f  %4.1f  %4.1f  %s\n"
+             (rank + 1)
+             s_instr.(i)
+             (pct s_instr.(i))
+             (pct !cum)
+             (fp s_load.(i))
+             (fp s_store.(i))
+             (fp s_br.(i))
+             (snd syms.(i))))
+      order);
+  Printf.eprintf "doomrun: profile -> %s\n%!" out
 ;;
 
 (* ---- framebuffer dump: PGM P5, fb bottom-up flipped, bit 0 leftmost ---- *)
@@ -270,6 +408,13 @@ let () =
   in
   (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
   if List.mem 1 gametic_targets then dump_gametic 1;
+  (* -profile: count from the first Tick on (Init excluded — frames are the cost) *)
+  if !profile_out <> ""
+  then (
+    let code_start = blob_base + 64
+    and bss_start = word 12 in
+    profile_base_word := code_start / 4;
+    profile_counts := Array.make ((bss_start - code_start) / 4) 0);
   (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
@@ -300,5 +445,12 @@ let () =
     (status ())
     (heartbeat ())
     !total_steps
-    !sim_ms
+    !sim_ms;
+  if !profile_out <> ""
+  then
+    write_profile
+      ~blob
+      ~map_path:(blob_path ^ ".map")
+      ~ticks_run:(heartbeat ())
+      !profile_out
 ;;
