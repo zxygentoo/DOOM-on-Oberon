@@ -2,3 +2,6 @@
 	path = vendor/oberon-risc-emu-ocaml
 	url = https://github.com/zxygentoo/oberon-risc-emu-ocaml.git
 	branch = develop
+[submodule "sim/oberon-risc-hardcaml"]
+	path = sim/vendor/oberon-risc-hardcaml
+	url = https://github.com/zxygentoo/oberon-risc-hardcaml.git

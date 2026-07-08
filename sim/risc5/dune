@@ -1,0 +1,17 @@
+; Re-expose the vendored design's target-independent core (lib/) as `risc5`
+; in this project — mirrors the submodule's own lib/dune (inline expect tests
+; ride along, compiled here; run them upstream, not from this root). Third
+; party to this project: warnings off.
+
+(copy_files ../vendor/oberon-risc-hardcaml/lib/*.ml)
+
+(copy_files ../vendor/oberon-risc-hardcaml/lib/*.mli)
+
+(library
+ (name risc5)
+ (flags
+  (:standard -w -a))
+ (libraries hardcaml hardcaml_waveterm qcheck-core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_hardcaml ppx_expect)))

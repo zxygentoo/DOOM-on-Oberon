@@ -11,3 +11,5 @@ frame_*.pgm
 host/build32/
 host/golden
 *.fbw
+doomboot.rom
+sim_*.fbw

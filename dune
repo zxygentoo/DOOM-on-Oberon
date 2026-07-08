@@ -1,0 +1,8 @@
+; sim/ is a SEPARATE dune root (the Cyclesim leg, AGENT.md 1d): it vendors the
+; oberon-risc-hardcaml design and builds on the OxCaml switch where the
+; hardcaml v0.18-preview suite lives — while this workspace stays on the stock
+; default switch (goblint-cil, the jig, the emulator). The two meet as files:
+; doom.blob + doom1.wad + doomboot.rom in, .fbw frames + cycle counts out.
+;   build it:  opam exec --switch=5.2.0+ox -- dune build --root sim
+
+(dirs :standard \ sim)

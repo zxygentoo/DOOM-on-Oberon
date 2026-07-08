@@ -1,0 +1,6 @@
+; The vendored oberon-risc-hardcaml design is its own dune project and stays
+; PRISTINE — raw data here; sim/risc5 and sim/nexys4 compile its sources into
+; this project (the same pattern as the main workspace's vendor/emu). Its own
+; nested vendor/ (the emulator submodule, uninitialized) is never scanned.
+
+(data_only_dirs oberon-risc-hardcaml)

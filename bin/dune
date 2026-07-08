@@ -27,3 +27,11 @@
 
 (executable
  (name bluenoise))
+
+; doomboot — the Cyclesim boot ROM stub (1d sim leg): ~30 eDSL words that call
+; the blob's crt0 entries and report progress via the SHARED page. The third
+; artifact crossing the sim seam, next to doom.blob and doom1.wad.
+
+(executable
+ (name doomboot)
+ (libraries doomcc_core emu))
