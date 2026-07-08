@@ -21,3 +21,9 @@
 (executable
  (name doomrun)
  (libraries emu))
+
+; bluenoise — void-and-cluster threshold-map generator (host tooling): emits
+; the __dg_bn64 table baked into libc/dither.c. Deterministic; see the file.
+
+(executable
+ (name bluenoise))

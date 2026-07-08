@@ -1,0 +1,13 @@
+diff --git a/doomgeneric/i_video.c b/doomgeneric/i_video.c
+index 84bebde..f938c2d 100644
+--- a/doomgeneric/i_video.c
++++ b/doomgeneric/i_video.c
+@@ -119,7 +119,7 @@ int mouse_threshold = 10;
+ 
+ // Gamma correction level to use
+ 
+-int usegamma = 0;
++int usegamma = 2;
+ 
+ typedef struct
+ {

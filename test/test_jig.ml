@@ -1315,23 +1315,23 @@ let port_selfchecks =
        , [ 0, 1; 2, 1 ] )
      ; ( "unsigned char pal[1024]; unsigned char fr[32]; unsigned int ob[4]; unsigned \
           int oc[4]; int kd1(int i){ int k; int r; for (k = 0; k < 1024; k++) pal[k] = \
-          0; pal[4] = 255; pal[5] = 255; pal[6] = 255; pal[8] = 128; pal[9] = 128; \
-          pal[10] = 128; __dg_build_lut(pal); for (k = 0; k < 8; k++) fr[k] = 0; for (k \
-          = 8; k < 16; k++) fr[k] = 1; for (k = 16; k < 32; k++) fr[k] = 2; \
-          __dg_dither(fr, 16, 2, ob, 1); r = (ob[0] == 0xFFFF0000u) + (ob[1] == \
-          0xFFFF0000u) * 2 + (ob[2] == 0xCCCCCCCCu) * 4 + (ob[3] == 0xCCCCCCCCu) * 8; \
-          __dg_dither(fr, 16, 2, oc + 3, -1); r += (oc[3] == 0xFFFF0000u) * 16 + (oc[2] \
-          == 0xFFFF0000u) * 32 + (oc[1] == 0xCCCCCCCCu) * 64 + (oc[0] == 0xCCCCCCCCu) * \
-          128; return r + (i - i); }"
+          0; pal[4] = 255; pal[5] = 255; pal[6] = 255; __dg_build_lut(pal); for (k = 0; \
+          k < 8; k++) fr[k] = 0; for (k = 8; k < 16; k++) fr[k] = 1; for (k = 16; k < \
+          32; k++) fr[k] = (k & 1) ? 0 : 1; __dg_dither(fr, 16, 2, ob, 1); r = (ob[0] == \
+          0xFFFF0000u) + (ob[1] == 0xFFFF0000u) * 2 + (ob[2] == 0x33333333u) * 4 + \
+          (ob[3] == 0x33333333u) * 8; __dg_dither(fr, 16, 2, oc + 3, -1); r += (oc[3] == \
+          0xFFFF0000u) * 16 + (oc[2] == 0xFFFF0000u) * 32 + (oc[1] == 0x33333333u) * 64 \
+          + (oc[0] == 0x33333333u) * 128; return r + (i - i); }"
        , "kd1"
-         (* the dither semantics, hand-computed. Palette: 0=black, 1=white, 2=mid
-            gray (lum 0/255/128 by the sum-256 weights). Row 0 = 8 black + 8 white
-            source px -> doubled word 0xFFFF0000 (LSB = LEFTMOST: low 16 bits are
-            the black half). Row 1 = 16x gray: Bayer row 1 thresholds
-            {200,72,232,104}, 128 beats cols 1,3 -> bit pairs 00 11 00 11 = 0xCC
-            per byte -> 0xCCCCCCCC. Each word stored to BOTH output lines (2x2
-            doubling). Second pass: same frame, dst = oc+3, stride = -1 — the
-            bottom-up flip as the machine uses it, same words mirror-ordered. *)
+         (* the dither semantics, hand-computed from the ENDPOINTS ONLY (lum 0
+            never fires, 255 always does — the 1..254 threshold-range contract),
+            so the vectors hold for any map, Bayer or blue noise. Row 0 = 8 black
+            + 8 white source px -> doubled word 0xFFFF0000 (LSB = LEFTMOST: the
+            low 16 bits are the black half). Row 1 = alternating white/black px
+            -> bit pairs 11 00 11 00 ... = 0x33333333 (pins per-pixel doubling).
+            Each word stored to BOTH output lines (2x2 doubling). Second pass:
+            same frame, dst = oc+3, stride = -1 — the bottom-up flip as the
+            machine uses it, same words mirror-ordered. *)
        , [ 0, 255; 4, 255 ] )
      ; ( "unsigned int env1[9]; int jhelp(int n){ if (n == 0) __longjmp(env1, 42); \
           return jhelp(n - 1) + 1; } int sj1(int i){ int r; int acc; acc = 0; r = \
