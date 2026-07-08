@@ -27,6 +27,18 @@ void *memcpy(void *dst, const void *src, size_t n)
 {
     char *d = dst;
     const char *s = src;
+    /* Word fast path — the 1d flat profile found the byte loop carrying 22%
+     * of every frame (I_FinishUpdate's 64 KB screen copy and friends, ~5
+     * instrs/byte). Bulk copies in DOOM are word-aligned in practice; when
+     * both pointers are, move 4 bytes per iteration and leave the tail (and
+     * any unaligned call) to the byte loop below. */
+    if ((((unsigned)d | (unsigned)s) & 3u) == 0) {
+        unsigned *dw = (unsigned *)d;
+        const unsigned *sw = (const unsigned *)s;
+        while (n >= 4) { *dw++ = *sw++; n -= 4; }
+        d = (char *)dw;
+        s = (const char *)sw;
+    }
     while (n) { *d++ = *s++; n--; }
     return dst;
 }

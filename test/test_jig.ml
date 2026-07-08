@@ -1040,6 +1040,17 @@ let libc_samples =
     [ ( "int mcp(int i){ char b[8]; memcpy(b, \"ABCDEFG\", 8); return b[i & 7]; }"
       , "mcp"
       , 1 (* memcpy from a string literal into a frame buffer *) )
+    ; ( "int mcpw(int i){ char a[40]; char b[40]; int k; int s; for (k = 0; k < 40; k++) \
+         { a[k] = (char)(k * 7 + i); b[k] = (char)(100 - k); } memcpy(b + ((i >> 2) & \
+         3), a + (i & 3), 1 + (i & 31)); s = 0; for (k = 0; k < 40; k++) s = s * 31 + \
+         b[k]; return s; }"
+      , "mcpw"
+      , 1
+        (* the word-fast-path gate: every src/dst alignment pair ((i&3) x
+           ((i>>2)&3)) x lengths 1..32 — word runs, byte tails, unaligned
+           fallbacks — hashed over the WHOLE dst so overruns and missed
+           tails can't hide; diffed against glibc *)
+      )
     ; ( "int mmv(int i){ char b[10]; int k; for (k = 0; k < 10; k++) b[k] = k + (i & 7); \
          if (i & 1) memmove(b + 2, b, 6); else memmove(b, b + 2, 6); return b[i & 7]; }"
       , "mmv"
