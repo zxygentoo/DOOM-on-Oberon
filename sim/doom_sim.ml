@@ -62,9 +62,20 @@ let create ~contents (i : _ I.t) : _ O.t =
   let soc =
     Soc.create
       ~contents
+      (* the SHIPPED bitstream config (emit_verilog.ml) — measure the real
+         machine, not the poor-performance soc.ml defaults: 60 MHz ms clock,
+         Phase-9 pipelined DSP multipliers, the full 10a-10d memory arc
+         (icache + write-update snoop + depth-2 write buffer). fb_bram is
+         moot with ~video:false (no DMA to serve); rc/wc are the rc=6 trade. *)
+      ~clocks_per_ms:60000
       ~read_cycles:6
       ~write_cycles:5
+      ~fast_mul:true
+      ~mul_stages:2
       ~icache:true
+      ~write_update:true
+      ~write_buffer:true
+      ~wbuf_depth:2
       ~video:false
       { Soc.I.clock = i.clock
       ; pclk = i.pclk
