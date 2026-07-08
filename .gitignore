@@ -14,3 +14,4 @@ host/golden
 doomboot.rom
 sim_*.fbw
 DOOM.dsk
+dskrun_*.pgm

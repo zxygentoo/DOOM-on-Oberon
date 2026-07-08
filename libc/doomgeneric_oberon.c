@@ -99,11 +99,12 @@ void DG_KeyEnqueue(int pressed, unsigned char key)
  *     palette_changed signals it and the LUT rebuilds — §5's "14 precomputed
  *     LUTs" simplified to one-LUT-on-change (the next frame dithers through
  *     the new palette, which is the visible flash);
- *   - the target rect: 640x400 centered on the 1024x768 1-bit framebuffer.
- *     Origin = screen (192,184); Oberon's framebuffer is BOTTOM-UP (screen
- *     line y lives at fb line 767-y, bit 0 leftmost), so the top-left word is
- *     fb word (767-184)*32 + 192/32 = 583*32 + 6 and the stride is -32 words
- *     per screen line. Everything word-aligned: 192 px = 6 words, 640 = 20. */
+ *   - the target: the WHOLE 1024x768 panel (dither.c's fullscreen kernel,
+ *     3.2 x 3.84 = DOOM's authentic 4:3 CRT aspect). Oberon's framebuffer is
+ *     BOTTOM-UP (screen line y lives at fb line 767-y, bit 0 leftmost), so
+ *     the screen's top-left word is fb word 767*32 and the stride is -32
+ *     words per screen line. Every fb word is written each frame — no border
+ *     to keep clean. */
 
 struct color {
     uint32_t b:8;
@@ -118,8 +119,7 @@ extern unsigned char *DG_ScreenBuffer;
 extern char *__fb_base;                 /* heap_doom.c binds 0xE7F00 */
 
 extern void __dg_build_lut(const unsigned char *pal);
-extern void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst,
-                        int stride);
+extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);
 
 void DG_DrawFrame(void)
 {
@@ -127,8 +127,7 @@ void DG_DrawFrame(void)
         __dg_build_lut((const unsigned char *)colors);
         palette_changed = 0;
     }
-    __dg_dither(DG_ScreenBuffer, 320, 200,
-                (unsigned int *)__fb_base + (583 * 32 + 6), -32);
+    __dg_dither_fs(DG_ScreenBuffer, (unsigned int *)__fb_base + 767 * 32, -32);
 }
 
 /* ---- chrome ---- */

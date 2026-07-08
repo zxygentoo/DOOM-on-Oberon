@@ -327,3 +327,52 @@ void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int 
         dst += 2 * stride;
     }
 }
+
+/* ---- the fullscreen kernel: 320x200 -> the whole 1024x768 panel ----
+ *
+ * Scale 3.2 x 3.84 — and 3.84/3.2 = 1.2, exactly VGA mode 13h's pixel aspect:
+ * DOOM authored 320x200 for a 4:3 CRT, so the full stretch RESTORES the
+ * original proportions (the 2x2 kernel's square pixels were the squished
+ * rendition). Still ONE dither decision per source pixel, replicated into
+ * 3-or-4 output columns and 3-or-4 output lines:
+ *   - horizontally, 10 source px fill exactly one 32-bit word (3+3+3+3+4
+ *     bits, twice) — the per-position replication masks below, LSB leftmost;
+ *   - vertically, 25 source lines fill exactly 96 output lines — a Bresenham
+ *     accumulator deals the 3s and 4s (200 lines -> 768 exactly).
+ * Same contract as above: [dst] = the screen top-left word, [stride] = words
+ * per screen line DOWNWARD (the machine passes -32; the jig, small positives
+ * into plain arrays). */
+
+static const unsigned int __dg_m10[10] = {
+    0x00000007u, 0x00000038u, 0x000001C0u, 0x00000E00u, 0x0000F000u,
+    0x00070000u, 0x00380000u, 0x01C00000u, 0x0E000000u, 0xF0000000u,
+};
+
+void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
+{
+    int sy, k, j, sx, rep, acc;
+    unsigned int line[32];
+    acc = 0;
+    for (sy = 0; sy < 200; sy++) {
+        const unsigned char *row = __dg_bn64 + 64 * (sy & 63);
+        sx = 0;
+        for (k = 0; k < 32; k++) {
+            unsigned int bits = 0;
+            for (j = 0; j < 10; j++) {
+                if (__dg_lum[src[sx]] > row[sx & 63])
+                    bits |= __dg_m10[j];
+                sx++;
+            }
+            line[k] = bits;
+        }
+        acc += 96;
+        rep = 0;
+        while (acc >= 25) { acc -= 25; rep++; }   /* 3 or 4 output lines */
+        while (rep--) {
+            for (k = 0; k < 32; k++)
+                dst[k] = line[k];
+            dst += stride;
+        }
+        src += 320;
+    }
+}

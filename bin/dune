@@ -35,3 +35,11 @@
 (executable
  (name doomboot)
  (libraries doomcc_core emu))
+
+; dskrun — boot a .dsk in-process and drive the booted system with a scripted
+; timeline: raw PS/2 bytes, middle-clicks, ABI par-8 SHARED probes, PGM dumps.
+; The on-system complement of doomrun's -keys. See bin/dskrun.ml.
+
+(executable
+ (name dskrun)
+ (libraries emu))

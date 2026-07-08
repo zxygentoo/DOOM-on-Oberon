@@ -1348,7 +1348,8 @@ let port_prelude =
    *pressed, unsigned char *key); extern unsigned int DG_GetTicksMs(); extern void \
    DG_SleepMs(unsigned int ms); extern void DG_DrawFrame(void); extern void \
    __dg_build_lut(const unsigned char *pal); extern void __dg_dither(const unsigned char \
-   *src, int w, int h, unsigned int *dst, int stride); extern int Init(int wad_addr, int \
+   *src, int w, int h, unsigned int *dst, int stride); extern void __dg_dither_fs(const \
+   unsigned char *src, unsigned int *dst, int stride); extern int Init(int wad_addr, int \
    cfg_addr); extern int Tick(void); extern void KeyIn(int ev); extern void exit(int \
    status); extern int __setjmp(unsigned int *env); extern void __longjmp(unsigned int \
    *env, int val); extern unsigned int __exit_env[9]; "
@@ -1497,29 +1498,47 @@ let port_selfchecks =
 ;;
 
 (* the full-machine-shape witness: DG_DrawFrame itself — the palette_changed
-   protocol and the real rect geometry (origin word 583*32+6, stride -32, 400
-   lines x 20 words) — against a sentinel-fenced framebuffer. All-black palette:
-   the rect goes 0 and the four fence words (left/right/above/below the rect)
-   survive; then color 0 -> white, palette_changed re-raised: the rect goes all-1
-   through the rebuilt LUT and the flag reads cleared. Two full 320x200 blits
-   ~3.5M instrs: its own list, run with an explicit step budget. *)
+   protocol and the real FULLSCREEN geometry (screen top-left = fb word 767*32,
+   stride -32, every one of the 32x768 words written) — fences sit OUTSIDE the
+   panel now (fb[-1] / fb[768*32]), since the blit owns the whole framebuffer.
+   All-black palette: the panel goes 0, corners overwritten, fences survive;
+   then color 0 -> white, palette_changed re-raised: all-1 through the rebuilt
+   LUT and the flag reads cleared. Two full blits ~3M instrs: its own list,
+   run with an explicit step budget.
+
+   kdf pins the fullscreen kernel's SEMANTICS from the endpoints only (lum 0
+   never fires, 255 always — map-agnostic): the 3/3/3/3/4 replication masks
+   (white source px 0/4/9 -> word 0xF000F007, LSB leftmost), the Bresenham
+   3-vs-4 line dealing (source line 0 -> 3 output lines, line 1 -> 4 — acc
+   96/25), and the stride-as-flip contract at the machine's -32. *)
 let port_selfchecks_big =
   [ ( port_prelude
       ^ "unsigned char sbuf[64000]; int kd2(int i){ unsigned int *fb; int k; int r; fb = \
          (unsigned int *)__fb_base; r = 0; DG_ScreenBuffer = sbuf; for (k = 0; k < \
          64000; k++) sbuf[k] = 0; for (k = 0; k < 256; k++) { colors[k].b = 0; \
          colors[k].g = 0; colors[k].r = 0; colors[k].a = 0; } palette_changed = 1; \
-         fb[583 * 32 + 5] = 0x12345678u; fb[583 * 32 + 26] = 0x12345678u; fb[584 * 32 + \
-         6] = 0x12345678u; fb[183 * 32 + 6] = 0x12345678u; DG_DrawFrame(); r += \
-         (palette_changed == 0); r += (fb[583 * 32 + 6] == 0) * 2; r += (fb[184 * 32 + \
-         25] == 0) * 4; r += (fb[583 * 32 + 5] == 0x12345678u) * 8; r += (fb[583 * 32 + \
-         26] == 0x12345678u) * 16; r += (fb[584 * 32 + 6] == 0x12345678u) * 32; r += \
-         (fb[183 * 32 + 6] == 0x12345678u) * 64; colors[0].b = 255; colors[0].g = 255; \
-         colors[0].r = 255; palette_changed = 1; DG_DrawFrame(); r += (fb[583 * 32 + 6] \
-         == 0xFFFFFFFFu) * 128; r += (fb[184 * 32 + 25] == 0xFFFFFFFFu) * 256; return r \
-         + (i - i); }"
+         fb[-1] = 0x12345678u; fb[768 * 32] = 0x12345678u; fb[0] = 0xAAAAAAAAu; fb[767 * \
+         32 + 31] = 0xAAAAAAAAu; DG_DrawFrame(); r += (palette_changed == 0); r += \
+         (fb[0] == 0) * 2; r += (fb[767 * 32] == 0) * 4; r += (fb[767 * 32 + 31] == 0) * \
+         8; r += (fb[400 * 32 + 16] == 0) * 16; r += (fb[-1] == 0x12345678u) * 32; r += \
+         (fb[768 * 32] == 0x12345678u) * 64; colors[0].b = 255; colors[0].g = 255; \
+         colors[0].r = 255; palette_changed = 1; DG_DrawFrame(); r += (fb[0] == \
+         0xFFFFFFFFu) * 128; r += (fb[767 * 32 + 31] == 0xFFFFFFFFu) * 256; return r + \
+         (i - i); }"
     , "kd2"
     , [ 0, 511; 1, 511 ] )
+  ; ( port_prelude
+      ^ "unsigned char fpal[1024]; unsigned char fsrc[64000]; unsigned int ofb[24576]; \
+         int kdf(int i){ int k; int r; for (k = 0; k < 1024; k++) fpal[k] = 0; fpal[4] = \
+         255; fpal[5] = 255; fpal[6] = 255; __dg_build_lut(fpal); for (k = 0; k < 64000; \
+         k++) fsrc[k] = 0; fsrc[0] = 1; fsrc[4] = 1; fsrc[9] = 1; for (k = 320; k < 640; \
+         k++) fsrc[k] = 1; __dg_dither_fs(fsrc, ofb + 767 * 32, -32); r = (ofb[767 * 32] \
+         == 0xF000F007u); r += (ofb[766 * 32] == 0xF000F007u) * 2; r += (ofb[765 * 32] \
+         == 0xF000F007u) * 4; r += (ofb[767 * 32 + 1] == 0) * 8; r += (ofb[764 * 32] == \
+         0xFFFFFFFFu) * 16; r += (ofb[761 * 32 + 31] == 0xFFFFFFFFu) * 32; r += (ofb[760 \
+         * 32] == 0) * 64; r += (ofb[0] == 0) * 128; return r + (i - i); }"
+    , "kdf"
+    , [ 0, 255; 2, 255 ] )
   ]
 ;;
 

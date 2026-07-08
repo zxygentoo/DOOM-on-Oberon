@@ -52,6 +52,7 @@ let max_steps = ref 2_000_000_000
 let blob_args = ref ""
 let dump_at = ref ""
 let profile_out = ref ""
+let keys_spec = ref ""
 let inputs = ref []
 
 (* -profile state: counts.(w) = executions of code word [base_word + w] *)
@@ -79,6 +80,13 @@ let rec parse_args = function
        and weight the STATIC per-word opcode classes by the dynamic counts —
        the exact dynamic instruction mix at zero per-step decode cost. *)
     profile_out := p;
+    parse_args rest
+  | "-keys" :: s :: rest ->
+    (* scripted input: comma list of tick:doomkey:pressed (all decimal) —
+       each event goes through the real KeyIn entry (ev = pressed | key<<8,
+       ABI §7) just before that Tick, so the whole ring/responder/menu path
+       is drivable headlessly, e.g. menu quit: 27 Esc, 113 'q', 121 'y' *)
+    keys_spec := s;
     parse_args rest
   | "-dump-at" :: s :: rest ->
     (* comma list of GAMETICS (needs -args "-timedemo demo1": singletics makes
@@ -415,10 +423,30 @@ let () =
     and bss_start = word 12 in
     profile_base_word := code_start / 4;
     profile_counts := Array.make ((bss_start - code_start) / 4) 0);
+  let key_events =
+    if !keys_spec = ""
+    then []
+    else
+      List.map
+        (fun s ->
+           match String.split_on_char ':' (String.trim s) with
+           | [ t; k; p ] ->
+             (match int_of_string_opt t, int_of_string_opt k, int_of_string_opt p with
+              | Some t, Some k, Some p -> t, p land 1 lor (k lsl 8)
+              | _ -> fail "doomrun: -keys: not integers: %s" s)
+           | _ -> fail "doomrun: -keys: want tick:doomkey:pressed, got %s" s)
+        (String.split_on_char ',' !keys_spec)
+  in
+  if key_events <> [] && word 28 = 0 then fail "doomrun: -keys but no KeyIn entry";
   (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
      for t = 1 to !ticks do
+       List.iter
+         (fun (kt, ev) ->
+            if kt = t
+            then ignore (call_entry m "KeyIn" (blob_base + word 28) ~r0:ev ~r1:0))
+         key_events;
        let r = call_entry m "Tick" (blob_base + word 24) ~r0:0 ~r1:0 in
        flush stdout;
        (* singletics under -timedemo: gametic = tick count + 1 *)

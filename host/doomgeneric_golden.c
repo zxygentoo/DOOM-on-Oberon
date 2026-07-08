@@ -30,21 +30,21 @@
 
 /* the shipped kernel, compiled for the host by plain gcc */
 extern void __dg_build_lut(const unsigned char *pal);
-extern void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst,
-                        int stride);
+extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);
 
 #define FB_WORDS (32 * 768)
 static unsigned int fb[FB_WORDS];
 
 /* mirror of the blob's DG_DrawFrame wrapper (libc/doomgeneric_oberon.c),
-   byte for byte in effect: LUT-on-palette_changed, then the machine blit */
+   byte for byte in effect: LUT-on-palette_changed, then the fullscreen blit
+   (screen top-left = fb word 767*32, stride -32 — fb bottom-up) */
 void DG_DrawFrame(void)
 {
     if (palette_changed) {
         __dg_build_lut((const unsigned char *)colors);
         palette_changed = 0;
     }
-    __dg_dither(DG_ScreenBuffer, 320, 200, fb + (583 * 32 + 6), -32);
+    __dg_dither_fs(DG_ScreenBuffer, fb + 767 * 32, -32);
 }
 
 void DG_Init(void) { }
