@@ -34,9 +34,9 @@ let libc_path name =
    Create deliberately does NOT call DG_Init: its banner printf would spin on the
    UART tx-ready bit the bare jig emulator never raises. *)
 let port_fakes =
-  "int __fake_argc; char __fake_a3; char __fake_a4; void doomgeneric_Tick(void) { } \
-   void doomgeneric_Create(int argc, char **argv) { __fake_argc = argc; __fake_a3 = \
-   argc > 3 ? argv[3][0] : 0; __fake_a4 = argc > 4 ? argv[4][4] : 0; }"
+  "int __fake_argc; char __fake_a3; char __fake_a4; void doomgeneric_Tick(void) { } void \
+   doomgeneric_Create(int argc, char **argv) { __fake_argc = argc; __fake_a3 = argc > 3 \
+   ? argv[3][0] : 0; __fake_a4 = argc > 4 ? argv[4][4] : 0; }"
 ;;
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
@@ -1123,14 +1123,15 @@ let libc_samples =
       , 1 (* %c, %%, %s branches, %X uppercase *) )
     ; ( "int vsn5(int i){ char b[40]; int k; int s; int r; memset(b, 7, 40); r = \
          snprintf(b, 40, \"[%.3d][%.3d][%.0d][%6.3d][%.2x]\", i & 63, -(i & 63), i & 1, \
-         i & 255, i & 255); s = r; for (k = 0; k < 40; k++) s = s * 31 + b[k]; return \
-         s; }"
+         i & 255, i & 255); s = r; for (k = 0; k < 40; k++) s = s * 31 + b[k]; return s; \
+         }"
       , "vsn5"
       , 1
         (* INTEGER precision (%.3d — HU_Init's STCFN font names, the second 1d
            bring-up bug: unpadded STCFN33 missed the lump): zero-extend to
            min digits, sign outside, %.0d of 0 prints nothing, width composes,
-           precision defeats the zero flag — all diffed against genuine glibc *) )
+           precision defeats the zero flag — all diffed against genuine glibc *)
+      )
     ; ( "extern const unsigned short **__ctype_b_loc(void); int ct1(int c){ return \
          (int)((*__ctype_b_loc())[c & 255]); }"
       , "ct1"
@@ -1384,24 +1385,24 @@ let port_selfchecks =
             (1*1000+173)*10000 + (0*1000+32) *)
        , [ 0, 11730032; 4, 11730032 ] )
      ; ( "extern int __parse_cmdline(char *s, char **argv, int argc, int max); int \
-          pcl1(int i){ char b[32]; char *av[8]; const char *t = \"  -timedemo  \
-          demo1\"; int k; int n; int r; for (k = 0; t[k]; k++) b[k] = t[k]; b[k] = 0; \
-          n = __parse_cmdline(b, av, 3, 8); r = n; if (av[3][0] == '-' && av[3][1] == \
-          't' && av[3][8] == 'o' && av[3][9] == 0) r = r + 10; if (av[4][0] == 'd' && \
-          av[4][4] == '1' && av[4][5] == 0) r = r + 100; return r + (i - i); }"
+          pcl1(int i){ char b[32]; char *av[8]; const char *t = \"  -timedemo  demo1\"; \
+          int k; int n; int r; for (k = 0; t[k]; k++) b[k] = t[k]; b[k] = 0; n = \
+          __parse_cmdline(b, av, 3, 8); r = n; if (av[3][0] == '-' && av[3][1] == 't' && \
+          av[3][8] == 'o' && av[3][9] == 0) r = r + 10; if (av[4][0] == 'd' && av[4][4] \
+          == '1' && av[4][5] == 0) r = r + 100; return r + (i - i); }"
        , "pcl1"
          (* the tokenizer alone: leading/multiple blanks skipped, two tokens
             appended after the baked 3 (n = 5), each NUL-terminated in place —
             5 + 10 + 100 *)
        , [ 0, 115; 9, 115 ] )
-     ; ( "extern int __fake_argc; extern char __fake_a3; extern char __fake_a4; \
-          unsigned char wb2[8] = {1,2,3,4,5,6,7,8}; int pcl2(int i){ char *tail; const \
-          char *t = \"-timedemo demo1\"; int k; int e0; int e1; int r; tail = \
-          __shared_base + 1024; *(volatile unsigned int *)(__shared_base + 28) = 8; \
-          tail[0] = 0; r = Init((int)wb2, 0); if (r != 0) return -1; e0 = __fake_argc; \
-          for (k = 0; t[k]; k++) tail[k] = t[k]; tail[k] = 0; r = Init((int)wb2, 0); if \
-          (r != 0) return -2; e1 = __fake_argc; return e0 * 10000 + e1 * 100 + \
-          (__fake_a3 == '-') * 10 + (__fake_a4 == '1') + (i - i); }"
+     ; ( "extern int __fake_argc; extern char __fake_a3; extern char __fake_a4; unsigned \
+          char wb2[8] = {1,2,3,4,5,6,7,8}; int pcl2(int i){ char *tail; const char *t = \
+          \"-timedemo demo1\"; int k; int e0; int e1; int r; tail = __shared_base + \
+          1024; *(volatile unsigned int *)(__shared_base + 28) = 8; tail[0] = 0; r = \
+          Init((int)wb2, 0); if (r != 0) return -1; e0 = __fake_argc; for (k = 0; t[k]; \
+          k++) tail[k] = t[k]; tail[k] = 0; r = Init((int)wb2, 0); if (r != 0) return \
+          -2; e1 = __fake_argc; return e0 * 10000 + e1 * 100 + (__fake_a3 == '-') * 10 + \
+          (__fake_a4 == '1') + (i - i); }"
        , "pcl2"
          (* the REAL Init end to end (Create faked to a recorder): an empty
             SHARED tail keeps argc = 3; the written tail reaches Create as

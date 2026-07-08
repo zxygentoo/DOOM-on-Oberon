@@ -8,3 +8,6 @@ host/build/
 host/doomgeneric
 doom1.wad.*
 frame_*.pgm
+host/build32/
+host/golden
+*.fbw

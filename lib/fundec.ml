@@ -791,9 +791,7 @@ and materialize_addr ctx (lv : C.lval) : reg =
     (* one instruction reads base then writes d, so d may reuse base's register *)
     free_scratch ctx base;
     let d = alloc_scratch ctx in
-    if off = 0
-    then emit ctx (mov_reg d base)
-    else emit ctx (alu R.Add d base (R.Imm off));
+    if off = 0 then emit ctx (mov_reg d base) else emit ctx (alu R.Add d base (R.Imm off));
     d)
   else (
     (* past the 16-bit immediate the constant builds in TWO instructions, so it

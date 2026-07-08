@@ -49,6 +49,7 @@ let dump_every = ref 1
 let steps_per_ms = ref 44_000
 let max_steps = ref 2_000_000_000
 let blob_args = ref ""
+let dump_at = ref ""
 let inputs = ref []
 
 let rec parse_args = function
@@ -64,6 +65,16 @@ let rec parse_args = function
        finishes through G_CheckDemoStatus's I_Error ("timed N gametics ..." on
        the console, SHARED status negative) — that unwind is the SUCCESS path. *)
     blob_args := s;
+    parse_args rest
+  | "-dump-at" :: s :: rest ->
+    (* comma list of GAMETICS (needs -args "-timedemo demo1": singletics makes
+       gametic = tick count + 1, so both this harness and the host golden
+       generator key dumps on counted Ticks — no game-memory access). Dumps
+       frame_gNNNNN.fbw — the raw fb window, 32*768 LE words in memory order —
+       the format host/doomgeneric_golden.c writes as golden_gNNNNN.fbw;
+       cmp(1) of the pair is the oracle's verdict. A .pgm rides along for
+       eyeballs. Pick gametics past the demo-start wipe (>= 100). *)
+    dump_at := s;
     parse_args rest
   | a :: rest ->
     inputs := a :: !inputs;
@@ -143,6 +154,17 @@ let call_entry m name entry_addr ~r0 ~r1 =
   in
   loop 0;
   (F.regs m).(0)
+;;
+
+(* the raw fb window: 32*768 little-endian words, memory order (fb line 0 at
+   the bottom) — byte-identical to the golden generator's fwrite of its array *)
+let dump_raw m path =
+  let ram = F.ram m in
+  let b = Bytes.create (fb_words * fb_lines * 4) in
+  for w = 0 to (fb_words * fb_lines) - 1 do
+    Bytes.set_int32_le b (4 * w) (Int32.of_int ram.(fb_word_base + w))
+  done;
+  Out_channel.with_open_bin path (fun oc -> Out_channel.output_bytes oc b)
 ;;
 
 (* ---- framebuffer dump: PGM P5, fb bottom-up flipped, bit 0 leftmost ---- *)
@@ -225,13 +247,38 @@ let () =
     !total_steps
     !sim_ms;
   if r <> 0 then fail "doomrun: Init failed";
+  let gametic_targets =
+    if !dump_at = ""
+    then []
+    else
+      List.map
+        (fun s ->
+           match int_of_string_opt (String.trim s) with
+           | Some v -> v
+           | None -> fail "doomrun: -dump-at: not an integer: %s" s)
+        (String.split_on_char ',' !dump_at)
+  in
+  let dump_gametic g =
+    let base = Printf.sprintf "frame_g%05d" g in
+    dump_raw m (base ^ ".fbw");
+    dump_frame m (base ^ ".pgm");
+    Printf.eprintf
+      "doomrun: gametic %d, fb %016Lx -> %s.fbw\n%!"
+      g
+      (H.framebuffer_hash m)
+      base
+  in
+  (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
+  if List.mem 1 gametic_targets then dump_gametic 1;
   (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
      for t = 1 to !ticks do
        let r = call_entry m "Tick" (blob_base + word 24) ~r0:0 ~r1:0 in
        flush stdout;
-       if t mod !dump_every = 0 || t = !ticks || r <> 0
+       (* singletics under -timedemo: gametic = tick count + 1 *)
+       if List.mem (t + 1) gametic_targets then dump_gametic (t + 1);
+       if gametic_targets = [] && (t mod !dump_every = 0 || t = !ticks || r <> 0)
        then (
          incr frame;
          let path = Printf.sprintf "frame_%04d.pgm" !frame in

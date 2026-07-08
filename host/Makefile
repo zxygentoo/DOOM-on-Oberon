@@ -41,6 +41,32 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(OUTPUT)
+	rm -rf $(OBJDIR) $(OUTPUT) $(GOBJDIR) golden
+
+# golden — the headless golden-frame generator (1d's visual oracle): the same
+# TU list in the port's video mode (CMAP256, 320x200) plus doomgeneric_golden.c
+# and THE SHIPPED ../libc/dither.c, built -m32 -funsigned-char — the jig
+# oracle's model of the target (ILP32, char unsigned). No SDL, no sound.
+
+GOBJDIR := build32
+GCFLAGS := -std=gnu99 -O2 -Wall -m32 -funsigned-char \
+  -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200
+GSRC := $(patsubst doomgeneric_xlib.o,doomgeneric_golden.o,$(SRC_DOOM)) dither.o
+GOBJS := $(addprefix $(GOBJDIR)/,$(GSRC))
+
+golden: $(GOBJS)
+	$(CC) -m32 $(GOBJS) -o $@ -lm
+
+$(GOBJDIR)/%.o: $(SRCDIR)/%.c | $(GOBJDIR)
+	$(CC) $(GCFLAGS) -I$(SRCDIR) -c $< -o $@
+
+$(GOBJDIR)/doomgeneric_golden.o: doomgeneric_golden.c | $(GOBJDIR)
+	$(CC) $(GCFLAGS) -I$(SRCDIR) -c $< -o $@
+
+$(GOBJDIR)/dither.o: ../libc/dither.c | $(GOBJDIR)
+	$(CC) $(GCFLAGS) -c $< -o $@
+
+$(GOBJDIR):
+	mkdir -p $(GOBJDIR)
 
 .PHONY: all clean
