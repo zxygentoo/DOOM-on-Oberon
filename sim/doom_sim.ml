@@ -73,6 +73,12 @@ let create ~contents (i : _ I.t) : _ O.t =
       ~fast_mul:true
       ~mul_stages:2
       ~icache:true
+        (* the fps campaign's cache lever (2026-07-09, landed on the board):
+           16 KiB (4096 lines) — DOOM's working set thrashed the 4 KiB default
+           (read-miss stall 51% of the frame); CAPACITY, not line width, was
+           the lever. 32 KiB was tried on hardware and walked back in the host
+           session; the LOCKED bitstream ships lines_log2:12 — mirror that. *)
+      ~lines_log2:12
       ~write_update:true
       ~write_buffer:true
       ~wbuf_depth:2
