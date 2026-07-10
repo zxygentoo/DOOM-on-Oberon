@@ -144,7 +144,7 @@ extern void __dg_upload_thresholds(void);/* dither.c: DOOM's blue noise -> the t
 static unsigned int __dg_hw;             /* SHARED +544 bit 0, latched by DG_Init */
 static unsigned int __dg_hw_on;          /* mode written once, at the first frame */
 
-extern void *memcpy(void *dst, const void *src, unsigned long n);
+extern void __dg_frame_copy(const unsigned char *src, unsigned char *dst);
 
 void DG_DrawFrame(void)
 {
@@ -152,10 +152,10 @@ void DG_DrawFrame(void)
         /* frame-boundary copy into the window — the double buffer DOOM's
            renderer assumes. Board lesson (2026-07-10): placing I_VideoBuffer
            IN the window let the raster watch R_RenderPlayerView mid-sweep —
-           constant-rate flicker at the render rate. The copy (word fast path,
-           ~0.2 Mcyc) restores the sw path's contract: the panel only ever
-           scans complete frames, written once, in raster order. */
-        memcpy((void *)IXB_BASE, DG_ScreenBuffer, 64000);
+           constant-rate flicker at the render rate. The copy restores the sw
+           path's contract (the panel only ever scans complete frames, written
+           once, in raster order); drawer #5 hand-rolls it. */
+        __dg_frame_copy(DG_ScreenBuffer, (unsigned char *)IXB_BASE);
         if (palette_changed) {
             int i;
             __dg_build_lut((const unsigned char *)colors);

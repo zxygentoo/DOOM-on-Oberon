@@ -478,3 +478,20 @@ void __dg_upload_thresholds(void)
                 dst[r * 32 + p * 16 + j] = q;
             }
 }
+
+/* ---- the hw-scanout frame copy (feat/indexbuf) ----
+ *
+ * DG_DrawFrame's per-frame block copy: the finished 320x200 frame, zone
+ * buffer -> the Indexbuf pixel window, both ends word-aligned by contract
+ * (Z_Malloc returns 4-aligned; the window base is 64K-aligned). Kept
+ * dead-simple as the executable spec — drawer #5 (lib/drawers.ml) replaces
+ * it at link time (~2.3 instrs/word vs ~20 naive-compiled), and the jig
+ * diffs the hand code against gcc compiling exactly this. */
+void __dg_frame_copy(const unsigned char *src, unsigned char *dst)
+{
+    const unsigned int *s = (const unsigned int *)src;
+    unsigned int *d = (unsigned int *)dst;
+    int i;
+    for (i = 0; i < 16000; i++)
+        d[i] = s[i];
+}

@@ -508,6 +508,35 @@ let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
   }
 ;;
 
+(* ---- __dg_frame_copy (drawer #5, feat/indexbuf) --------------------------------
+   The C spec is dither.c's __dg_frame_copy: the hw-scanout path's per-frame block
+   copy, 16000 words, both ends word-aligned by contract. Compiled it pays ~20
+   instrs/word (naive fixed-home codegen); here 1000 iterations of a 16-pair body
+   with immediate offsets run 36 instrs per 16 words (~2.3/word).
+
+   void __dg_frame_copy(const u8 *src, u8 *dst)
+     args: R0=src  R1=dst
+
+   Leaf, no frame: clobbers R0-R3 only (all caller-saved). R2 = iterations left,
+   R3 = the word in flight. *)
+
+let frame_copy : L.obj =
+  let l_loop = 0 in
+  { L.name = "__dg_frame_copy"
+  ; frags =
+      [ movi 2 1000; L.Label l_loop ]
+      @ List.concat_map
+          (fun k -> [ ldw 3 0 (4 * k); stw 3 1 (4 * k) ])
+          (List.init 16 Fun.id)
+      @ [ alu R.Add 0 0 (R.Imm 64)
+        ; alu R.Add 1 1 (R.Imm 64)
+        ; alu R.Sub 2 2 (R.Imm 1)
+        ; bcc_not R.Eq l_loop
+        ; ret
+        ]
+  }
+;;
+
 (* Build every drawer whose data symbols resolve; each is independent — a sample
    (or a tree) lacking a drawer's globals simply keeps its compiled version. *)
 let build ~(off : string -> int option) ~(str : string -> int option) : L.obj list =
@@ -528,5 +557,10 @@ let build ~(off : string -> int option) ~(str : string -> int option) : L.obj li
       ~mask_off:(off "__dg_fs_mask")
       ~ready_off:(off "__dg_fs_ready")
   in
-  try_build dither_b @ try_build dither_fs_b @ try_build span @ try_build column
+  let frame_copy_b ~off:_ ~str:_ = frame_copy in
+  try_build dither_b
+  @ try_build dither_fs_b
+  @ try_build span
+  @ try_build column
+  @ try_build frame_copy_b
 ;;
