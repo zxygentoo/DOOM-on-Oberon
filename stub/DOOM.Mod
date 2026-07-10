@@ -135,7 +135,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
   BEGIN M.id := Viewers.restore; Viewers.Broadcast(M)
   END Restore;
 
-  PROCEDURE Run*;
+  PROCEDURE Run0(hw: BOOLEAN);
     VAR blobLen, wadLen, len, i, a, w, r, st: INTEGER;
       name: ARRAY 16 OF CHAR;
   BEGIN
@@ -161,6 +161,12 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
         FOR w := a TO a + len - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         FOR w := SharedBase TO SharedBase + SharedSize - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         SYSTEM.PUT(SharedBase + 28, wadLen);
+        (*feat/indexbuf (draft seam): SHARED +544 bit 0 advertises the hardware
+          scanout ditherer; the blob then composites into the Indexbuf window
+          and skips the software dither. Only meaningful on a bitstream that
+          carries Indexbuf — on the stock bitstream RunHW plays blind (desktop
+          stays; use Run)*)
+        IF hw THEN SYSTEM.PUT(SharedBase + 544, 1) END ;
         CopyArgs;
         SYSTEM.GET(BlobBase + 20, w); SYSTEM.PUT(SYSTEM.ADR(init), BlobBase + w);
         SYSTEM.GET(BlobBase + 24, w); SYSTEM.PUT(SYSTEM.ADR(tick), BlobBase + w);
@@ -178,7 +184,15 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
         END
       END
     END
+  END Run0;
+
+  PROCEDURE Run*;
+  BEGIN Run0(FALSE)
   END Run;
+
+  PROCEDURE RunHW*;
+  BEGIN Run0(TRUE)
+  END RunHW;
 
   PROCEDURE InitTables;
     VAR i: INTEGER;

@@ -18,7 +18,9 @@
  * Playdate look; dithering the doubled columns separately is the (2x cost)
  * quality knob if 1d's framebuffer dumps disappoint. */
 
-static unsigned char __dg_lum[256];
+/* non-static since feat/indexbuf: the hardware-scanout path (doomgeneric_oberon.c)
+ * uploads these 256 bytes to the Indexbuf LUT window on palette change */
+unsigned char __dg_lum[256];
 
 /* thresholds 1..254 over the luminance scale: luminance 0 is always black,
  * 255 always white — pure black and pure white never dither. */
@@ -449,4 +451,30 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
         }
         src += 320;
     }
+}
+
+/* ---- feat/indexbuf: the hardware-scanout threshold upload ----
+ *
+ * The Indexbuf hardware ships CONTENT-FREE: before mode-on, every client
+ * uploads its 64x64 threshold map as 2048 slot quads at the 8 KB window
+ * (draft seam indexbuf-seam.md; quad a = {row[6], phase[1], slot[4]}, the
+ * slot's 3-or-4 thresholds one byte each, K=3 slots padded with 255). DOOM's
+ * rendition is __dg_bn64 — the same table __dg_dither_fs thresholds against,
+ * so hardware and software mode render identical pixels by construction. */
+void __dg_upload_thresholds(void)
+{
+    volatile unsigned int *dst = (volatile unsigned int *)0x30E000;
+    int r, p, j, k;
+    for (r = 0; r < 64; r++)
+        for (p = 0; p < 2; p++)
+            for (j = 0; j < 10; j++) {
+                unsigned int q = 0;
+                for (k = 3; k >= 0; k--) {
+                    unsigned int t = k < __dg_xw[j]
+                        ? __dg_bn64[64 * r + 32 * p + __dg_xoff[j] + k]
+                        : 255u;
+                    q = (q << 8) | t;
+                }
+                dst[r * 32 + p * 16 + j] = q;
+            }
 }

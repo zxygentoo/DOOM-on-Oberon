@@ -34,9 +34,10 @@ let libc_path name =
    Create deliberately does NOT call DG_Init: its banner printf would spin on the
    UART tx-ready bit the bare jig emulator never raises. *)
 let port_fakes =
-  "int __fake_argc; char __fake_a3; char __fake_a4; void doomgeneric_Tick(void) { } void \
-   doomgeneric_Create(int argc, char **argv) { __fake_argc = argc; __fake_a3 = argc > 3 \
-   ? argv[3][0] : 0; __fake_a4 = argc > 4 ? argv[4][4] : 0; }"
+  "int __fake_argc; char __fake_a3; char __fake_a4; unsigned char *__dg_fixed_vbuf; void \
+   doomgeneric_Tick(void) { } void doomgeneric_Create(int argc, char **argv) { \
+   __fake_argc = argc; __fake_a3 = argc > 3 ? argv[3][0] : 0; __fake_a4 = argc > 4 ? \
+   argv[4][4] : 0; }"
 ;;
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the

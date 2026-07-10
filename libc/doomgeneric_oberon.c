@@ -121,8 +121,58 @@ extern char *__fb_base;                 /* heap_doom.c binds 0xE7F00 */
 extern void __dg_build_lut(const unsigned char *pal);
 extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);
 
+/* ---- feat/indexbuf: the hardware-scanout presentation path ----
+ *
+ * Draft seam (doc: indexbuf-seam.md; hardware: host repo Indexbuf): a 64 KiB
+ * window at IXB_BASE (ABI §8's back-buffer row, repurposed) that the board
+ * shadows into BRAM — pixels at +0 (I_VideoBuffer is PLACED there via
+ * i_video.c's __dg_fixed_vbuf, patch 0004, so DOOM composites straight into
+ * the scanout source), the 256-byte luminance LUT at +64000, the control
+ * word (bit 0 = mode) at +64256. The loader advertises the hardware in
+ * SHARED +544 bit 0 (a zeroed page = software dither, so every existing
+ * harness and the stub run unchanged). Mode goes on at the FIRST frame —
+ * never at Init, or the panel would scan out an uninitialized buffer through
+ * D_DoomMain's long init — and off in exit(), which restores the desktop
+ * instantly (the mono framebuffer was never touched). */
+
+enum { IXB_BASE = 0x310000, IXB_LUT = 0x310000 + 64000, IXB_CTL = 0x310000 + 64256 };
+
+extern unsigned char __dg_lum[256];      /* dither.c's LUT (filled by __dg_build_lut) */
+extern unsigned char *__dg_fixed_vbuf;   /* i_video.c (patch 0004): fixed buffer placement */
+extern void __dg_upload_thresholds(void);/* dither.c: DOOM's blue noise -> the threshold window */
+
+static unsigned int __dg_hw;             /* SHARED +544 bit 0, latched by DG_Init */
+static unsigned int __dg_hw_on;          /* mode written once, at the first frame */
+
+extern void *memcpy(void *dst, const void *src, unsigned long n);
+
 void DG_DrawFrame(void)
 {
+    if (__dg_hw) {
+        /* frame-boundary copy into the window — the double buffer DOOM's
+           renderer assumes. Board lesson (2026-07-10): placing I_VideoBuffer
+           IN the window let the raster watch R_RenderPlayerView mid-sweep —
+           constant-rate flicker at the render rate. The copy (word fast path,
+           ~0.2 Mcyc) restores the sw path's contract: the panel only ever
+           scans complete frames, written once, in raster order. */
+        memcpy((void *)IXB_BASE, DG_ScreenBuffer, 64000);
+        if (palette_changed) {
+            int i;
+            __dg_build_lut((const unsigned char *)colors);
+            for (i = 0; i < 256; i++)
+                ((volatile unsigned char *)IXB_LUT)[i] = __dg_lum[i];
+            palette_changed = 0;
+        }
+        if (!__dg_hw_on) {
+            /* the content-free contract: the hardware powers up with a ZERO
+               threshold RAM — upload DOOM's rendition (the same __dg_bn64 the
+               software path thresholds against) before the panel switches */
+            __dg_upload_thresholds();
+            *(volatile unsigned int *)IXB_CTL = 1;
+            __dg_hw_on = 1;
+        }
+        return;
+    }
     if (palette_changed) {
         __dg_build_lut((const unsigned char *)colors);
         palette_changed = 0;
@@ -141,8 +191,14 @@ extern int printf(const char *fmt, ...);
 
 void DG_Init(void)
 {
-    /* nothing to bring up — no fb mode-set, the key ring is stub-zeroed, the
-       timer free-runs; the banner is the earliest proof of the console path */
+    /* the presentation flag (SHARED +544 bit 0, loader-written; zero = the
+       software dither, the default every existing harness gets). The
+       compositing buffer stays zone-allocated even in hw mode — the renderer
+       must NOT draw directly into the scanout window (the board flicker
+       lesson; see DG_DrawFrame). __dg_fixed_vbuf (patch 0004) stays unset —
+       kept as the seam a hardware double-buffer variant would use. */
+    __dg_hw = *(volatile unsigned int *)(__shared_base + 544) & 1;
+    __dg_hw_on = 0;
     printf("DOOM on Oberon: blob alive\n");
 }
 
@@ -192,6 +248,13 @@ int __parse_cmdline(char *s, char **argv, int argc, int max)
 
 void exit(int status)
 {
+    /* hardware scanout off first: the mono framebuffer was never written, so
+       the desktop reappears the instant the mode bit drops (the stub's
+       Restore broadcast becomes belt-and-braces) */
+    if (__dg_hw) {
+        *(volatile unsigned int *)IXB_CTL = 0;
+        __dg_hw_on = 0;
+    }
     /* SHARED +12 (ABI §8): 0 running, 1 clean quit, negative = I_Error code */
     *(volatile int *)(__shared_base + 12) = status == 0 ? 1 : status;
     __longjmp(__exit_env, 1);

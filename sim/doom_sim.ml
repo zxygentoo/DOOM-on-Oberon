@@ -56,8 +56,11 @@ module O = struct
   [@@deriving hardcaml]
 end
 
-(* the Board_tb wiring, with the himem-wide PSRAM model and no video traffic *)
-let create ~contents (i : _ I.t) : _ O.t =
+(* the Board_tb wiring, with the himem-wide PSRAM model; [hw] = feat/indexbuf:
+   video DMA live (served on-chip: Framebuf + the Indexbuf scanout ditherer —
+   10c proved fb_bram cycle-identical to the video:false counterfactual, so
+   cycles/tick stays comparable across the seam) *)
+let create ~hw ~contents (i : _ I.t) : _ O.t =
   let dq = Signal.wire 16 in
   let soc =
     Soc.create
@@ -82,7 +85,9 @@ let create ~contents (i : _ I.t) : _ O.t =
       ~write_update:true
       ~write_buffer:true
       ~wbuf_depth:2
-      ~video:false
+      ~video:hw
+      ~fb_bram:hw
+      ~indexbuf:hw
       { Soc.I.clock = i.clock
       ; pclk = i.pclk
       ; rst_n = i.rst_n
@@ -145,6 +150,7 @@ let fbw = ref ""
 let max_mcycles = ref 4000
 let chunk = 500_000
 let profile_out = ref ""
+let hw = ref false
 let inputs = ref []
 
 let rec parse = function
@@ -159,6 +165,13 @@ let rec parse = function
     parse r
   | "-max-mcycles" :: n :: r ->
     max_mcycles := int_of_string n;
+    parse r
+  | "-hw" :: r ->
+    (* feat/indexbuf: hardware-scanout mode — SHARED +544 bit 0 advertises the
+       Indexbuf window to the blob (DG_DrawFrame reduces to the LUT upload);
+       -fbw then dumps the frame the PANEL actually shows, reconstructed from
+       the compose FSM's acked words over one full scan of the parked frame *)
+    hw := true;
     parse r
   | "-profile" :: p :: r ->
     (* the CYCLE-attribution profiler (the fps campaign's instrument): sample
@@ -260,7 +273,9 @@ let () =
     Array.init (String.length rom / 4) (fun i ->
       Int32.to_int (String.get_int32_le rom (4 * i)) land 0xFFFF_FFFF)
   in
-  let sim = Sim.create ~config:Cyclesim.Config.trace_all (create ~contents:rom_words) in
+  let sim =
+    Sim.create ~config:Cyclesim.Config.trace_all (create ~hw:!hw ~contents:rom_words)
+  in
   let i = Cyclesim.inputs sim in
   let cram_lo = Cyclesim.lookup_mem_by_name sim "cram_lo" |> Option.get
   and cram_hi = Cyclesim.lookup_mem_by_name sim "cram_hi" |> Option.get in
@@ -288,6 +303,9 @@ let () =
   poke_byte (shared_base + 5) ((!ticks lsr 8) land 0xFF);
   poke_byte (shared_base + 6) ((!ticks lsr 16) land 0xFF);
   poke_byte (shared_base + 7) ((!ticks lsr 24) land 0xFF);
+  (* feat/indexbuf: advertise the hardware scanout (the loader's obligation;
+     draft seam indexbuf-seam.md — a zeroed page = software dither) *)
+  if !hw then poke_byte (shared_base + 544) 1;
   (* idle inputs; reset for a few cycles *)
   i.pclk := Bits.gnd;
   i.miso := Bits.vdd;
@@ -397,13 +415,67 @@ let () =
     (shared 12)
     (shared 8);
   if !fbw <> ""
-  then (
-    let b = Bytes.create (fb_words * 4) in
-    for w = 0 to fb_words - 1 do
-      Bytes.set_int32_le b (4 * w) (Int32.of_int (peek_word (fb_base_word + w)))
-    done;
-    Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
-    Printf.eprintf "doom_sim: fb -> %s\n%!" !fbw);
+  then
+    if !hw
+    then (
+      (* feat/indexbuf: reconstruct the frame the panel shows from the compose
+         FSM's probes — at each ixb_ack the latched (row, col) name the span
+         word just composed in ixb_word. The machine is parked (doomboot's
+         self-loop), the raster free-runs (Cyclesim advances the pclk raster
+         1:1 with clk), so one full scan (~1.1 M cycles) visits all 24576
+         visible words. File format = the golden .fbw: the fb window in memory
+         order, i.e. span rows 256..1023 ascending = screen bottom-up. *)
+      (* the completed request's (row, col) is tracked off the soc-level
+         vidreq/vidadr wires: the FSM accepts only when idle and acks 12 cycles
+         later — well inside the raster's ~29.5-cycle request spacing — so each
+         ack pairs with the last request seen (a probe register inside Indexbuf
+         would be dead datapath and Cyclesim-DCE bait; learned the hard way) *)
+      let probe n =
+        match Cyclesim.lookup_node_or_reg_by_name sim n with
+        | Some x -> x
+        | None -> fail "doom_sim: -hw: no traced node named %S" n
+      in
+      let ack = probe "ixb_ack"
+      and req = probe "vidreq"
+      and adr = probe "vidadr"
+      and wordn = probe "ixb_word" in
+      let org = 0xDFF00 / 4 in
+      let pending = ref 0 in
+      let words = Array.make (32 * 768) (-1) in
+      let seen = ref 0 in
+      let cyc = ref 0 in
+      while !seen < 32 * 768 && !cyc < 4_000_000 do
+        Cyclesim.cycle sim;
+        incr cyc;
+        if Cyclesim.Node.to_int req = 1 then pending := Cyclesim.Node.to_int adr;
+        if Cyclesim.Node.to_int ack = 1
+        then (
+          let woff = !pending - org in
+          let rr = woff lsr 5
+          and c = woff land 31 in
+          if rr >= 256 && rr < 1024
+          then (
+            let idx = ((rr - 256) * 32) + c in
+            if words.(idx) < 0 then incr seen;
+            words.(idx) <- Cyclesim.Node.to_int wordn))
+      done;
+      Printf.eprintf
+        "doom_sim: -hw scanout capture: %d/24576 words over %d cycles\n%!"
+        !seen
+        !cyc;
+      let b = Bytes.create (fb_words * 4) in
+      for w = 0 to fb_words - 1 do
+        Bytes.set_int32_le b (4 * w) (Int32.of_int (max words.(w) 0))
+      done;
+      Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
+      Printf.eprintf "doom_sim: scanout fb -> %s\n%!" !fbw)
+    else (
+      let b = Bytes.create (fb_words * 4) in
+      for w = 0 to fb_words - 1 do
+        Bytes.set_int32_le b (4 * w) (Int32.of_int (peek_word (fb_base_word + w)))
+      done;
+      Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
+      Printf.eprintf "doom_sim: fb -> %s\n%!" !fbw);
   if !profile_out <> ""
   then
     write_profile

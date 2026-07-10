@@ -51,10 +51,12 @@ for f in "$OA/Mod/Common/AgentProtocol.Mod" "$OA/Mod/ProjectOberon/AgentTool.Mod
   rm "$T/src/$(basename "$f").txt"
 done
 
-# 3. the stub (compiled in dependency order like any module)
-cp "$REPO/stub/DOOM.Mod" "$T/src/DOOM.Mod.txt"
-"$BIN/txt2ob" "$T/src/DOOM.Mod.txt" >/dev/null
-rm "$T/src/DOOM.Mod.txt"
+# 3. the stub + the indexed-colour-mode demo (compiled in dependency order like any module)
+for m in DOOM.Mod Mandel.Mod; do
+  cp "$REPO/stub/$m" "$T/src/$m.txt"
+  "$BIN/txt2ob" "$T/src/$m.txt" >/dev/null
+  rm "$T/src/$m.txt"
+done
 
 # 4. blob + WAD chunks, packed verbatim
 cp "$REPO/doom.blob" "$REPO/doom1.wad.0" "$REPO/doom1.wad.1" "$T/src/"
@@ -62,7 +64,7 @@ printf 'doom.blob\ndoom1.wad.0\ndoom1.wad.1\n' >>"$T/src/.packonly"
 
 # 5. a DOOM section in System.Tool (middle-click targets)
 "$BIN/ob2txt" "$T/src/System.Tool" >/dev/null
-printf '\nDOOM.Run\nDOOM.Run -timedemo demo1\n' >>"$T/src/System.Tool.txt"
+printf '\nDOOM.Run\nDOOM.Run -timedemo demo1\nDOOM.RunHW\nDOOM.RunHW -timedemo demo1\nMandel.Draw\n' >>"$T/src/System.Tool.txt"
 "$BIN/txt2ob" "$T/src/System.Tool.txt" >/dev/null
 rm "$T/src/System.Tool.txt"
 

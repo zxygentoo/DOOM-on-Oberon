@@ -9,7 +9,6 @@
 ; This root builds on the OxCaml switch (hardcaml v0.18-preview):
 ;   opam exec --switch=5.2.0+ox -- dune build --root sim
 
-
 (executable
  (name doom_sim)
  (libraries hardcaml nexys4_board risc5 unix)
