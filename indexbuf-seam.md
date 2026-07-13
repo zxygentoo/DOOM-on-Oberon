@@ -44,9 +44,11 @@ written.
 ## The second client (the generality witness)
 
 `stub/Mandel.Mod` — an ordinary Oberon command sharing zero code and zero
-content with DOOM: REAL-arithmetic Mandelbrot into the pixel window, identity
-LUT, its own computed Bayer rendition uploaded to the threshold window, mode
-on, any-key exit, instant desktop restore. `Mandel.Draw` in System.Tool.
+content with DOOM: a REAL-arithmetic Mandelbrot infinite-zoom animation
+(seahorse valley, single-precision depth budget, painted progressively into
+the live pixel window), identity LUT, its own computed Bayer rendition
+uploaded to the threshold window, mode on, any-key exit, instant desktop
+restore. `Mandel.Draw` in System.Tool.
 
 ## The presentation flag (SHARED `+544`, bit 0)
 
