@@ -145,7 +145,7 @@ let schedule () =
 ;;
 
 (* PGM P5: the halftone pixel window, already top-down byte-per-pixel *)
-let dump_ixframe m path =
+let dump_htframe m path =
   let ram = F.ram m in
   Out_channel.with_open_bin path (fun oc ->
     Printf.fprintf oc "P5\n%d %d\n255\n" ht_w ht_h;
@@ -234,8 +234,8 @@ let () =
            Printf.printf "dskrun: %6d ms  frame -> %s\n%!" ms path
          | Htdump name ->
            let path = Printf.sprintf "dskrun_%s.pgm" name in
-           dump_ixframe m path;
-           Printf.printf "dskrun: %6d ms  ixframe -> %s\n%!" ms path);
+           dump_htframe m path;
+           Printf.printf "dskrun: %6d ms  htframe -> %s\n%!" ms path);
         fire ()
       | _ -> ()
     in
