@@ -46,9 +46,9 @@ sim:
 # ---- the source pipeline ---------------------------------------------------
 
 # the .i tree: patch the vendor submodule (idempotent) + gcc -E the SRC_DOOM
-# TU list; script/pp_doomsrc.sh owns the logic, this rule owns the ordering
-i _out/i/.stamp: script/pp_doomsrc.sh $(wildcard patch/c/*.patch)
-	./script/pp_doomsrc.sh
+# TU list; script/ppx_doomsrc.sh owns the logic, this rule owns the ordering
+i _out/i/.stamp: script/ppx_doomsrc.sh $(wildcard patch/c/*.patch)
+	./script/ppx_doomsrc.sh
 	@touch _out/i/.stamp
 
 # the shareware IWAD v1.9 (freely redistributable) — md5-pinned; the name

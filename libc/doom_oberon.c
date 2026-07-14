@@ -124,7 +124,7 @@ extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stri
 
 /* ---- feat/halftone: the hardware-scanout presentation path ----
  *
- * Draft seam (doc: halftone-seam.md; hardware: host repo Halftone): a 64 KiB
+ * The seam (ABI.md §11; hardware: host repo Halftone): a 64 KiB
  * window at HT_BASE (ABI §8's back-buffer row, repurposed) that the board
  * shadows into BRAM — pixels at +0 (I_VideoBuffer is PLACED there via
  * i_video.c's __dg_fixed_vbuf, patch 0004, so DOOM composites straight into

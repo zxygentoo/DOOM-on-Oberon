@@ -456,7 +456,7 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
 /* ---- feat/halftone v2: the hardware-scanout uploads ----
  *
  * The Halftone hardware ships CONTENT-FREE — and since the v2 generality
- * rework, GEOMETRY-FREE (draft seam halftone-seam.md v2): before mode-on a
+ * rework, GEOMETRY-FREE (ABI.md §11): before mode-on a
  * client uploads its 64x64 threshold map VERBATIM (the v1 slot-quad packing
  * died with the baked slot tables), a 768-word row map carrying the vertical
  * geometry, and the rect/scale registers. DOOM's rendition is __dg_bn64 —

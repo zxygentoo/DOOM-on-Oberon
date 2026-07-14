@@ -304,7 +304,7 @@ let () =
   poke_byte (shared_base + 6) ((!ticks lsr 16) land 0xFF);
   poke_byte (shared_base + 7) ((!ticks lsr 24) land 0xFF);
   (* feat/halftone: advertise the hardware scanout (the loader's obligation;
-     draft seam halftone-seam.md — a zeroed page = software dither) *)
+     ABI.md §11 — a zeroed page = software dither) *)
   if !hw then poke_byte (shared_base + 544) 1;
   (* idle inputs; reset for a few cycles *)
   i.pclk := Bits.gnd;

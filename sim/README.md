@@ -81,7 +81,7 @@ bit-identical.
 scanout path on (`video:true fb_bram:true halftone:true` — 10c proved fb_bram
 cycle-identical to the `video:false` counterfactual, so cycles/tick stays
 comparable with non-hw runs), and advertises the hardware to the blob via
-SHARED +544 (draft seam: halftone-seam.md). The blob then composites into the
+SHARED +544 (ABI.md §11). The blob then composites into the
 Halftone window and skips the software dither. `-fbw` in this mode dumps the
 frame the PANEL shows: after the park, the harness lets the raster free-run
 one full scan (~1.1 M cycles) and reconstructs the .fbw from the compose

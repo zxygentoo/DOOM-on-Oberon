@@ -17,7 +17,7 @@
                  [-probe "ms,..."] [-dump "ms:name,..."]
                  [-htdump "ms:name,..."] <image.dsk>
 
-   -htdump reads the halftone pixel window (draft seam halftone-seam.md:
+   -htdump reads the halftone pixel window (ABI.md §11:
    320x200 palette bytes at 0x310000, row 0 = top) as an 8-bit PGM — the
    emulator has no halftone scanout, but the window is plain RAM, so a
    client whose LUT is identity (Mandel) dumps as a directly viewable

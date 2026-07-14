@@ -90,11 +90,11 @@ their loops.
 | char | 8-bit **unsigned** (chocolate-doom lineage is already clean here) |
 | short | 16-bit |
 | int, long, pointers | 32-bit |
-| long long | **does not exist** — census-verified (`cil-spike.md`): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
+| long long | **does not exist** — census-verified (the §9 spike census, AGENT.md; enforced by lib/check.ml): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
 | float, double | **banned in the blob v1** — census-verified strays are 6 cold functions (m_config float vars, am_map zoom, mouse-speed box (dead — no mouse), timedemo fps print), excised/pinned at 1c; RISC5 single-precision FPU exists if ever needed |
 | alignment | natural, max 4; stack and structs word-aligned |
 | packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
-| bitfields | **banned outright** — census-verified (`cil-spike.md`): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
+| bitfields | **banned outright** — census-verified (the §9 spike census, AGENT.md; enforced by lib/check.ml): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
 
 ## 5. Runtime helpers and intrinsics
 
@@ -225,8 +225,8 @@ decode territory + margin).
 | `0x100000` | `0x2C0000` | 1.75 MB | **BLOB**: header, code, data, .bss (cap) |
 | `0x2C0000` | `0x300000` | 256 KB | **C stack**, grows down from `STACK_TOP = 0x300000` |
 | `0x300000` | `0x301000` | 4 KB | **SHARED page**: cfg in, status out, key ring |
-| `0x301000` | `0x310000` | 60 KB | spare |
-| `0x310000` | `0x320000` | 64 KB | **back buffer** (320×200×8 = 64 000 B) |
+| `0x301000` | `0x310000` | 60 KB | spare (`0x30E000`–`0x310000`: the **Halftone table window**, §11) |
+| `0x310000` | `0x320000` | 64 KB | **Halftone pixel window** (§11; né "back buffer" — pixels + tone LUT + registers; software-dither builds leave it untouched) |
 | `0x320000` | `0x400000` | 896 KB | spare (wipe buffers, LUTs, growth) |
 | `0x400000` | `0xA00000` | 6 MB | **zone** (DOOM's Z_Malloc block) |
 | `0xA00000` | `0xE01000` | 4 MB + 4 KB | **WAD** (chunks concatenated by stub; the real shareware WAD is 4 196 020 B — 1 716 past 4 MiB, so the window carries one extra page) |
@@ -261,6 +261,13 @@ the sender owns all translation; the blob never sees a scancode. The stub
 zeroes the SHARED page (head = tail = 0) before writing magic/version and
 calling `Init`.
 
+SHARED `+544` (a §10-non-breaking reserved-field addition, 2026-07-14): the
+**presentation flags**, loader-written before `Init`. Bit 0 = the Halftone
+hardware is present (zero — every pre-Halftone loader/harness — is the
+software dither, bit-identically unchanged). Bit 1 = viewer presentation:
+the *stub* owns mode + geometry; the blob keeps thresholds + LUT + frame
+copy (§11).
+
 ## 9. Confirm-in-sim checklist (becomes the first jig vectors)
 
 - **C1** — interrupts genuinely never fire (else R12/H/flags rules change).
@@ -279,3 +286,104 @@ reserved header/SHARED fields, new linker passes, and the eventual text-view
 syntax are non-breaking. The §9 confirm-in-sim items (C1–C5) are documented
 assumptions the freeze rests on; if one falsifies at bring-up, that is itself
 a `version = 2` event.
+
+Amendments within v1 (all additive; blob header untouched): the WAD window
+end `0xE00000 → 0xE01000` (2026-07-08, first contact with the real shareware
+WAD); the key-ring discipline and SHARED `+28`/command-tail clarifications
+(§8); SHARED `+544` presentation flags + **§11**, the Halftone display seam —
+promoted 2026-07-15 from the draft `halftone-seam.md` after the mode shipped
+(board-proven, merged in both repos; the draft doc is retired).
+
+## 11. The Halftone display seam (shipped 2026-07-14; v1-additive)
+
+The generalized indexed/grayscale display mode — hardware: the host repo's
+`Halftone` (`board/nexys-4/halftone.{ml,mli}`, its AGENT.md §5 row 11);
+Oberon face: `Halftone.Mod` (shipped with the hardware, `board/nexys-4/Mod`);
+DOOM's raw-MMIO client: `libc/dither.c` + `libc/doom_oberon.c`. **The
+hardware keeps only mechanism; every policy — tone, thresholds, geometry —
+is client-uploaded at runtime.** Power-up state is all-zero: a zero-sized
+rect claims nothing, so mode-off elaboration is display-identical to a board
+without the module.
+
+### The pixel window (64 KiB at `HT_BASE = 0x310000`)
+
+The §8 row, repurposed. The board shadows every PSRAM-bound store in the
+window (write-through, the Framebuf/cache tap); PSRAM keeps the truth, CPU
+loads are untouched.
+
+| byte offset | contents |
+|---|---|
+| `+0 .. +63999` | pixel bytes — **meaning is client-defined**: the row map names each displayed row's byte offset, so 320×200 row-major, strided images, or a double-buffered pair are all just row maps. Clients render **complete frames** here (the 2026-07-10 board lesson: the raster must never watch a renderer mid-sweep) |
+| `+64000 .. +64255` | tone LUT: index = pixel byte, value = 8-bit gray |
+| `+64256 ..` | the register block, below |
+
+### The register block (`HT_CTL = HT_BASE + 64256`; word stores, write-only)
+
+| reg | offset | width | semantics |
+|---|---|---|---|
+| `CTL` | +0 | bit 0 | mode. **Immediate** (not latched) — `exit()`'s instant desktop restore depends on it |
+| `WIN_X` | +4 | 11 | rect left, panel px, **multiple of 32** (the claim mux selects whole fb words) |
+| `WIN_Y` | +8 | 10 | rect top, panel px |
+| `WIN_W` | +12 | 11 | rect width, **multiple of 32**, `X+W ≤ 1024` |
+| `WIN_H` | +16 | 10 | rect height, `Y+H ≤ 768` |
+| `XNUM` | +20 | 12 | horizontal scale numerator; **`XNUM ≥ XDEN ≥ 1`** (upscale or 1:1 only) |
+| `XDEN` | +24 | 12 | horizontal scale denominator |
+| `XOFF` | +28 | 16 | starting source byte column (horizontal pan = one write) |
+
+Geometry registers are **shadowed**: stores hit the shadow; hardware copies
+shadow → active once per frame at vblank entry, so a mid-frame `Open` never
+tears. The table RAMs (below) are live — rewrite during vblank
+(`Halftone.Sync`; the blanking window is ~600 µs) or with the mode off.
+
+### The table window (8 KiB at `HT_THR = 0x30E000`, carved from §8's spare)
+
+| byte offset | contents |
+|---|---|
+| `+0 .. +4095` | **threshold map, verbatim**: 64×64 bytes row-major, values 1..254 (DOOM stores `__dg_bn64` as-is) |
+| `+4096 .. +7167` | **row map**: 768 words, entry `y` = rect-relative output row — bits `[15:0]` = `row_base` (source row's byte offset in the pixel window), bits `[21:16]` = `thr_row` (threshold row). **Word stores only** |
+| `+7168 .. +8191` | reserved |
+
+The row map is the load-bearing generalization: any vertical scale or
+dealing — Bresenham, 1:1, double-buffer flips, interleave — is a software
+loop over ≤768 words; no multiplier, divider, or vertical DDA exists in
+hardware. DOOM uploads the exact out2 dealing, keeping the hardware
+**bit-identical to `__dg_dither_fs`** and every golden.
+
+### The decision function and the horizontal DDA (exact)
+
+Per output pixel of a claimed word: `bit = (lut[pix[row_base + sx]] >
+thr[thr_row][ox & 63])`, `ox` = panel x, bit 0 of a word = leftmost. `sx`
+advances by the output-driven DDA, frozen as:
+
+```
+row start:         sx := XOFF;  acc := XDEN
+per output pixel:  emit(sx);  acc := acc + XDEN;
+                   if acc > XNUM { acc := acc − XNUM; sx := sx + 1 }
+```
+
+At `16/5` this deals source widths 3,3,3,3,4 — exactly the software kernel's
+slot tables (host-repo test-pinned). At `XNUM = XDEN` it is the identity.
+DDA state carries across a rect row (video requests raster-order).
+
+### The overlay rect, frame sync, and mode discipline
+
+Per video request: `claim = mode ∧ (y_req < 768) ∧ (y_req, col) ∈ rect`,
+latched at request-accept; the board muxes `viddata/vid_ack/vidpar` from
+`Halftone` when the completing request was claimed, from `Framebuf`
+otherwise. Inside the rect the mono framebuffer (including the Oberon mouse
+pointer) is simply not displayed — a client wanting a cursor draws its own.
+
+Status register (MMIO `0xFFFFE8`, slot 10, read-only): bit 0 = vblank,
+bits `[15:8]` = frame counter (increments at vblank entry — the edge that
+latches the geometry shadows). Vblank is detected as a video **request gap**
+(video issues no fetches during blanking; a saturating watchdog fires ~68 µs
+in). The machine's first readable frame clock.
+
+Mode discipline (v1, blob-owned — §5 blob-talks-MMIO): upload thresholds +
+row map + LUT + geometry, then **mode on at the first `DG_DrawFrame`**
+(never at Init), **off in `exit()`** (instant desktop restore — the mono
+framebuffer was never written). Mode-on over zeroed tables scans all-zero
+thresholds: every non-black pixel white; upload first. Under SHARED `+544`
+bit 1 (§8) the stub owns mode + geometry instead: `DOOM.Window`'s viewer
+lifecycle re-`Open`s the largest 4:3 rect per ModifyMsg, and quit/suspend
+drop the mode.

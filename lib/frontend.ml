@@ -1,6 +1,6 @@
 (* goblint-cil front end for the RISC5 target: the machine model (ABI §4) and parsing C
    into the typed AST the backend consumes. Mirrors the spike's driver
-   (the §9 CIL spike, cil-spike.md); owns the machdep so the whole toolchain shares one. *)
+   (the §9 CIL spike); owns the machdep so the whole toolchain shares one. *)
 
 open GoblintCil
 
@@ -45,7 +45,7 @@ let parse_string ~(name : string) (src : string) : file =
 ;;
 
 (* Amalgamate parsed units into one (Mergecil.merge — the single-TU / PureDOOM rename step,
-   spike-proven at full scale — cil-spike.md). *)
+   spike-proven at full scale, AGENT.md §9). *)
 let merge (units : file list) ~(name : string) : file =
   Errormsg.hadErrors := false;
   let m = Mergecil.merge units name in

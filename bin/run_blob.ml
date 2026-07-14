@@ -90,8 +90,8 @@ let rec parse_args = function
     keys_spec := s;
     parse_args rest
   | "-hw" :: rest ->
-    (* feat/halftone: advertise the hardware scanout (SHARED +544 bit 0, draft
-       seam halftone-seam.md). The emulator models no Halftone — the window is
+    (* feat/halftone: advertise the hardware scanout (SHARED +544 bit 0,
+       ABI.md §11). The emulator models no Halftone — the window is
        plain RAM and nothing reads the mode bit — but the BLOB forks on the
        flag: DG_DrawFrame drops the dither for the LUT upload, so -profile /
        instruction counts measure the hw-path workload. Frame dumps are

@@ -8,7 +8,7 @@
    imports the mini-libc will provide — that printed list is the 1c worklist.
 
    Usage:  doomcc <unit.i> [unit2.i ...] [-o out.blob]
-   Preprocess first with script/pp_doomsrc.sh (or gcc -E -std=gnu99). *)
+   Preprocess first with script/ppx_doomsrc.sh (or gcc -E -std=gnu99). *)
 
 module C = GoblintCil
 open Doomcc_core

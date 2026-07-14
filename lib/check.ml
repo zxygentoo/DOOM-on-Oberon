@@ -1,4 +1,4 @@
-(* The pre-codegen checks (ABI §4 + the cil-spike.md census), shared by Globals and
+(* The pre-codegen checks (ABI §4 + the §9 spike census), shared by Globals and
    Fundec: [Unsupported] is the single refusal channel — raise instead of miscompiling.
    Each message names the ABI rule violated or the slice that will handle the construct;
    doomcc histograms these messages into the slice worklist. *)
