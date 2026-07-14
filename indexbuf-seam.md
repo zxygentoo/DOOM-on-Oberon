@@ -152,12 +152,18 @@ opens a MenuViewers viewer ("System.Close" menu): an `Oberon.Task` calls
 Mandel.Mod lifecycle (ModifyMsg → drop mode, next displayed tick re-`Open`s
 the largest 4:3 rect — w aligned, h = w·3/4, scale w/320 gcd-reduced;
 suspend → off; close → off + task removal; quit/I_Error → viewer closes).
-The desktop stays live around the game. **No key routing in this slice**:
-Oberon.Loop drains the keyboard FIFO before tasks run, so raw PS/2 cannot
-ride the task model — the window shows attract/demo and runs `-timedemo`;
-playable input in a viewer is the open §6 v2 input problem (focus-based
-translated input gives no key-up). Fullscreen `DOOM.Run`/`RunHW` (bit 1
-clear) are byte-identically unchanged.
+The desktop stays live around the game. **Keys are point-to-play** (the §6
+v2 input slice, 2026-07-14): `stub/Input.Mod.patch` (applied by mkdisk,
+the agent-autoload precedent) adds `Input.SetSink` — a raw-scancode tap
+that, while set, receives the untranslated make/break stream inside
+`Peek` and silences the translated path (NIL = stock, byte-identical).
+The stub registers its `Byte` FSM (the same one the seize loop drains the
+FIFO through) exactly while the pointer is over the game frame: park the
+mouse on DOOM to play with full arrows/modifiers fidelity, move it off
+and the keyboard is Oberon's again — the Log stays typable mid-game.
+Events land in the blob's key ring from Oberon.Loop's own input polling,
+between ticks, exactly like the seize loop's PollKeys. Fullscreen
+`DOOM.Run`/`RunHW` (bit 1 clear) are byte-identically unchanged.
 
 ## The software faces
 

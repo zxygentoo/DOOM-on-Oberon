@@ -45,6 +45,14 @@ trap 'rm -rf "$T"' EXIT
 patch --silent "$T/src/Oberon.Mod.txt" <"$OA/Mod/ProjectOberon/Oberon.Mod.patch"
 "$BIN/txt2ob" "$T/src/Oberon.Mod.txt" >/dev/null
 rm "$T/src/Oberon.Mod.txt"
+
+# 2b. the raw-scancode tap (seam v2 input slice): Input.SetSink diverts the
+#     untranslated make/break stream to a registered client (DOOM.Window's
+#     point-to-play capture); NIL = stock behaviour, byte-identical
+"$BIN/ob2txt" "$T/src/Input.Mod" >/dev/null
+patch --silent "$T/src/Input.Mod.txt" <"$REPO/stub/Input.Mod.patch"
+"$BIN/txt2ob" "$T/src/Input.Mod.txt" >/dev/null
+rm "$T/src/Input.Mod.txt"
 for f in "$OA/Mod/Common/AgentProtocol.Mod" "$OA/Mod/ProjectOberon/AgentTool.Mod"; do
   cp "$f" "$T/src/$(basename "$f").txt"
   "$BIN/txt2ob" "$T/src/$(basename "$f").txt" >/dev/null

@@ -10,16 +10,20 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   - DOOM.Window (seam v2, viewer presentation): an ordinary MenuViewers viewer; an
     Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone rect (the
     largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to keep only
-    thresholds/LUT/frame-copy), and the desktop stays LIVE around the game. No key
-    routing in this slice — Oberon.Loop owns the keyboard between ticks (the par 6
-    input problem, its own slice) — so it shows the attract/demo loop and runs
-    -timedemo; System.Close abandons the game (the next Run/Window reloads fresh).*)
+    thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
+    Keys are POINT-TO-PLAY (the par 6 v2 input slice): while the pointer is over
+    the game frame, Input.SetSink (the raw-scancode tap patched into Input.Mod —
+    stub/Input.Mod.patch, applied by mkdisk like the agent autoload patch) hands
+    the untranslated make/break stream to the same Byte FSM the seize loop uses —
+    full arrows/modifiers, identical feel; move the pointer off the game and the
+    keyboard is Oberon's again (type in the Log mid-game). System.Close abandons
+    the game (the next Run/Window reloads fresh).*)
 
   (*import order: ORB wants interface-referenced modules first — Display before
     Viewers, Viewers/Texts before Oberon, MenuViewers/TextFrames after (the proven
     Mandel.Mod order)*)
-  IMPORT SYSTEM, Files, Display, Viewers, Texts, Oberon, MenuViewers, TextFrames,
-    Halftone;
+  IMPORT SYSTEM, Files, Input, Display, Viewers, Texts, Oberon, MenuViewers,
+    TextFrames, Halftone;
 
   CONST
     (*ABI par 8 himem layout*)
@@ -52,6 +56,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     V: Viewers.Viewer;              (*the window viewer; NIL = none*)
     F: Frame;
     modeOn: BOOLEAN;
+    captured: BOOLEAN;              (*point-to-play: the raw tap is ours*)
 
   PROCEDURE Msg(s: ARRAY OF CHAR);
   BEGIN Texts.WriteString(W, s); Texts.WriteLn(W); Texts.Append(Oberon.Log, W.buf)
@@ -127,22 +132,27 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
 
   (*one byte of the scancode stream: F0 = break prefix, E0 = extended prefix,
     else a key. The emulator (and a real keyboard) wraps arrows in fake-shift
-    E0 12 / E0 F0 12 — tabE[12H] = 0 swallows it. Event = pressed | doomkey<<8.*)
-  PROCEDURE PollKeys;
-    VAR b: BYTE; dk: INTEGER;
+    E0 12 / E0 F0 12 — tabE[12H] = 0 swallows it. Event = pressed | doomkey<<8.
+    Shared by the seize loop's FIFO drain (PollKeys) and DOOM.Window's raw tap
+    (Input.SetSink feeds it from inside Oberon.Loop's own polling).*)
+  PROCEDURE Byte(b: BYTE);
+    VAR dk: INTEGER;
   BEGIN
-    WHILE SYSTEM.BIT(msAdr, 28) DO
-      SYSTEM.GET(kbdAdr, b);
-      IF b = 0F0H THEN up := TRUE
-      ELSIF b = 0E0H THEN ext := TRUE
-      ELSE
-        IF ext THEN dk := tabE[b] ELSE dk := tabN[b] END ;
-        IF dk # 0 THEN
-          IF up THEN keyin(dk * 100H) ELSE keyin(dk * 100H + 1) END
-        END ;
-        up := FALSE; ext := FALSE
-      END
+    IF b = 0F0H THEN up := TRUE
+    ELSIF b = 0E0H THEN ext := TRUE
+    ELSE
+      IF ext THEN dk := tabE[b] ELSE dk := tabN[b] END ;
+      IF dk # 0 THEN
+        IF up THEN keyin(dk * 100H) ELSE keyin(dk * 100H + 1) END
+      END ;
+      up := FALSE; ext := FALSE
     END
+  END Byte;
+
+  PROCEDURE PollKeys;
+    VAR b: BYTE;
+  BEGIN
+    WHILE SYSTEM.BIT(msAdr, 28) DO SYSTEM.GET(kbdAdr, b); Byte(b) END
   END PollKeys;
 
   (*repaint the desktop DOOM scribbled over: viewer state lives in the heap, only
@@ -258,13 +268,38 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     RETURN ok
   END Shape;
 
+  (*point-to-play: the raw tap (Input.Mod.patch) is ours exactly while the pointer
+    is over the game frame — park the mouse on DOOM to play with the seize loop's
+    full make/break fidelity; move it off and the keyboard is Oberon's again. The
+    sink feeds Byte from inside Oberon.Loop's own input polling, so events land in
+    the blob's key ring between ticks, exactly like the seize loop's PollKeys.*)
+  PROCEDURE Capture;
+    VAR keys: SET; mx, my: INTEGER; inside: BOOLEAN;
+  BEGIN
+    Input.Mouse(keys, mx, my);
+    inside := (mx >= F.X) & (mx < F.X + F.W) & (my >= F.Y) & (my < F.Y + F.H);
+    IF inside # captured THEN
+      captured := inside;
+      IF inside THEN up := FALSE; ext := FALSE; Input.SetSink(Byte)
+      ELSE Input.SetSink(NIL)
+      END
+    END
+  END Capture;
+
+  PROCEDURE Release;
+  BEGIN
+    IF captured THEN Input.SetSink(NIL); captured := FALSE END
+  END Release;
+
   PROCEDURE Tick0;  (*the task: lifecycle + one blob Tick per Oberon.Loop pass*)
     VAR r, st: INTEGER;
   BEGIN
     IF (V = NIL) OR (V.state = 0) THEN  (*System.Close: abandon the game*)
+      Release;
       IF modeOn THEN Halftone.Off; modeOn := FALSE END ;
       V := NIL; F := NIL; Oberon.Remove(T); Msg("DOOM: window closed")
     ELSIF V.state < 0 THEN  (*suspended (covered track): release the panel*)
+      Release;
       IF modeOn THEN Halftone.Off; modeOn := FALSE END
     ELSE  (*displayed*)
       IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)claim.
@@ -272,8 +307,10 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
         IF Shape(F.X, F.Y, F.W, F.H) THEN Halftone.On; modeOn := TRUE END
       END ;
       IF modeOn THEN
+        Capture;  (*point-to-play: keys are ours while the pointer is over the game*)
         r := tick(); SYSTEM.GET(SharedBase + 12, st);
         IF (r # 0) OR (st # 0) THEN  (*quit or I_Error (timedemo ends here)*)
+          Release;
           Halftone.Off; modeOn := FALSE;
           Oberon.Remove(T);
           Viewers.Close(V); V := NIL; F := NIL;
@@ -312,13 +349,13 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
       r := init(WadBase, SharedBase);
       IF r # 0 THEN MsgInt("DOOM: Init failed:", r)
       ELSE
-        NEW(F); F.handle := Handle; modeOn := FALSE;
+        NEW(F); F.handle := Handle; modeOn := FALSE; captured := FALSE;
         Oberon.AllocateUserViewer(Oberon.Par.vwr.X, X, Y);
         V := MenuViewers.New(
           TextFrames.NewMenu("DOOM", "System.Close"),
           F, TextFrames.menuH, X, Y);
         Oberon.Install(T);
-        Msg("DOOM: windowed (demo/timedemo; no keys) — System.Close to stop")
+        Msg("DOOM: windowed — point the mouse at the game to play; System.Close to stop")
       END
     END
   END Window;
