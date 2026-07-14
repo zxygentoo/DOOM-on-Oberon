@@ -140,8 +140,12 @@ enum { IXB_BASE = 0x310000, IXB_LUT = 0x310000 + 64000, IXB_CTL = 0x310000 + 642
 extern unsigned char __dg_lum[256];      /* dither.c's LUT (filled by __dg_build_lut) */
 extern unsigned char *__dg_fixed_vbuf;   /* i_video.c (patch 0004): fixed buffer placement */
 extern void __dg_upload_thresholds(void);/* dither.c: DOOM's blue noise -> the threshold window */
+extern void __dg_upload_geometry(void); /* dither.c v2: the out2 row map + rect/scale registers */
 
 static unsigned int __dg_hw;             /* SHARED +544 bit 0, latched by DG_Init */
+static unsigned int __dg_hw_viewer;      /* +544 bit 1: viewer presentation — the STUB
+                                            owns mode + geometry (seam v2); the blob
+                                            keeps only thresholds + LUT + frame copy */
 static unsigned int __dg_hw_on;          /* mode written once, at the first frame */
 
 extern void __dg_frame_copy(const unsigned char *src, unsigned char *dst);
@@ -164,11 +168,17 @@ void DG_DrawFrame(void)
             palette_changed = 0;
         }
         if (!__dg_hw_on) {
-            /* the content-free contract: the hardware powers up with a ZERO
-               threshold RAM — upload DOOM's rendition (the same __dg_bn64 the
-               software path thresholds against) before the panel switches */
+            /* the content-free contract, v2: the hardware powers up with ZERO
+               tables AND a zero-sized rect — upload DOOM's rendition (the same
+               __dg_bn64 the software path thresholds against) plus the out2
+               row map and the fullscreen 16/5 geometry before the panel
+               switches (seam v2: the shadowed registers latch at the next
+               vblank entry, so the desktop lingers at most one frame) */
             __dg_upload_thresholds();
-            *(volatile unsigned int *)IXB_CTL = 1;
+            if (!__dg_hw_viewer) {
+                __dg_upload_geometry();
+                *(volatile unsigned int *)IXB_CTL = 1;
+            }
             __dg_hw_on = 1;
         }
         return;
@@ -198,6 +208,7 @@ void DG_Init(void)
        lesson; see DG_DrawFrame). __dg_fixed_vbuf (patch 0004) stays unset —
        kept as the seam a hardware double-buffer variant would use. */
     __dg_hw = *(volatile unsigned int *)(__shared_base + 544) & 1;
+    __dg_hw_viewer = (*(volatile unsigned int *)(__shared_base + 544) >> 1) & 1;
     __dg_hw_on = 0;
     printf("DOOM on Oberon: blob alive\n");
 }
@@ -251,7 +262,7 @@ void exit(int status)
     /* hardware scanout off first: the mono framebuffer was never written, so
        the desktop reappears the instant the mode bit drops (the stub's
        Restore broadcast becomes belt-and-braces) */
-    if (__dg_hw) {
+    if (__dg_hw && !__dg_hw_viewer) {
         *(volatile unsigned int *)IXB_CTL = 0;
         __dg_hw_on = 0;
     }

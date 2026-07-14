@@ -1,14 +1,25 @@
-MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, run DOOM.
+MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   Mirrors bin/doomrun.ml's loader obligations (ABI par 7/8): image at BlobBase, header
   verified (magic/version/length/checksum), bss zeroed per header, WAD chunks
   concatenated at WadBase, SHARED page zeroed + WAD length at +28 + command tail at
-  +1024, then Init/Tick through the crt0 thunks. Keyboard: raw PS/2 scancodes off the
-  MMIO FIFO — Oberon.Loop is parked while we run, so Input.Mod never sees them; the
-  raw stream carries make/break and the E0-extended arrows that Input.Mod drops.*)
+  +1024, then Init/Tick through the crt0 thunks.
+  Two presentations, one blob:
+  - DOOM.Run / DOOM.RunHW: the v1 fullscreen SEIZE — the loop never returns to
+    Oberon.Loop, so the stub owns the raw PS/2 FIFO (make/break + E0 arrows that
+    Input.Mod drops) and the game is fully playable.
+  - DOOM.Window (seam v2, viewer presentation): an ordinary MenuViewers viewer; an
+    Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone rect (the
+    largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to keep only
+    thresholds/LUT/frame-copy), and the desktop stays LIVE around the game. No key
+    routing in this slice — Oberon.Loop owns the keyboard between ticks (the par 6
+    input problem, its own slice) — so it shows the attract/demo loop and runs
+    -timedemo; System.Close abandons the game (the next Run/Window reloads fresh).*)
 
-  (*import order: ORB wants interface-referenced modules first — Oberon's interface
-    names Viewers and Texts, so both precede it*)
-  IMPORT SYSTEM, Files, Viewers, Texts, Oberon;
+  (*import order: ORB wants interface-referenced modules first — Display before
+    Viewers, Viewers/Texts before Oberon, MenuViewers/TextFrames after (the proven
+    Mandel.Mod order)*)
+  IMPORT SYSTEM, Files, Display, Viewers, Texts, Oberon, MenuViewers, TextFrames,
+    Halftone;
 
   CONST
     (*ABI par 8 himem layout*)
@@ -29,12 +40,18 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
     InitProc = PROCEDURE (wad, cfg: INTEGER): INTEGER;
     TickProc = PROCEDURE (): INTEGER;
     KeyProc = PROCEDURE (ev: INTEGER);
+    Frame = POINTER TO FrameDesc;
+    FrameDesc = RECORD (Display.FrameDesc) END ;
 
   VAR
     W: Texts.Writer;
     init: InitProc; tick: TickProc; keyin: KeyProc;
     up, ext: BOOLEAN;               (*PS/2 F0/E0 prefix state*)
     tabN, tabE: ARRAY 256 OF BYTE;  (*scancode -> doomkey; 0 = ignore*)
+    T: Oberon.Task;                 (*DOOM.Window: one Tick per Oberon.Loop pass*)
+    V: Viewers.Viewer;              (*the window viewer; NIL = none*)
+    F: Frame;
+    modeOn: BOOLEAN;
 
   PROCEDURE Msg(s: ARRAY OF CHAR);
   BEGIN Texts.WriteString(W, s); Texts.WriteLn(W); Texts.Append(Oberon.Log, W.buf)
@@ -135,10 +152,16 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
   BEGIN M.id := Viewers.restore; Viewers.Broadcast(M)
   END Restore;
 
-  PROCEDURE Run0(hw: BOOLEAN);
-    VAR blobLen, wadLen, len, i, a, w, r, st: INTEGER;
+  (*load blob + WAD, verify, stub obligations (bss zero, SHARED zero + WAD length +
+    presentation bits at +544 + command tail), plant the entries. TRUE = ready for
+    init(). hwbits: 0 = software dither, 1 = hardware scanout (blob owns
+    mode+geometry), 3 = viewer presentation (bit 1: the STUB owns mode+geometry —
+    the blob keeps thresholds/LUT/frame-copy). Bits only meaningful on a bitstream
+    that carries Indexbuf — on the stock bitstream hw modes play blind.*)
+  PROCEDURE Load(hwbits: INTEGER): BOOLEAN;
+    VAR ok: BOOLEAN; blobLen, wadLen, len, i, a, w: INTEGER;
       name: ARRAY 16 OF CHAR;
-  BEGIN
+  BEGIN ok := FALSE;
     Msg("DOOM: loading doom.blob");
     LoadFileAt("doom.blob", BlobBase, BlobCap - BlobBase, blobLen);
     IF blobLen = -1 THEN Msg("DOOM: doom.blob not found")
@@ -161,16 +184,24 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
         FOR w := a TO a + len - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         FOR w := SharedBase TO SharedBase + SharedSize - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         SYSTEM.PUT(SharedBase + 28, wadLen);
-        (*feat/indexbuf (draft seam): SHARED +544 bit 0 advertises the hardware
-          scanout ditherer; the blob then composites into the Indexbuf window
-          and skips the software dither. Only meaningful on a bitstream that
-          carries Indexbuf — on the stock bitstream RunHW plays blind (desktop
-          stays; use Run)*)
-        IF hw THEN SYSTEM.PUT(SharedBase + 544, 1) END ;
+        IF hwbits # 0 THEN SYSTEM.PUT(SharedBase + 544, hwbits) END ;
         CopyArgs;
         SYSTEM.GET(BlobBase + 20, w); SYSTEM.PUT(SYSTEM.ADR(init), BlobBase + w);
         SYSTEM.GET(BlobBase + 24, w); SYSTEM.PUT(SYSTEM.ADR(tick), BlobBase + w);
         SYSTEM.GET(BlobBase + 28, w); SYSTEM.PUT(SYSTEM.ADR(keyin), BlobBase + w);
+        ok := TRUE
+      END
+    END ;
+    RETURN ok
+  END Load;
+
+  PROCEDURE Run0(hw: BOOLEAN);
+    VAR r, st, bits: INTEGER;
+  BEGIN
+    IF V # NIL THEN Msg("DOOM: close the DOOM window first")
+    ELSE
+      IF hw THEN bits := 1 ELSE bits := 0 END ;
+      IF Load(bits) THEN
         Msg("DOOM: Init (D_DoomMain takes a while)");
         r := init(WadBase, SharedBase);
         IF r # 0 THEN Restore; MsgInt("DOOM: Init failed:", r)
@@ -193,6 +224,104 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
   PROCEDURE RunHW*;
   BEGIN Run0(TRUE)
   END RunHW;
+
+  (*---- DOOM.Window: the viewer presentation (seam v2) ----*)
+
+  PROCEDURE Paint(x, y, w, h: INTEGER);  (*the frame ground around the rect*)
+  BEGIN Oberon.RemoveMarks(x, y, w, h);
+    Display.ReplConst(Display.black, x, y, w, h, Display.replace)
+  END Paint;
+
+  PROCEDURE Shape(fx, fy, fw, fh: INTEGER): BOOLEAN;
+    (*the largest 4:3 rect in the frame: w a multiple of 32 and >= 320 (the DDA
+      upscales only), h = w*3/4 = (w DIV 32)*24 (even), centred; horizontal scale
+      w/320 reduced by the gcd (>= 32, since 32 divides both). w = 576 (user track)
+      gives 9/5; w = 1024 would give the fullscreen 16/5 through the same math.*)
+    VAR x0, x1, w, h, yt, a, b, g: INTEGER; ok: BOOLEAN;
+  BEGIN
+    x0 := (fx + 31) DIV 32 * 32;
+    x1 := (fx + fw) DIV 32 * 32;
+    w := x1 - x0;
+    h := (w DIV 32) * 24;
+    IF h > fh THEN  (*height-bound: shrink w to keep the aspect*)
+      w := fh * 4 DIV 3 DIV 32 * 32; h := (w DIV 32) * 24
+    END ;
+    ok := w >= 320;
+    IF ok THEN
+      x0 := x0 + (x1 - x0 - w) DIV 64 * 32;
+      yt := Display.Height - fy - fh + (fh - h) DIV 2;
+      a := w; b := 320;
+      WHILE b # 0 DO g := a MOD b; a := b; b := g END ;
+      ok := Halftone.Open(x0, yt, w, h, w DIV a, 320 DIV a, 0);
+      IF ok THEN Halftone.LinearRows(200, 320, h) END
+    END ;
+    RETURN ok
+  END Shape;
+
+  PROCEDURE Tick0;  (*the task: lifecycle + one blob Tick per Oberon.Loop pass*)
+    VAR r, st: INTEGER;
+  BEGIN
+    IF (V = NIL) OR (V.state = 0) THEN  (*System.Close: abandon the game*)
+      IF modeOn THEN Halftone.Off; modeOn := FALSE END ;
+      V := NIL; F := NIL; Oberon.Remove(T); Msg("DOOM: window closed")
+    ELSIF V.state < 0 THEN  (*suspended (covered track): release the panel*)
+      IF modeOn THEN Halftone.Off; modeOn := FALSE END
+    ELSE  (*displayed*)
+      IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)claim.
+        The blob uploaded its thresholds + LUT during Init's first frame*)
+        IF Shape(F.X, F.Y, F.W, F.H) THEN Halftone.On; modeOn := TRUE END
+      END ;
+      IF modeOn THEN
+        r := tick(); SYSTEM.GET(SharedBase + 12, st);
+        IF (r # 0) OR (st # 0) THEN  (*quit or I_Error (timedemo ends here)*)
+          Halftone.Off; modeOn := FALSE;
+          Oberon.Remove(T);
+          Viewers.Close(V); V := NIL; F := NIL;
+          IF st > 1 THEN st := 0 END ;
+          MsgInt("DOOM: exit status", st)
+        END
+      END
+    END
+  END Tick0;
+
+  PROCEDURE Handle(G: Display.Frame; VAR M: Display.FrameMsg);
+  BEGIN
+    CASE G OF Frame:
+      CASE M OF
+        Oberon.InputMsg:
+          IF M(Oberon.InputMsg).id = Oberon.track THEN
+            Oberon.DrawMouseArrow(M(Oberon.InputMsg).X, M(Oberon.InputMsg).Y)
+          END
+      | MenuViewers.ModifyMsg:
+          (*open / neighbour resize / suspend (H = 0) — drop the mode, let the next
+            displayed tick re-Shape against the updated frame*)
+          IF (M.Y # G.Y) OR (M.H # G.H) THEN
+            IF modeOn THEN Halftone.Off; modeOn := FALSE END ;
+            IF M.H > 0 THEN Paint(G.X, M.Y, G.W, M.H) END
+          END
+      END
+    END
+  END Handle;
+
+  PROCEDURE Window*;
+    VAR r, X, Y: INTEGER;
+  BEGIN
+    IF V # NIL THEN Msg("DOOM: window already open")
+    ELSIF Load(3) THEN
+      Msg("DOOM: Init (D_DoomMain takes a while)");
+      r := init(WadBase, SharedBase);
+      IF r # 0 THEN MsgInt("DOOM: Init failed:", r)
+      ELSE
+        NEW(F); F.handle := Handle; modeOn := FALSE;
+        Oberon.AllocateUserViewer(Oberon.Par.vwr.X, X, Y);
+        V := MenuViewers.New(
+          TextFrames.NewMenu("DOOM", "System.Close"),
+          F, TextFrames.menuH, X, Y);
+        Oberon.Install(T);
+        Msg("DOOM: windowed (demo/timedemo; no keys) — System.Close to stop")
+      END
+    END
+  END Window;
 
   PROCEDURE InitTables;
     VAR i: INTEGER;
@@ -238,5 +367,6 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem, seize the machine, ru
     E(14H, KeyFire); E(11H, KeyAlt); E(5AH, KeyEnter)
   END InitTables;
 
-BEGIN Texts.OpenWriter(W); up := FALSE; ext := FALSE; InitTables
+BEGIN Texts.OpenWriter(W); up := FALSE; ext := FALSE; InitTables;
+  T := Oberon.NewTask(Tick0, 0)
 END DOOM.

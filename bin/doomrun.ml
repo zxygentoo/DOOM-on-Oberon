@@ -426,9 +426,9 @@ let () =
       base
   in
   (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
-  (* -hw probe: the Indexbuf threshold window's first quads after Init — did the
-     blob's __dg_upload_thresholds land? (expected 0x30E000 = FF1C550F for the
-     DOOM blue noise: bytes 15, 85, 28, 255) *)
+  (* -hw probe: the Indexbuf threshold window's first words after Init — did the
+     blob's __dg_upload_thresholds land? (v2 raw upload: expected 0x30E000 =
+     311C550F for the DOOM blue noise, bytes 15, 85, 28, 49 verbatim) *)
   if !hw
   then
     Printf.eprintf

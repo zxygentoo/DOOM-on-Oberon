@@ -51,8 +51,9 @@ for f in "$OA/Mod/Common/AgentProtocol.Mod" "$OA/Mod/ProjectOberon/AgentTool.Mod
   rm "$T/src/$(basename "$f").txt"
 done
 
-# 3. the stub + the indexed-colour-mode demo (compiled in dependency order like any module)
-for m in DOOM.Mod Mandel.Mod; do
+# 3. the stub + the display mode's Oberon face + its demo client (compiled in
+#    dependency order like any module — Halftone before its importer Mandel)
+for m in DOOM.Mod Halftone.Mod Mandel.Mod; do
   cp "$REPO/stub/$m" "$T/src/$m.txt"
   "$BIN/txt2ob" "$T/src/$m.txt" >/dev/null
   rm "$T/src/$m.txt"
@@ -64,7 +65,7 @@ printf 'doom.blob\ndoom1.wad.0\ndoom1.wad.1\n' >>"$T/src/.packonly"
 
 # 5. a DOOM section in System.Tool (middle-click targets)
 "$BIN/ob2txt" "$T/src/System.Tool" >/dev/null
-printf '\nDOOM.Run\nDOOM.Run -timedemo demo1\nDOOM.RunHW\nDOOM.RunHW -timedemo demo1\nMandel.Draw\n' >>"$T/src/System.Tool.txt"
+printf '\nDOOM.Run\nDOOM.Run -timedemo demo1\nDOOM.RunHW\nDOOM.RunHW -timedemo demo1\nMandel.Open\nDOOM.Window\nDOOM.Window -timedemo demo1\n' >>"$T/src/System.Tool.txt"
 "$BIN/txt2ob" "$T/src/System.Tool.txt" >/dev/null
 rm "$T/src/System.Tool.txt"
 

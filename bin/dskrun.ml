@@ -217,11 +217,14 @@ let () =
            M.keyboard_input m b;
            Printf.printf "dskrun: %6d ms  ps2 %d byte(s)\n%!" ms (Bytes.length b)
          | Click (x, ytop) ->
-           (* move + middle press (SDL button 2); Oberon polls the mouse word,
-              so the press persists until the auto-scheduled Release *)
+           (* move + middle press (SDL button 2); Oberon polls the mouse word once
+              per LOOP PASS, and under DOOM.Window a pass contains a whole game
+              tick (~125 sim-ms) — a 50 ms pulse fell between polls. 400 ms spans
+              several passes; menu commands fire on RELEASE, so a longer hold is
+              still one click *)
            M.mouse_moved m x (fb_lines - 1 - ytop);
            M.mouse_button m 2 true;
-           acts := List.sort compare ((ms + 50, Release) :: !acts);
+           acts := List.sort compare ((ms + 400, Release) :: !acts);
            Printf.printf "dskrun: %6d ms  middle-click (%d, %d top)\n%!" ms x ytop
          | Release -> M.mouse_button m 2 false
          | Probe -> probe ms

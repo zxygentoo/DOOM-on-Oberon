@@ -453,30 +453,57 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
     }
 }
 
-/* ---- feat/indexbuf: the hardware-scanout threshold upload ----
+/* ---- feat/indexbuf v2: the hardware-scanout uploads ----
  *
- * The Indexbuf hardware ships CONTENT-FREE: before mode-on, every client
- * uploads its 64x64 threshold map as 2048 slot quads at the 8 KB window
- * (draft seam indexbuf-seam.md; quad a = {row[6], phase[1], slot[4]}, the
- * slot's 3-or-4 thresholds one byte each, K=3 slots padded with 255). DOOM's
- * rendition is __dg_bn64 — the same table __dg_dither_fs thresholds against,
- * so hardware and software mode render identical pixels by construction. */
+ * The Indexbuf hardware ships CONTENT-FREE — and since the v2 generality
+ * rework, GEOMETRY-FREE (draft seam indexbuf-seam.md v2): before mode-on a
+ * client uploads its 64x64 threshold map VERBATIM (the v1 slot-quad packing
+ * died with the baked slot tables), a 768-word row map carrying the vertical
+ * geometry, and the rect/scale registers. DOOM's rendition is __dg_bn64 —
+ * the same table __dg_dither_fs thresholds against — and the row map is the
+ * EXACT out2 dealing the software kernel computes, so hardware and software
+ * mode render identical pixels by construction. */
 void __dg_upload_thresholds(void)
 {
     volatile unsigned int *dst = (volatile unsigned int *)0x30E000;
-    int r, p, j, k;
-    for (r = 0; r < 64; r++)
-        for (p = 0; p < 2; p++)
-            for (j = 0; j < 10; j++) {
-                unsigned int q = 0;
-                for (k = 3; k >= 0; k--) {
-                    unsigned int t = k < __dg_xw[j]
-                        ? __dg_bn64[64 * r + 32 * p + __dg_xoff[j] + k]
-                        : 255u;
-                    q = (q << 8) | t;
-                }
-                dst[r * 32 + p * 16 + j] = q;
-            }
+    int w, k;
+    for (w = 0; w < 1024; w++) {
+        unsigned int v = 0;
+        for (k = 3; k >= 0; k--)
+            v = (v << 8) | __dg_bn64[4 * w + k];
+        dst[w] = v;
+    }
+}
+
+/* The geometry upload: the row map (rect-relative output row -> {thr_row[21:16],
+ * row_base[15:0]}) is __dg_dither_fs's 200 -> 768 Bresenham with the out2
+ * alternation, row_base = sy*320; the registers are the fullscreen rect and the
+ * 16/5 horizontal DDA (the mode-13h stretch). Registers are SHADOWED in
+ * hardware — they take effect at the next vblank entry, so the panel shows the
+ * untouched mono desktop for at most one more frame after mode-on. */
+void __dg_upload_geometry(void)
+{
+    volatile unsigned int *rm = (volatile unsigned int *)(0x30E000 + 0x1000);
+    volatile unsigned int *reg = (volatile unsigned int *)(0x310000 + 64256);
+    int sy, i, acc = 0, y = 0;
+    for (sy = 0; sy < 200; sy++) {
+        acc += 96;
+        i = 0;
+        while (acc >= 25) {
+            acc -= 25;
+            rm[y] = ((unsigned int)((2 * sy + (i & 1)) & 63) << 16)
+                    | (unsigned int)(320 * sy);
+            y++;
+            i++;
+        }
+    }
+    reg[1] = 0;    /* WIN_X */
+    reg[2] = 0;    /* WIN_Y */
+    reg[3] = 1024; /* WIN_W */
+    reg[4] = 768;  /* WIN_H */
+    reg[5] = 16;   /* XNUM */
+    reg[6] = 5;    /* XDEN */
+    reg[7] = 0;    /* XOFF */
 }
 
 /* ---- the hw-scanout frame copy (feat/indexbuf) ----
