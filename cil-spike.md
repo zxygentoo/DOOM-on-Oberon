@@ -1,5 +1,12 @@
 # CIL spike results — AGENT.md §9 gate
 
+*(Historical record, hoisted from `spikes/cil/RESULTS.md` when the spike
+retired, 2026-07-14. The probe driver `merge_doom.ml` is deleted —
+`lib/frontend.ml` is its production descendant; the fetch script became the
+`vendor/doomgeneric` submodule pin; `preprocess.sh` and `patch/` live at
+the repo root and remain the live pipeline. The run line below is the
+spike-era invocation, kept verbatim.)*
+
 **Verdict: GREEN.** goblint-cil swallows doomgeneric whole.
 
 Run: `./fetch-doomgeneric.sh && ./preprocess.sh && dune exec bin/merge_doom.exe -- out/i/*.i`

@@ -90,11 +90,11 @@ their loops.
 | char | 8-bit **unsigned** (chocolate-doom lineage is already clean here) |
 | short | 16-bit |
 | int, long, pointers | 32-bit |
-| long long | **does not exist** — census-verified (`spikes/cil/`): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
+| long long | **does not exist** — census-verified (`cil-spike.md`): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
 | float, double | **banned in the blob v1** — census-verified strays are 6 cold functions (m_config float vars, am_map zoom, mouse-speed box (dead — no mouse), timedemo fps print), excised/pinned at 1c; RISC5 single-precision FPU exists if ever needed |
 | alignment | natural, max 4; stack and structs word-aligned |
 | packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
-| bitfields | **banned outright** — census-verified (`spikes/cil/`): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
+| bitfields | **banned outright** — census-verified (`cil-spike.md`): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
 
 ## 5. Runtime helpers and intrinsics
 

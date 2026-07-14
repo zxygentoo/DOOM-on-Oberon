@@ -11,3 +11,7 @@
 [submodule "vendor/oberon-agent"]
 	path = vendor/oberon-agent
 	url = https://github.com/zxygentoo/oberon-agent.git
+[submodule "vendor/doomgeneric"]
+	path = vendor/doomgeneric
+	url = https://github.com/ozkl/doomgeneric
+	ignore = dirty

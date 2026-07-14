@@ -1,3 +1,0 @@
-(executable
- (name merge_doom)
- (libraries goblint-cil))

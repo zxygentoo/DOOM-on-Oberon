@@ -11,12 +11,12 @@
 # reference build keeps the port's feature surface. -std=gnu99 is the
 # project dialect pin (gcc 15 defaults to C23).
 #
-# Prereqs (fresh clone): spikes/cil/fetch-doomgeneric.sh, then
-# spikes/cil/preprocess.sh — which applies patches/0001 (integer-fps
-# timedemo) to the vendor tree; the host build must share that patch or
-# the two sides diverge on G_CheckDemoStatus.
+# Prereqs (fresh clone): git submodule update --init vendor/doomgeneric,
+# then ./preprocess.sh — which applies patch/0001 (integer-fps timedemo)
+# to the vendor tree; the host build must share that patch or the two
+# sides diverge on G_CheckDemoStatus.
 
-SRCDIR := ../spikes/cil/vendor/doomgeneric/doomgeneric
+SRCDIR := ../vendor/doomgeneric/doomgeneric
 
 CC := gcc
 CFLAGS := -std=gnu99 -O2 -Wall $(shell sdl2-config --cflags)

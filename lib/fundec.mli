@@ -6,7 +6,7 @@
     AST to a {!Emu.Risc5_isa.instr} list. Naive register allocation
     (ABI §2: a leaf uses R0-R11 freely; args and return sit in R0..). Constructs
     outside the supported subset raise {!Check.Unsupported} rather than miscompile
-    (ABI §4 + the spikes/cil census). *)
+    (ABI §4 + the cil-spike.md census). *)
 
 (** [compile ~globals fd] lowers a function to its unresolved {!Linker.obj}: integer args
     arrive in R0.., the result leaves in R0 (ABI §3), and it returns via [B LNK]; globals

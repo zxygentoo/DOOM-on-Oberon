@@ -1,4 +1,4 @@
-(** The pre-codegen checks (ABI §4 + the spikes/cil census), shared by {!Globals} and
+(** The pre-codegen checks (ABI §4 + the cil-spike.md census), shared by {!Globals} and
     {!Fundec}: the single refusal channel — raised instead of miscompiling. *)
 
 (** Raised for any construct the current slices do not handle; the message names the

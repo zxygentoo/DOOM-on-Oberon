@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# CIL spike (AGENT.md §9): preprocess exactly the TUs our port would compile —
-# the Makefile's SRC_DOOM list minus the platform TU (doomgeneric_xlib.c,
-# which our own DG hooks replace). Host gcc/glibc headers are fine for the
-# parse/merge gate; the real pipeline will use a 32-bit machdep + mini-libc
-# headers.
+# The port's source pipeline: preprocess exactly the TUs the port compiles —
+# the vendor Makefile's SRC_DOOM list minus the platform TU (doomgeneric_xlib.c,
+# which our own DG hooks replace) — into out/i/*.i, doomcc's input.
+# Host gcc/glibc headers on purpose: the .i files carry the glibc protos the
+# mini-libc's typedefs are written to match (nominal Mergecil, AGENT.md 1c.1).
 set -euo pipefail
 cd "$(dirname "$0")"
 SRCDIR=vendor/doomgeneric/doomgeneric
-# Local source patches (patches/*.patch): the vendor tree is a fetched clone
-# (gitignored), so our few source changes live as reviewed patch files applied
-# idempotently here — a fresh clone and an already-patched tree both converge.
-# Currently: 0001 replaces G_CheckDemoStatus's float fps with integer
-# tenths (the ABI §4 float ban; -timedemo stays alive as the 1d fps benchmark).
-for p in patches/*.patch; do
+# Local source patches (patch/*.patch): the vendor tree is a pinned submodule
+# (ignore = dirty — the applied patches keep it modified by design), so our few
+# source changes live as reviewed patch files applied idempotently here — a
+# fresh checkout and an already-patched tree both converge. 0001 integer-fps
+# timedemo (ABI §4 float ban) · 0002 default gamma 2 · 0003/0004 the
+# videobuffer alias/fixed-placement pair (fps lever #1, Halftone seam).
+for p in patch/*.patch; do
   git -C vendor/doomgeneric apply --reverse --check "$PWD/$p" 2>/dev/null \
     || git -C vendor/doomgeneric apply "$PWD/$p"
 done
