@@ -34,9 +34,10 @@ let libc_path name =
    Create deliberately does NOT call DG_Init: its banner printf would spin on the
    UART tx-ready bit the bare jig emulator never raises. *)
 let port_fakes =
-  "int __fake_argc; char __fake_a3; char __fake_a4; void doomgeneric_Tick(void) { } void \
-   doomgeneric_Create(int argc, char **argv) { __fake_argc = argc; __fake_a3 = argc > 3 \
-   ? argv[3][0] : 0; __fake_a4 = argc > 4 ? argv[4][4] : 0; }"
+  "int __fake_argc; char __fake_a3; char __fake_a4; unsigned char *__dg_fixed_vbuf; void \
+   doomgeneric_Tick(void) { } void doomgeneric_Create(int argc, char **argv) { \
+   __fake_argc = argc; __fake_a3 = argc > 3 ? argv[3][0] : 0; __fake_a4 = argc > 4 ? \
+   argv[4][4] : 0; }"
 ;;
 
 (* ---- doomcc side: parse -> place globals -> compile (once per sample); returns the
@@ -1392,6 +1393,19 @@ let port_selfchecks =
             rest dropped — an over-accepting ring would overwrite live slots and
             surface as c > 256 or a wrapped last key (last != 255) *)
        , [ 0, 256255; 3, 256255 ] )
+     ; ( "unsigned int fsrc[16000]; unsigned int fdst[16002]; int fcp(int i){ int k; \
+          unsigned int h; for (k = 0; k < 16000; k++) fsrc[k] = (unsigned int)k * \
+          2654435761u + (unsigned int)i; for (k = 0; k < 16002; k++) fdst[k] = \
+          0xA5A5A5A5u; __dg_frame_copy((const unsigned char *)fsrc, (unsigned char \
+          *)(fdst + 1)); h = 2166136261u; for (k = 0; k < 16002; k++) h = (h ^ fdst[k]) \
+          * 16777619u; return (int)h; }"
+       , "fcp"
+         (* drawer #5's full-scale differential: the hand __dg_frame_copy (the ~port
+            merge swaps it in) vs gcc compiling the C spec — an order-sensitive FNV
+            over the WHOLE destination including both sentinel fence words (fdst[0],
+            fdst[16001] stay 0xA5A5A5A5), so an off-by-one word, a short copy, or a
+            fence overwrite all move the hash *)
+       , [ 0, -693980321; 7, 625517663 ] )
      ; ( "int slp(int i){ unsigned int t0; unsigned int t1; t0 = DG_GetTicksMs(); \
           DG_SleepMs(3); t1 = DG_GetTicksMs(); return (t1 - t0 >= 3u) + (i - i); }"
        , "slp"

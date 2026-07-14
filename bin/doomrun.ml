@@ -53,6 +53,7 @@ let blob_args = ref ""
 let dump_at = ref ""
 let profile_out = ref ""
 let keys_spec = ref ""
+let hw = ref false
 let inputs = ref []
 
 (* -profile state: counts.(w) = executions of code word [base_word + w] *)
@@ -87,6 +88,15 @@ let rec parse_args = function
        ABI §7) just before that Tick, so the whole ring/responder/menu path
        is drivable headlessly, e.g. menu quit: 27 Esc, 113 'q', 121 'y' *)
     keys_spec := s;
+    parse_args rest
+  | "-hw" :: rest ->
+    (* feat/halftone: advertise the hardware scanout (SHARED +544 bit 0, draft
+       seam halftone-seam.md). The emulator models no Halftone — the window is
+       plain RAM and nothing reads the mode bit — but the BLOB forks on the
+       flag: DG_DrawFrame drops the dither for the LUT upload, so -profile /
+       instruction counts measure the hw-path workload. Frame dumps are
+       meaningless in this mode (the mono fb is never written). *)
+    hw := true;
     parse_args rest
   | "-dump-at" :: s :: rest ->
     (* comma list of GAMETICS (needs -args "-timedemo demo1": singletics makes
@@ -361,6 +371,7 @@ let () =
     ram.(w) <- 0
   done;
   ram.((shared_base + 28) / 4) <- String.length wad;
+  if !hw then ram.((shared_base + 544) / 4) <- 1;
   (* the command tail (§8 +1024): raw bytes + NUL, exactly as the stub will *)
   if String.length !blob_args > 0
   then (
@@ -415,6 +426,16 @@ let () =
       base
   in
   (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
+  (* -hw probe: the Halftone threshold window's first words after Init — did the
+     blob's __dg_upload_thresholds land? (v2 raw upload: expected 0x30E000 =
+     311C550F for the DOOM blue noise, bytes 15, 85, 28, 49 verbatim) *)
+  if !hw
+  then
+    Printf.eprintf
+      "doomrun: bn window after Init: %08X %08X %08X\n%!"
+      (F.ram m).(0x30E000 / 4)
+      (F.ram m).(0x30E004 / 4)
+      (F.ram m).(0x30E008 / 4);
   if List.mem 1 gametic_targets then dump_gametic 1;
   (* -profile: count from the first Tick on (Init excluded — frames are the cost) *)
   if !profile_out <> ""

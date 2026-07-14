@@ -73,3 +73,16 @@ heartbeat + 1: `-ticks N` parks the machine with gametic N+1 on the screen.
 To compare against `golden_gNNNNN.fbw`, run `-ticks N-1` (or generate the
 host frame at N+1). Verified 2026-07-09: `-ticks 100` ≡ host gametic 101,
 bit-identical.
+
+## -hw (feat/halftone: the hardware scanout ditherer)
+
+`-hw` runs the shipped config with the video DMA live and the Halftone
+scanout path on (`video:true fb_bram:true halftone:true` — 10c proved fb_bram
+cycle-identical to the `video:false` counterfactual, so cycles/tick stays
+comparable with non-hw runs), and advertises the hardware to the blob via
+SHARED +544 (draft seam: halftone-seam.md). The blob then composites into the
+Halftone window and skips the software dither. `-fbw` in this mode dumps the
+frame the PANEL shows: after the park, the harness lets the raster free-run
+one full scan (~1.1 M cycles) and reconstructs the .fbw from the compose
+FSM's `ht_ack`/`ht_row`/`ht_col`/`ht_word` probes — same file format,
+same golden comparison.

@@ -1,0 +1,32 @@
+--- a/doomgeneric/i_video.c
++++ b/doomgeneric/i_video.c
+@@ -96,6 +96,11 @@
+ 
+ byte *I_VideoBuffer = NULL;
+ 
++/* feat/halftone: a platform layer may place the compositing buffer at a FIXED
++   address (a hardware scanout window) by setting this before I_InitGraphics;
++   0 = the normal zone allocation. Defined here so every platform links. */
++byte *__dg_fixed_vbuf = 0;
++
+ // If true, game is running as a screensaver
+ 
+ boolean screensaver_mode = false;
+@@ -301,6 +306,17 @@
+ 
+     extern void I_InitInput(void);
+     I_InitInput();
++
++    /* feat/halftone: the platform set a fixed scanout window — repoint the
++       compositing buffer there (the zone block above stays allocated and idle;
++       this port never reaches I_ShutdownGraphics: exit() unwinds instead) */
++    if (__dg_fixed_vbuf) {
++        I_VideoBuffer = __dg_fixed_vbuf;
++#ifdef CMAP256
++        if (fb_scaling == 1)
++            DG_ScreenBuffer = (pixel_t *)I_VideoBuffer;
++#endif
++    }
+ }
+ 
+ void I_ShutdownGraphics (void)

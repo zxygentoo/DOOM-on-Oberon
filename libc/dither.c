@@ -18,7 +18,9 @@
  * Playdate look; dithering the doubled columns separately is the (2x cost)
  * quality knob if 1d's framebuffer dumps disappoint. */
 
-static unsigned char __dg_lum[256];
+/* non-static since feat/halftone: the hardware-scanout path (doomgeneric_oberon.c)
+ * uploads these 256 bytes to the Halftone LUT window on palette change */
+unsigned char __dg_lum[256];
 
 /* thresholds 1..254 over the luminance scale: luminance 0 is always black,
  * 255 always white — pure black and pure white never dither. */
@@ -449,4 +451,74 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
         }
         src += 320;
     }
+}
+
+/* ---- feat/halftone v2: the hardware-scanout uploads ----
+ *
+ * The Halftone hardware ships CONTENT-FREE — and since the v2 generality
+ * rework, GEOMETRY-FREE (draft seam halftone-seam.md v2): before mode-on a
+ * client uploads its 64x64 threshold map VERBATIM (the v1 slot-quad packing
+ * died with the baked slot tables), a 768-word row map carrying the vertical
+ * geometry, and the rect/scale registers. DOOM's rendition is __dg_bn64 —
+ * the same table __dg_dither_fs thresholds against — and the row map is the
+ * EXACT out2 dealing the software kernel computes, so hardware and software
+ * mode render identical pixels by construction. */
+void __dg_upload_thresholds(void)
+{
+    volatile unsigned int *dst = (volatile unsigned int *)0x30E000;
+    int w, k;
+    for (w = 0; w < 1024; w++) {
+        unsigned int v = 0;
+        for (k = 3; k >= 0; k--)
+            v = (v << 8) | __dg_bn64[4 * w + k];
+        dst[w] = v;
+    }
+}
+
+/* The geometry upload: the row map (rect-relative output row -> {thr_row[21:16],
+ * row_base[15:0]}) is __dg_dither_fs's 200 -> 768 Bresenham with the out2
+ * alternation, row_base = sy*320; the registers are the fullscreen rect and the
+ * 16/5 horizontal DDA (the mode-13h stretch). Registers are SHADOWED in
+ * hardware — they take effect at the next vblank entry, so the panel shows the
+ * untouched mono desktop for at most one more frame after mode-on. */
+void __dg_upload_geometry(void)
+{
+    volatile unsigned int *rm = (volatile unsigned int *)(0x30E000 + 0x1000);
+    volatile unsigned int *reg = (volatile unsigned int *)(0x310000 + 64256);
+    int sy, i, acc = 0, y = 0;
+    for (sy = 0; sy < 200; sy++) {
+        acc += 96;
+        i = 0;
+        while (acc >= 25) {
+            acc -= 25;
+            rm[y] = ((unsigned int)((2 * sy + (i & 1)) & 63) << 16)
+                    | (unsigned int)(320 * sy);
+            y++;
+            i++;
+        }
+    }
+    reg[1] = 0;    /* WIN_X */
+    reg[2] = 0;    /* WIN_Y */
+    reg[3] = 1024; /* WIN_W */
+    reg[4] = 768;  /* WIN_H */
+    reg[5] = 16;   /* XNUM */
+    reg[6] = 5;    /* XDEN */
+    reg[7] = 0;    /* XOFF */
+}
+
+/* ---- the hw-scanout frame copy (feat/halftone) ----
+ *
+ * DG_DrawFrame's per-frame block copy: the finished 320x200 frame, zone
+ * buffer -> the Halftone pixel window, both ends word-aligned by contract
+ * (Z_Malloc returns 4-aligned; the window base is 64K-aligned). Kept
+ * dead-simple as the executable spec — drawer #5 (lib/drawers.ml) replaces
+ * it at link time (~2.3 instrs/word vs ~20 naive-compiled), and the jig
+ * diffs the hand code against gcc compiling exactly this. */
+void __dg_frame_copy(const unsigned char *src, unsigned char *dst)
+{
+    const unsigned int *s = (const unsigned int *)src;
+    unsigned int *d = (unsigned int *)dst;
+    int i;
+    for (i = 0; i < 16000; i++)
+        d[i] = s[i];
 }

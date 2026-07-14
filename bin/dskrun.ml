@@ -14,7 +14,14 @@
 
    Usage: dskrun [-seconds N] [-serial-log FILE]
                  [-ps2 "ms:HEXBYTES,..."] [-click "ms:x:ytop,..."]
-                 [-probe "ms,..."] [-dump "ms:name,..."] <image.dsk>
+                 [-probe "ms,..."] [-dump "ms:name,..."]
+                 [-htdump "ms:name,..."] <image.dsk>
+
+   -htdump reads the halftone pixel window (draft seam halftone-seam.md:
+   320x200 palette bytes at 0x310000, row 0 = top) as an 8-bit PGM — the
+   emulator has no halftone scanout, but the window is plain RAM, so a
+   client whose LUT is identity (Mandel) dumps as a directly viewable
+   grayscale frame.
 
    Click coordinates are screen coords with y from the TOP (what you read off
    a dumped PGM); the Oberon flip happens here. *)
@@ -29,6 +36,9 @@ let shared_base = 0x300000
 let fb_word_base = 0xE7F00 / 4
 let fb_words = 32
 let fb_lines = 768
+let ht_base = 0x310000
+let ht_w = 320
+let ht_h = 200
 
 let fail fmt =
   Printf.ksprintf
@@ -46,6 +56,7 @@ let ps2_spec = ref ""
 let click_spec = ref ""
 let probe_spec = ref ""
 let dump_spec = ref ""
+let htdump_spec = ref ""
 let inputs = ref []
 
 let rec parse_args = function
@@ -69,6 +80,9 @@ let rec parse_args = function
     parse_args rest
   | "-dump" :: s :: rest ->
     dump_spec := s;
+    parse_args rest
+  | "-htdump" :: s :: rest ->
+    htdump_spec := s;
     parse_args rest
   | a :: rest ->
     inputs := a :: !inputs;
@@ -97,6 +111,7 @@ type action =
   | Release (* middle button up, auto-scheduled 50 ms after a Click *)
   | Probe
   | Dump of string
+  | Htdump of string
 
 let schedule () =
   let acts = ref [] in
@@ -120,7 +135,24 @@ let schedule () =
        | [ ms; name ] -> add (int_of ms) (Dump name)
        | _ -> fail "dskrun: -dump wants ms:name, got %s" e)
     (split ',' !dump_spec);
+  List.iter
+    (fun e ->
+       match split ':' e with
+       | [ ms; name ] -> add (int_of ms) (Htdump name)
+       | _ -> fail "dskrun: -htdump wants ms:name, got %s" e)
+    (split ',' !htdump_spec);
   List.sort compare !acts
+;;
+
+(* PGM P5: the halftone pixel window, already top-down byte-per-pixel *)
+let dump_ixframe m path =
+  let ram = F.ram m in
+  Out_channel.with_open_bin path (fun oc ->
+    Printf.fprintf oc "P5\n%d %d\n255\n" ht_w ht_h;
+    for i = 0 to (ht_w * ht_h) - 1 do
+      let b = (ram.((ht_base + i) / 4) lsr (8 * (i land 3))) land 0xFF in
+      Out_channel.output_char oc (Char.chr b)
+    done)
 ;;
 
 (* PGM P5: fb bottom-up flipped so the file reads top-down, bit 0 leftmost *)
@@ -185,18 +217,25 @@ let () =
            M.keyboard_input m b;
            Printf.printf "dskrun: %6d ms  ps2 %d byte(s)\n%!" ms (Bytes.length b)
          | Click (x, ytop) ->
-           (* move + middle press (SDL button 2); Oberon polls the mouse word,
-              so the press persists until the auto-scheduled Release *)
+           (* move + middle press (SDL button 2); Oberon polls the mouse word once
+              per LOOP PASS, and under DOOM.Window a pass contains a whole game
+              tick (~125 sim-ms) — a 50 ms pulse fell between polls. 400 ms spans
+              several passes; menu commands fire on RELEASE, so a longer hold is
+              still one click *)
            M.mouse_moved m x (fb_lines - 1 - ytop);
            M.mouse_button m 2 true;
-           acts := List.sort compare ((ms + 50, Release) :: !acts);
+           acts := List.sort compare ((ms + 400, Release) :: !acts);
            Printf.printf "dskrun: %6d ms  middle-click (%d, %d top)\n%!" ms x ytop
          | Release -> M.mouse_button m 2 false
          | Probe -> probe ms
          | Dump name ->
            let path = Printf.sprintf "dskrun_%s.pgm" name in
            dump_frame m path;
-           Printf.printf "dskrun: %6d ms  frame -> %s\n%!" ms path);
+           Printf.printf "dskrun: %6d ms  frame -> %s\n%!" ms path
+         | Htdump name ->
+           let path = Printf.sprintf "dskrun_%s.pgm" name in
+           dump_ixframe m path;
+           Printf.printf "dskrun: %6d ms  ixframe -> %s\n%!" ms path);
         fire ()
       | _ -> ()
     in

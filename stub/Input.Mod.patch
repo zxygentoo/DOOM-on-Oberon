@@ -1,0 +1,39 @@
+--- Input.Mod.txt
++++ Input.Mod.txt
+@@ -3,7 +3,11 @@
+   IMPORT SYSTEM;
+ 
+   CONST msAdr = -40; kbdAdr = -36;
++  TYPE Sink* = PROCEDURE (b: BYTE);  (*raw scancode tap (DOOM.Window): while set,
++    Peek hands the untranslated make/break stream to the sink and the translated
++    path (Available/Read) goes silent; NIL = stock behaviour*)
+   VAR kbdCode: BYTE; (*last keyboard code read*)
++    sink: Sink;
+     Recd, Up, Shift, Ctrl, Ext: BOOLEAN;
+     KTabAdr: INTEGER;  (*keyboard code translation table*)
+     MW, MH, MX, MY: INTEGER; (*mouse limits and coords*)
+@@ -14,7 +18,9 @@
+ 
+   PROCEDURE Peek();
+   BEGIN
+-    IF SYSTEM.BIT(msAdr, 28) THEN
++    IF sink # NIL THEN
++      WHILE SYSTEM.BIT(msAdr, 28) DO SYSTEM.GET(kbdAdr, kbdCode); sink(kbdCode) END
++    ELSIF SYSTEM.BIT(msAdr, 28) THEN
+       SYSTEM.GET(kbdAdr, kbdCode);
+       IF kbdCode = 0F0H THEN Up := TRUE
+       ELSIF kbdCode = 0E0H THEN Ext := TRUE
+@@ -56,8 +62,12 @@
+   BEGIN MW := w; MH := h
+   END SetMouseLimits;
+ 
++  PROCEDURE SetSink*(s: Sink);
++  BEGIN sink := s
++  END SetSink;
++
+   PROCEDURE Init*;
+-  BEGIN Up := FALSE; Shift := FALSE; Ctrl := FALSE; Recd := FALSE;
++  BEGIN Up := FALSE; Shift := FALSE; Ctrl := FALSE; Recd := FALSE; sink := NIL;
+     KTabAdr := SYSTEM.ADR($
+       00 00 00 00 00 1A 00 00  00 00 00 00 00 09 60 00
+       00 00 00 00 00 71 31 00  00 00 7A 73 61 77 32 00
