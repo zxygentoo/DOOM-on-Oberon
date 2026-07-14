@@ -40,11 +40,12 @@ format) and cycle counts come out.
 
 ## Layout
 
-- `vendor/oberon-risc-hardcaml` — the design, a pristine submodule
-  (`data_only` to dune; its own nested emulator submodule stays
-  uninitialized). Pin bumps only, like the main workspace's emulator vendor.
+- `vendor/oberon-risc-hardcaml` — a symlink to the root submodule (one
+  submodule, two workspace roots), pristine (`data_only` to dune; its nested
+  emulator submodule is initialized — the MAIN workspace's `emu` reads it,
+  this root never scans it). Pin bumps happen at the root.
 - `risc5/`, `nexys4/` — wrapper libs that `copy_files`-compile the submodule's
-  `lib/` and `boards/nexys-4/` into this project (the same pattern both repos
+  `lib/` and `board/nexys-4/` into this project (the same pattern both repos
   use to vendor the emulator).
 - `doom_sim.ml` — the harness: pokes blob + WAD + SHARED page into the PSRAM
   model's byte lanes before releasing reset, boots the doomboot ROM, polls the
@@ -59,8 +60,8 @@ opam exec --switch=5.2.0+ox -- dune build --root sim
 
 D=$(pwd)  # repo root; dune exec runs from the build dir, use absolute paths
 opam exec --switch=5.2.0+ox -- dune exec --root $D/sim ./doom_sim.exe -- \
-  $D/doom.blob $D/doom1.wad $D/doomboot.rom \
-  -args "-timedemo demo1" -ticks 100 -fbw $D/sim_g00100.fbw
+  $D/_out/doom.blob $D/_out/doom1.wad $D/_out/doomboot.rom \
+  -args "-timedemo demo1" -ticks 100 -fbw $D/_out/sim_g00100.fbw
 ```
 
 `dune runtest` from the repo root never enters this directory; the vendored

@@ -3,7 +3,7 @@
 *(Historical record, hoisted from `spikes/cil/RESULTS.md` when the spike
 retired, 2026-07-14. The probe driver `merge_doom.ml` is deleted —
 `lib/frontend.ml` is its production descendant; the fetch script became the
-`vendor/doomgeneric` submodule pin; `preprocess.sh` and `patch/` live at
+`vendor/doomgeneric` submodule pin; `script/pp_doomsrc.sh` (né preprocess.sh) and `patch/` live in
 the repo root and remain the live pipeline. The run line below is the
 spike-era invocation, kept verbatim.)*
 

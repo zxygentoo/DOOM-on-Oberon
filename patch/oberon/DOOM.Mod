@@ -13,7 +13,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
     Keys are POINT-TO-PLAY (the par 6 v2 input slice): while the pointer is over
     the game frame, Input.SetSink (the raw-scancode tap patched into Input.Mod —
-    stub/Input.Mod.patch, applied by mkdisk like the agent autoload patch) hands
+    patch/oberon/Input.Mod.patch, applied by mkdisk like the agent autoload patch) hands
     the untranslated make/break stream to the same Byte FSM the seize loop uses —
     full arrows/modifiers, identical feel; move the pointer off the game and the
     keyboard is Oberon's again (type in the Log mid-game). System.Close abandons

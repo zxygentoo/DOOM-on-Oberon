@@ -4,8 +4,8 @@ The seam for the **generalized indexed/grayscale display mode** (né
 `Indexbuf` — renamed at the merge round, 2026-07-14: the v1 name described
 the storage format; v2's identity is the transformation — threshold-map
 halftoning at scanout) — the host
-repo's `Halftone` (boards/nexys-4/halftone.{ml,mli}) and this repo's software
-side (libc hw path, `stub/Halftone.Mod`, doom_sim -hw). v1 of this seam was
+repo's `Halftone` (board/nexys-4/halftone.{ml,mli}) and this repo's software
+side (libc hw path, `Halftone.Mod` (shipped with the hardware: host repo board/nexys-4/Mod), doom_sim -hw). v1 of this seam was
 the fps-lever-#3 experiment: DOOM's dither moved into scanout hardware, with
 the 320×200 → fullscreen geometry *baked* into the design. v2 is the
 generality rework (review round 2026-07-14): **the hardware keeps only
@@ -156,7 +156,7 @@ Mandel.Mod lifecycle (ModifyMsg → drop mode, next displayed tick re-`Open`s
 the largest 4:3 rect — w aligned, h = w·3/4, scale w/320 gcd-reduced;
 suspend → off; close → off + task removal; quit/I_Error → viewer closes).
 The desktop stays live around the game. **Keys are point-to-play** (the §6
-v2 input slice, 2026-07-14): `stub/Input.Mod.patch` (applied by mkdisk,
+v2 input slice, 2026-07-14): `patch/oberon/Input.Mod.patch` (applied by mkdisk,
 the agent-autoload precedent) adds `Input.SetSink` — a raw-scancode tap
 that, while set, receives the untranslated make/break stream inside
 `Peek` and silences the translated path (NIL = stock, byte-identical).
@@ -175,14 +175,14 @@ between ticks, exactly like the seize loop's PollKeys. Fullscreen
   `__dg_upload_geometry` = the out2 row map (`row_base = sy·320`, `thr_row`
   = the out2 dealing — the same 20-line Bresenham as the software kernel) +
   fullscreen rect + `16/5/0`.
-- **`stub/Halftone.Mod`** (in-image Oberon-07, the module face for Oberon
+- **`Halftone.Mod`** (host repo board/nexys-4/Mod — shipped with the hardware it drives; in-image Oberon-07, the module face for Oberon
   clients): `Open(x, y, w, h, xnum, xden, xoff)` (validates alignment and
   `XNUM ≥ XDEN`, writes the shadows) · `LinearRows(srcH, stride)` (Bresenham
   dealing, per-output `thr_row = y MOD 64`) · `SetTone` / `ToneIdentity` ·
   `SetThresholds` / `Bayer8` · `On` / `Off` · `Sync` (vblank wait) ·
   `Frame()` (the counter). Single-owner by construction — there is exactly
   one rect in hardware; the doc is the arbiter (like the Oberon focus).
-- **`stub/Mandel.Mod`** — rewritten as `Halftone`'s first client (drops its
+- **`Mandel.Mod`** (host repo board/nexys-4/Mod — shipped with the hardware) — rewritten as `Halftone`'s first client (drops its
   own quad packing and MMIO constants): the generality witness stays two
   clients deep with zero shared content.
 

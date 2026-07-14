@@ -16,10 +16,11 @@
  * wipe (whose multiple renders per gametic depend on the pacing clock; from
  * ~gametic 100 on, render <-> gametic is 1:1).
  *
- * Build: the `golden` target in host/Makefile — gcc -m32 -funsigned-char
+ * Build: `make golden` (top-level Makefile) — gcc -m32 -funsigned-char
  * (the jig oracle's target model), no SDL, no sound.
  *
- * Usage: GOLDEN_TICS=100,1000,2500,5000 ./golden  (defaults to that list) */
+ * Usage: `make goldens` (or GOLDEN_TICS=... ./golden in _out/golden; defaults
+ * to that list — frames land next to the binary) */
 
 #include <stdio.h>
 #include <stdlib.h>

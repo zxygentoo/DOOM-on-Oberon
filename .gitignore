@@ -1,18 +1,14 @@
 _build/
-*.install
 _opam/
+*.install
+/_out/
+
+# tool-litter patterns: harness dumps written to CWD by manual invocations
+# (the Makefile targets keep everything under _out/)
 *.blob
 *.blob.map
-doom1.wad
-host/build/
-host/doomgeneric
-doom1.wad.*
-frame_*.pgm
-host/build32/
-host/golden
 *.fbw
-doomboot.rom
-sim_*.fbw
-DOOM.dsk
+frame_*.pgm
 dskrun_*.pgm
-/out/
+scene_*.sbuf
+scene_*.pal
