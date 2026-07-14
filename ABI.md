@@ -389,15 +389,20 @@ lifecycle re-`Open`s the largest 4:3 rect per ModifyMsg, and quit/suspend
 drop the mode.
 
 Arbitration (2026-07-15, `Halftone.Mod` policy — the hardware stays pure
-mechanism): the rect is **single-owner, enforced** — `Open` claims it (while
-a claim is live every further `Open`, any caller's, returns FALSE and writes
-nothing), `Off` releases it, `Claimed()` probes. Refused viewer clients
-tick-retry: a waiting Mandel resumes by itself, a claim-less DOOM window
-pauses; `DOOM.Run -win` refuses up front when the rect is claimed. The seize
-path stays outside the claim by construction — the seized loop freezes every
-claimant, and the exit restore broadcast makes the holder re-claim and
-re-upload. Known caveat: the blob uploads thresholds once per Run, so a DOOM
-window re-claiming after a foreign owner renders through foreign tables until
-a palette change re-uploads the LUT (the thresholds stay foreign until the
-next `DOOM.Run`). `Halftone.Off` doubles as the recovery command for a claim
-wedged by a dead client.
+mechanism): the rect is **single-owner at consumer lifetime** — `Claim` takes
+it for as long as the consumer lives (a viewer from open to close, or one
+command), `Release` frees it (parameterless: doubles as the recovery command
+for a claim wedged by a dead client). While a claim is live a second `Claim`
+returns FALSE; the client reports ("close its owner first") and the user
+exits the current consumer before opening the next — `DOOM.Run -win` refuses
+up front, before Load+Init; `Mandel.Open` refuses before opening its viewer.
+Inside a claim the window is the owner's through suspend and resize alike:
+`Open` (re)shapes the rect (it refuses outside any claim, so a
+forgot-to-Claim client fails loudly — but it cannot tell owners apart:
+cross-client exclusion is `Claim`'s alone), `Off` blanks the picture while
+covered, and the tables never change hands — which is what makes the blob's
+one-time threshold upload safe for the whole session: a live DOOM window can
+never see foreign tables. The seize path stays outside the claim by
+construction — the seized loop freezes every claimant, and the exit restore
+broadcast lets a suspended claimant re-shape and re-upload (Mandel re-sends
+its tables at every mode-on, so it self-heals).

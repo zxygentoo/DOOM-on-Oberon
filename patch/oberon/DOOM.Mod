@@ -14,9 +14,11 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone rect
     (the largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to keep
     only thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
-    The rect is single-owner (Halftone.Open claims, Off releases): -win refuses
-    up front while another client (a Mandel viewer) holds the claim, and a
-    mid-game loss of the rect just pauses the game until it frees.
+    The rect is single-owner at CONSUMER lifetime (Halftone.Claim in Win,
+    Release at close/quit): -win refuses up front while another consumer (a
+    Mandel viewer) lives, and our claim holds through suspend and resize — no
+    one can touch the tables under a live window, so the blob's one-time
+    threshold upload stays valid for the whole session.
     The -win token is consumed by the stub (a presentation choice, never passed
     to the blob); the rest of the line is the DOOM command tail as always.
     Keys are POINT-TO-PLAY (the par 6 v2 input slice): while the pointer is over
@@ -309,18 +311,17 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   BEGIN
     IF (V = NIL) OR (V.state = 0) THEN  (*System.Close: abandon the game*)
       Release;
-      IF modeOn THEN Halftone.Off; modeOn := FALSE END ;
+      IF V # NIL THEN Halftone.Release END ;  (*ours since Win; V = NIL is a ghost tick*)
+      modeOn := FALSE;
       V := NIL; F := NIL; Oberon.Remove(T); Msg("DOOM: window closed")
-    ELSIF V.state < 0 THEN  (*suspended (covered track): release the panel*)
+    ELSIF V.state < 0 THEN  (*suspended (covered track): picture off, claim kept*)
       Release;
       IF modeOn THEN Halftone.Off; modeOn := FALSE END
     ELSE  (*displayed*)
-      IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)claim — a
-        refused Open (another client holds the rect) just retries next pass, the
-        game paused until the rect frees. The blob uploaded its thresholds + LUT
-        during Init's first frame; known caveat: if another client owned the rect
-        in between, ITS tables stand here until a palette change re-uploads the
-        LUT (the blob uploads thresholds only once per Run)*)
+      IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)shape under
+        the held claim. The blob uploaded its thresholds + LUT during Init's first
+        frame, and they are still ours untouched — nobody can claim past a live
+        window*)
         IF Shape(F.X, F.Y, F.W, F.H) THEN Halftone.On; modeOn := TRUE END
       END ;
       IF modeOn THEN
@@ -328,7 +329,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
         r := tick(); SYSTEM.GET(SharedBase + 12, st);
         IF (r # 0) OR (st # 0) THEN  (*quit or I_Error (timedemo ends here)*)
           Release;
-          Halftone.Off; modeOn := FALSE;
+          Halftone.Release; modeOn := FALSE;
           Oberon.Remove(T);
           Viewers.Close(V); V := NIL; F := NIL;
           IF st > 1 THEN st := 0 END ;
@@ -360,14 +361,15 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   PROCEDURE Win(argPos: INTEGER);
     VAR r, X, Y: INTEGER;
   BEGIN
-    (*the rect is single-owner (Halftone.Open claims it): refuse up front while a
-      claim is live — BEFORE the ~10 s Load+Init, whose first frame would stomp the
-      owner's threshold/LUT tables (Init runs one tick by the doomgeneric contract)*)
-    IF Halftone.Claimed() THEN Msg("DOOM: panel rect in use (close its viewer first)")
+    (*the claim spans the window's whole lifetime, taken HERE — up front, so another
+      consumer refuses us BEFORE the ~10 s Load+Init, whose first frame would stomp
+      its threshold/LUT tables (Init runs one tick by the doomgeneric contract).
+      Every failure path releases; the success path releases at close/quit (Tick0)*)
+    IF ~Halftone.Claim() THEN Msg("DOOM: panel rect in use (close its viewer first)")
     ELSIF Load(3, argPos) THEN
       Msg("DOOM: Init (D_DoomMain takes a while)");
       r := init(WadBase, SharedBase);
-      IF r # 0 THEN MsgInt("DOOM: Init failed:", r)
+      IF r # 0 THEN Halftone.Release; MsgInt("DOOM: Init failed:", r)
       ELSE
         NEW(F); F.handle := Handle; modeOn := FALSE; captured := FALSE;
         Oberon.AllocateUserViewer(Oberon.Par.vwr.X, X, Y);
@@ -377,6 +379,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
         Oberon.Install(T);
         Msg("DOOM: windowed — point the mouse at the game to play; System.Close to stop")
       END
+    ELSE Halftone.Release  (*Load failed (it said why); free the rect*)
     END
   END Win;
 
