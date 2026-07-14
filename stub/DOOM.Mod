@@ -167,7 +167,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     init(). hwbits: 0 = software dither, 1 = hardware scanout (blob owns
     mode+geometry), 3 = viewer presentation (bit 1: the STUB owns mode+geometry —
     the blob keeps thresholds/LUT/frame-copy). Bits only meaningful on a bitstream
-    that carries Indexbuf — on the stock bitstream hw modes play blind.*)
+    that carries Halftone — on the stock bitstream hw modes play blind.*)
   PROCEDURE Load(hwbits: INTEGER): BOOLEAN;
     VAR ok: BOOLEAN; blobLen, wadLen, len, i, a, w: INTEGER;
       name: ARRAY 16 OF CHAR;

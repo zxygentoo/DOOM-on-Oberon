@@ -121,10 +121,10 @@ extern char *__fb_base;                 /* heap_doom.c binds 0xE7F00 */
 extern void __dg_build_lut(const unsigned char *pal);
 extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);
 
-/* ---- feat/indexbuf: the hardware-scanout presentation path ----
+/* ---- feat/halftone: the hardware-scanout presentation path ----
  *
- * Draft seam (doc: indexbuf-seam.md; hardware: host repo Indexbuf): a 64 KiB
- * window at IXB_BASE (ABI §8's back-buffer row, repurposed) that the board
+ * Draft seam (doc: halftone-seam.md; hardware: host repo Halftone): a 64 KiB
+ * window at HT_BASE (ABI §8's back-buffer row, repurposed) that the board
  * shadows into BRAM — pixels at +0 (I_VideoBuffer is PLACED there via
  * i_video.c's __dg_fixed_vbuf, patch 0004, so DOOM composites straight into
  * the scanout source), the 256-byte luminance LUT at +64000, the control
@@ -135,7 +135,7 @@ extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stri
  * D_DoomMain's long init — and off in exit(), which restores the desktop
  * instantly (the mono framebuffer was never touched). */
 
-enum { IXB_BASE = 0x310000, IXB_LUT = 0x310000 + 64000, IXB_CTL = 0x310000 + 64256 };
+enum { HT_BASE = 0x310000, HT_LUT = 0x310000 + 64000, HT_CTL = 0x310000 + 64256 };
 
 extern unsigned char __dg_lum[256];      /* dither.c's LUT (filled by __dg_build_lut) */
 extern unsigned char *__dg_fixed_vbuf;   /* i_video.c (patch 0004): fixed buffer placement */
@@ -159,12 +159,12 @@ void DG_DrawFrame(void)
            constant-rate flicker at the render rate. The copy restores the sw
            path's contract (the panel only ever scans complete frames, written
            once, in raster order); drawer #5 hand-rolls it. */
-        __dg_frame_copy(DG_ScreenBuffer, (unsigned char *)IXB_BASE);
+        __dg_frame_copy(DG_ScreenBuffer, (unsigned char *)HT_BASE);
         if (palette_changed) {
             int i;
             __dg_build_lut((const unsigned char *)colors);
             for (i = 0; i < 256; i++)
-                ((volatile unsigned char *)IXB_LUT)[i] = __dg_lum[i];
+                ((volatile unsigned char *)HT_LUT)[i] = __dg_lum[i];
             palette_changed = 0;
         }
         if (!__dg_hw_on) {
@@ -177,7 +177,7 @@ void DG_DrawFrame(void)
             __dg_upload_thresholds();
             if (!__dg_hw_viewer) {
                 __dg_upload_geometry();
-                *(volatile unsigned int *)IXB_CTL = 1;
+                *(volatile unsigned int *)HT_CTL = 1;
             }
             __dg_hw_on = 1;
         }
@@ -263,7 +263,7 @@ void exit(int status)
        the desktop reappears the instant the mode bit drops (the stub's
        Restore broadcast becomes belt-and-braces) */
     if (__dg_hw && !__dg_hw_viewer) {
-        *(volatile unsigned int *)IXB_CTL = 0;
+        *(volatile unsigned int *)HT_CTL = 0;
         __dg_hw_on = 0;
     }
     /* SHARED +12 (ABI §8): 0 running, 1 clean quit, negative = I_Error code */

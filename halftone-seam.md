@@ -1,7 +1,10 @@
-# indexbuf-seam.md — DRAFT v2 (feat/indexbuf; not part of frozen ABI v1)
+# halftone-seam.md — DRAFT v2 (feat/halftone; not part of frozen ABI v1)
 
-The seam for the **generalized indexed/grayscale display mode** — the host
-repo's `Indexbuf` (boards/nexys-4/indexbuf.{ml,mli}) and this repo's software
+The seam for the **generalized indexed/grayscale display mode** (né
+`Indexbuf` — renamed at the merge round, 2026-07-14: the v1 name described
+the storage format; v2's identity is the transformation — threshold-map
+halftoning at scanout) — the host
+repo's `Halftone` (boards/nexys-4/halftone.{ml,mli}) and this repo's software
 side (libc hw path, `stub/Halftone.Mod`, doom_sim -hw). v1 of this seam was
 the fps-lever-#3 experiment: DOOM's dither moved into scanout hardware, with
 the 320×200 → fullscreen geometry *baked* into the design. v2 is the
@@ -9,7 +12,7 @@ generality rework (review round 2026-07-14): **the hardware keeps only
 mechanism; every policy — tone, thresholds, and now geometry — is uploaded
 by the client at runtime.** DOOM demotes to one client among any Oberon
 program that wants grayscale pixels on the 1-bit panel. Draft-grade on
-purpose: these constants live here and in `Indexbuf`'s mli, and are promoted
+purpose: these constants live here and in `Halftone`'s mli, and are promoted
 into ABI.md (§10 version bump) only if the mode ships.
 
 What "content-free" now covers (v1 → v2):
@@ -23,7 +26,7 @@ What "content-free" now covers (v1 → v2):
 | panel coverage | fullscreen only | **overlay rect** `WIN_X/Y/W/H`, word-aligned in x, composed against the mono `Framebuf` per request |
 | frame sync | none | vblank flag + frame counter, CPU-readable (MMIO), geometry registers vsync-latched |
 
-## The pixel window (64 KiB at `IXB_BASE = 0x310000`)
+## The pixel window (64 KiB at `HT_BASE = 0x310000`)
 
 ABI §8's back-buffer row, repurposed — unchanged from v1. The board shadows
 every PSRAM-bound store in the window (write-through, the Framebuf/cache tap:
@@ -35,7 +38,7 @@ every PSRAM-bound store in the window (write-through, the Framebuf/cache tap:
 | `+64000 .. +64255` | tone LUT: index = pixel byte, value = 8-bit gray (DOOM: gamma-folded sum-256 luminance; identity ramp = a grayscale framebuffer) |
 | `+64256 ..` | the register block, word offsets below |
 
-### The register block (`IXB_CTL = base+64256`; word stores)
+### The register block (`HT_CTL = base+64256`; word stores)
 
 | reg | offset | width | semantics |
 |---|---|---|---|
@@ -59,7 +62,7 @@ live on MMIO (below). Power-up state is all-zero: a zero-sized rect claims
 nothing, so even a stray mode-on displays nothing — mode-off elaboration
 stays display-identical to a board without the module (the do-no-harm gate).
 
-## The table window (8 KiB at `IXB_THR = 0x30E000`, carved from the §8 spare row)
+## The table window (8 KiB at `HT_THR = 0x30E000`, carved from the §8 spare row)
 
 The hardware ships no dither map and no geometry. Before mode-on the client
 uploads both:
@@ -104,7 +107,7 @@ carries with it, so mid-row words need no priming reads.
 
 Per video request the module computes `claim = mode ∧ (y_req < 768) ∧ (y_req,
 col) ∈ rect`, latched at request-accept. The board mux forwards
-`viddata/vid_ack/vidpar` from `Indexbuf` when the completing request was
+`viddata/vid_ack/vidpar` from `Halftone` when the completing request was
 claimed, from `Framebuf` otherwise — **per request**, replacing v1's
 whole-screen mode mux. Fullscreen rect ≡ v1 behavior. Unclaimed requests
 never start the compose FSM. The mono framebuffer keeps shadowing every
@@ -197,9 +200,9 @@ between ticks, exactly like the seize loop's PollKeys. Fullscreen
    `claim = 0`; shadow-latch semantics pinned (a mid-frame geometry write
    takes effect only after a blanking fetch); status register progression.
 4. **Board gates** (DOOM repo, kept): mode-off byte-identical visual golden
-   (INDEXBUF=1); doom_sim `-hw` captured scanout ≡ the host golden
+   (HALFTONE=1); doom_sim `-hw` captured scanout ≡ the host golden
    bit-identical (the out2 row map transfers the oracle); jig, goldens ×4,
-   5026 exact; dskrun `-ixdump`; Mandel on the booted OS.
+   5026 exact; dskrun `-htdump`; Mandel on the booted OS.
 
 ## Cost / plumbing summary (v2 targets)
 

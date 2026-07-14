@@ -56,8 +56,8 @@ module O = struct
   [@@deriving hardcaml]
 end
 
-(* the Board_tb wiring, with the himem-wide PSRAM model; [hw] = feat/indexbuf:
-   video DMA live (served on-chip: Framebuf + the Indexbuf scanout ditherer —
+(* the Board_tb wiring, with the himem-wide PSRAM model; [hw] = feat/halftone:
+   video DMA live (served on-chip: Framebuf + the Halftone scanout ditherer —
    10c proved fb_bram cycle-identical to the video:false counterfactual, so
    cycles/tick stays comparable across the seam) *)
 let create ~hw ~contents (i : _ I.t) : _ O.t =
@@ -87,7 +87,7 @@ let create ~hw ~contents (i : _ I.t) : _ O.t =
       ~wbuf_depth:2
       ~video:hw
       ~fb_bram:hw
-      ~indexbuf:hw
+      ~halftone:hw
       { Soc.I.clock = i.clock
       ; pclk = i.pclk
       ; rst_n = i.rst_n
@@ -167,8 +167,8 @@ let rec parse = function
     max_mcycles := int_of_string n;
     parse r
   | "-hw" :: r ->
-    (* feat/indexbuf: hardware-scanout mode — SHARED +544 bit 0 advertises the
-       Indexbuf window to the blob (DG_DrawFrame reduces to the LUT upload);
+    (* feat/halftone: hardware-scanout mode — SHARED +544 bit 0 advertises the
+       Halftone window to the blob (DG_DrawFrame reduces to the LUT upload);
        -fbw then dumps the frame the PANEL actually shows, reconstructed from
        the compose FSM's acked words over one full scan of the parked frame *)
     hw := true;
@@ -303,8 +303,8 @@ let () =
   poke_byte (shared_base + 5) ((!ticks lsr 8) land 0xFF);
   poke_byte (shared_base + 6) ((!ticks lsr 16) land 0xFF);
   poke_byte (shared_base + 7) ((!ticks lsr 24) land 0xFF);
-  (* feat/indexbuf: advertise the hardware scanout (the loader's obligation;
-     draft seam indexbuf-seam.md — a zeroed page = software dither) *)
+  (* feat/halftone: advertise the hardware scanout (the loader's obligation;
+     draft seam halftone-seam.md — a zeroed page = software dither) *)
   if !hw then poke_byte (shared_base + 544) 1;
   (* idle inputs; reset for a few cycles *)
   i.pclk := Bits.gnd;
@@ -418,9 +418,9 @@ let () =
   then
     if !hw
     then (
-      (* feat/indexbuf: reconstruct the frame the panel shows from the compose
-         FSM's probes — at each ixb_ack the latched (row, col) name the span
-         word just composed in ixb_word. The machine is parked (doomboot's
+      (* feat/halftone: reconstruct the frame the panel shows from the compose
+         FSM's probes — at each ht_ack the latched (row, col) name the span
+         word just composed in ht_word. The machine is parked (doomboot's
          self-loop), the raster free-runs (Cyclesim advances the pclk raster
          1:1 with clk), so one full scan (~1.1 M cycles) visits all 24576
          visible words. File format = the golden .fbw: the fb window in memory
@@ -428,17 +428,17 @@ let () =
       (* the completed request's (row, col) is tracked off the soc-level
          vidreq/vidadr wires: the FSM accepts only when idle and acks 12 cycles
          later — well inside the raster's ~29.5-cycle request spacing — so each
-         ack pairs with the last request seen (a probe register inside Indexbuf
+         ack pairs with the last request seen (a probe register inside Halftone
          would be dead datapath and Cyclesim-DCE bait; learned the hard way) *)
       let probe n =
         match Cyclesim.lookup_node_or_reg_by_name sim n with
         | Some x -> x
         | None -> fail "doom_sim: -hw: no traced node named %S" n
       in
-      let ack = probe "ixb_ack"
+      let ack = probe "ht_ack"
       and req = probe "vidreq"
       and adr = probe "vidadr"
-      and wordn = probe "ixb_word" in
+      and wordn = probe "ht_word" in
       let org = 0xDFF00 / 4 in
       let pending = ref 0 in
       let words = Array.make (32 * 768) (-1) in

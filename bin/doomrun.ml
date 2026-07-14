@@ -90,8 +90,8 @@ let rec parse_args = function
     keys_spec := s;
     parse_args rest
   | "-hw" :: rest ->
-    (* feat/indexbuf: advertise the hardware scanout (SHARED +544 bit 0, draft
-       seam indexbuf-seam.md). The emulator models no Indexbuf — the window is
+    (* feat/halftone: advertise the hardware scanout (SHARED +544 bit 0, draft
+       seam halftone-seam.md). The emulator models no Halftone — the window is
        plain RAM and nothing reads the mode bit — but the BLOB forks on the
        flag: DG_DrawFrame drops the dither for the LUT upload, so -profile /
        instruction counts measure the hw-path workload. Frame dumps are
@@ -426,7 +426,7 @@ let () =
       base
   in
   (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
-  (* -hw probe: the Indexbuf threshold window's first words after Init — did the
+  (* -hw probe: the Halftone threshold window's first words after Init — did the
      blob's __dg_upload_thresholds land? (v2 raw upload: expected 0x30E000 =
      311C550F for the DOOM blue noise, bytes 15, 85, 28, 49 verbatim) *)
   if !hw

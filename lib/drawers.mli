@@ -31,7 +31,7 @@ val column : off:(string -> int) -> str:(string -> int) -> Linker.obj
     initializer [__dg_fs_build] once via the ready flag. *)
 val dither_fs : lum_off:int -> cut_off:int -> mask_off:int -> ready_off:int -> Linker.obj
 
-(** [__dg_frame_copy] — drawer #5 (feat/indexbuf): the hw-scanout path's per-frame
+(** [__dg_frame_copy] — drawer #5 (feat/halftone): the hw-scanout path's per-frame
     block copy, 16000 words both ends word-aligned by contract, ~20 instrs/word
     naive-compiled vs ~2.3 hand (a 16-pair immediate-offset body). Leaf; clobbers
     R0-R3 only. *)

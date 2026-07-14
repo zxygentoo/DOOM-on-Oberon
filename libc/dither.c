@@ -18,8 +18,8 @@
  * Playdate look; dithering the doubled columns separately is the (2x cost)
  * quality knob if 1d's framebuffer dumps disappoint. */
 
-/* non-static since feat/indexbuf: the hardware-scanout path (doomgeneric_oberon.c)
- * uploads these 256 bytes to the Indexbuf LUT window on palette change */
+/* non-static since feat/halftone: the hardware-scanout path (doomgeneric_oberon.c)
+ * uploads these 256 bytes to the Halftone LUT window on palette change */
 unsigned char __dg_lum[256];
 
 /* thresholds 1..254 over the luminance scale: luminance 0 is always black,
@@ -453,10 +453,10 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
     }
 }
 
-/* ---- feat/indexbuf v2: the hardware-scanout uploads ----
+/* ---- feat/halftone v2: the hardware-scanout uploads ----
  *
- * The Indexbuf hardware ships CONTENT-FREE — and since the v2 generality
- * rework, GEOMETRY-FREE (draft seam indexbuf-seam.md v2): before mode-on a
+ * The Halftone hardware ships CONTENT-FREE — and since the v2 generality
+ * rework, GEOMETRY-FREE (draft seam halftone-seam.md v2): before mode-on a
  * client uploads its 64x64 threshold map VERBATIM (the v1 slot-quad packing
  * died with the baked slot tables), a 768-word row map carrying the vertical
  * geometry, and the rect/scale registers. DOOM's rendition is __dg_bn64 —
@@ -506,10 +506,10 @@ void __dg_upload_geometry(void)
     reg[7] = 0;    /* XOFF */
 }
 
-/* ---- the hw-scanout frame copy (feat/indexbuf) ----
+/* ---- the hw-scanout frame copy (feat/halftone) ----
  *
  * DG_DrawFrame's per-frame block copy: the finished 320x200 frame, zone
- * buffer -> the Indexbuf pixel window, both ends word-aligned by contract
+ * buffer -> the Halftone pixel window, both ends word-aligned by contract
  * (Z_Malloc returns 4-aligned; the window base is 64K-aligned). Kept
  * dead-simple as the executable spec — drawer #5 (lib/drawers.ml) replaces
  * it at link time (~2.3 instrs/word vs ~20 naive-compiled), and the jig

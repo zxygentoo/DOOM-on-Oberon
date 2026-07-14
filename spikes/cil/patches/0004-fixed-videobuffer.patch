@@ -4,7 +4,7 @@
  
  byte *I_VideoBuffer = NULL;
  
-+/* feat/indexbuf: a platform layer may place the compositing buffer at a FIXED
++/* feat/halftone: a platform layer may place the compositing buffer at a FIXED
 +   address (a hardware scanout window) by setting this before I_InitGraphics;
 +   0 = the normal zone allocation. Defined here so every platform links. */
 +byte *__dg_fixed_vbuf = 0;
@@ -17,7 +17,7 @@
      extern void I_InitInput(void);
      I_InitInput();
 +
-+    /* feat/indexbuf: the platform set a fixed scanout window — repoint the
++    /* feat/halftone: the platform set a fixed scanout window — repoint the
 +       compositing buffer there (the zone block above stays allocated and idle;
 +       this port never reaches I_ShutdownGraphics: exit() unwinds instead) */
 +    if (__dg_fixed_vbuf) {

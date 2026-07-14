@@ -508,7 +508,7 @@ let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
   }
 ;;
 
-(* ---- __dg_frame_copy (drawer #5, feat/indexbuf) --------------------------------
+(* ---- __dg_frame_copy (drawer #5, feat/halftone) --------------------------------
    The C spec is dither.c's __dg_frame_copy: the hw-scanout path's per-frame block
    copy, 16000 words, both ends word-aligned by contract. Compiled it pays ~20
    instrs/word (naive fixed-home codegen); here 1000 iterations of a 16-pair body

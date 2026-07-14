@@ -1,5 +1,5 @@
-MODULE Halftone; (*feat/indexbuf v2 — the display mode's Oberon face (draft seam
-  indexbuf-seam.md v2). The hardware is pure mechanism: an 8bpp pixel window scanned
+MODULE Halftone; (*feat/halftone v2 — the display mode's Oberon face (draft seam
+  halftone-seam.md v2). The hardware is pure mechanism: an 8bpp pixel window scanned
   out to a word-aligned panel rectangle through a tone LUT, a 64x64 threshold map, a
   768-entry row map and a horizontal DDA — every table and register CLIENT-uploaded.
   This module is the thin system service any Oberon program uses to put grayscale

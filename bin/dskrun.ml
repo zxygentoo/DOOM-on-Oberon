@@ -15,11 +15,11 @@
    Usage: dskrun [-seconds N] [-serial-log FILE]
                  [-ps2 "ms:HEXBYTES,..."] [-click "ms:x:ytop,..."]
                  [-probe "ms,..."] [-dump "ms:name,..."]
-                 [-ixdump "ms:name,..."] <image.dsk>
+                 [-htdump "ms:name,..."] <image.dsk>
 
-   -ixdump reads the indexbuf pixel window (draft seam indexbuf-seam.md:
+   -htdump reads the halftone pixel window (draft seam halftone-seam.md:
    320x200 palette bytes at 0x310000, row 0 = top) as an 8-bit PGM — the
-   emulator has no indexbuf scanout, but the window is plain RAM, so a
+   emulator has no halftone scanout, but the window is plain RAM, so a
    client whose LUT is identity (Mandel) dumps as a directly viewable
    grayscale frame.
 
@@ -36,9 +36,9 @@ let shared_base = 0x300000
 let fb_word_base = 0xE7F00 / 4
 let fb_words = 32
 let fb_lines = 768
-let ixb_base = 0x310000
-let ixb_w = 320
-let ixb_h = 200
+let ht_base = 0x310000
+let ht_w = 320
+let ht_h = 200
 
 let fail fmt =
   Printf.ksprintf
@@ -56,7 +56,7 @@ let ps2_spec = ref ""
 let click_spec = ref ""
 let probe_spec = ref ""
 let dump_spec = ref ""
-let ixdump_spec = ref ""
+let htdump_spec = ref ""
 let inputs = ref []
 
 let rec parse_args = function
@@ -81,8 +81,8 @@ let rec parse_args = function
   | "-dump" :: s :: rest ->
     dump_spec := s;
     parse_args rest
-  | "-ixdump" :: s :: rest ->
-    ixdump_spec := s;
+  | "-htdump" :: s :: rest ->
+    htdump_spec := s;
     parse_args rest
   | a :: rest ->
     inputs := a :: !inputs;
@@ -111,7 +111,7 @@ type action =
   | Release (* middle button up, auto-scheduled 50 ms after a Click *)
   | Probe
   | Dump of string
-  | Ixdump of string
+  | Htdump of string
 
 let schedule () =
   let acts = ref [] in
@@ -138,19 +138,19 @@ let schedule () =
   List.iter
     (fun e ->
        match split ':' e with
-       | [ ms; name ] -> add (int_of ms) (Ixdump name)
-       | _ -> fail "dskrun: -ixdump wants ms:name, got %s" e)
-    (split ',' !ixdump_spec);
+       | [ ms; name ] -> add (int_of ms) (Htdump name)
+       | _ -> fail "dskrun: -htdump wants ms:name, got %s" e)
+    (split ',' !htdump_spec);
   List.sort compare !acts
 ;;
 
-(* PGM P5: the indexbuf pixel window, already top-down byte-per-pixel *)
+(* PGM P5: the halftone pixel window, already top-down byte-per-pixel *)
 let dump_ixframe m path =
   let ram = F.ram m in
   Out_channel.with_open_bin path (fun oc ->
-    Printf.fprintf oc "P5\n%d %d\n255\n" ixb_w ixb_h;
-    for i = 0 to (ixb_w * ixb_h) - 1 do
-      let b = (ram.((ixb_base + i) / 4) lsr (8 * (i land 3))) land 0xFF in
+    Printf.fprintf oc "P5\n%d %d\n255\n" ht_w ht_h;
+    for i = 0 to (ht_w * ht_h) - 1 do
+      let b = (ram.((ht_base + i) / 4) lsr (8 * (i land 3))) land 0xFF in
       Out_channel.output_char oc (Char.chr b)
     done)
 ;;
@@ -232,7 +232,7 @@ let () =
            let path = Printf.sprintf "dskrun_%s.pgm" name in
            dump_frame m path;
            Printf.printf "dskrun: %6d ms  frame -> %s\n%!" ms path
-         | Ixdump name ->
+         | Htdump name ->
            let path = Printf.sprintf "dskrun_%s.pgm" name in
            dump_ixframe m path;
            Printf.printf "dskrun: %6d ms  ixframe -> %s\n%!" ms path);

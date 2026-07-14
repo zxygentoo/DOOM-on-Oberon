@@ -1,4 +1,4 @@
-MODULE Mandel; (*feat/indexbuf v2 demo — the display mode's first VIEWER CITIZEN (and
+MODULE Mandel; (*feat/halftone v2 demo — the display mode's first VIEWER CITIZEN (and
   Halftone.Mod's first client; zero code and zero content shared with DOOM).
   Mandel.Open opens an ordinary MenuViewers viewer (the Stars.Mod pattern) whose main
   frame hosts a Halftone rect: the largest word-aligned 2x2-pixel rect centred in the
