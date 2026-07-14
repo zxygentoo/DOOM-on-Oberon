@@ -384,6 +384,20 @@ row map + LUT + geometry, then **mode on at the first `DG_DrawFrame`**
 (never at Init), **off in `exit()`** (instant desktop restore — the mono
 framebuffer was never written). Mode-on over zeroed tables scans all-zero
 thresholds: every non-black pixel white; upload first. Under SHARED `+544`
-bit 1 (§8) the stub owns mode + geometry instead: `DOOM.Window`'s viewer
+bit 1 (§8) the stub owns mode + geometry instead: `DOOM.Run -win`'s viewer
 lifecycle re-`Open`s the largest 4:3 rect per ModifyMsg, and quit/suspend
 drop the mode.
+
+Arbitration (2026-07-15, `Halftone.Mod` policy — the hardware stays pure
+mechanism): the rect is **single-owner, enforced** — `Open` claims it (while
+a claim is live every further `Open`, any caller's, returns FALSE and writes
+nothing), `Off` releases it, `Claimed()` probes. Refused viewer clients
+tick-retry: a waiting Mandel resumes by itself, a claim-less DOOM window
+pauses; `DOOM.Run -win` refuses up front when the rect is claimed. The seize
+path stays outside the claim by construction — the seized loop freezes every
+claimant, and the exit restore broadcast makes the holder re-claim and
+re-upload. Known caveat: the blob uploads thresholds once per Run, so a DOOM
+window re-claiming after a foreign owner renders through foreign tables until
+a palette change re-uploads the LUT (the thresholds stay foreign until the
+next `DOOM.Run`). `Halftone.Off` doubles as the recovery command for a claim
+wedged by a dead client.

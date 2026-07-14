@@ -81,9 +81,11 @@ rm "$T/src/DOOM.Mod.txt"
 cp "$REPO/_out/doom.blob" "$REPO/_out/doom1.wad.0" "$REPO/_out/doom1.wad.1" "$T/src/"
 printf 'doom.blob\ndoom1.wad.0\ndoom1.wad.1\n' >>"$T/src/.packonly"
 
-# 5. a DOOM section in System.Tool (middle-click targets)
+# 5. System.Tool: Mandel.Open joins the stock demos line (after Stars.Open),
+#    and a DOOM section is appended (middle-click targets)
 "$BIN/ob2txt.exe" "$T/src/System.Tool" >/dev/null
-printf '\nDOOM.Run\nDOOM.Run -timedemo demo1\nDOOM.RunHW\nDOOM.RunHW -timedemo demo1\nMandel.Open\nDOOM.Window\nDOOM.Window -timedemo demo1\n' >>"$T/src/System.Tool.txt"
+sed -i 's/Blink.Run  Stars.Open$/Blink.Run  Stars.Open  Mandel.Open/' "$T/src/System.Tool.txt"
+printf '\nDOOM.Run\nDOOM.Run -win\n\nDOOM.Run -timedemo demo1\nDOOM.Run -win -timedemo demo1\n' >>"$T/src/System.Tool.txt"
 "$BIN/txt2ob.exe" "$T/src/System.Tool.txt" >/dev/null
 rm "$T/src/System.Tool.txt"
 

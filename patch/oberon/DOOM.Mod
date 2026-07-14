@@ -3,21 +3,29 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   verified (magic/version/length/checksum), bss zeroed per header, WAD chunks
   concatenated at WadBase, SHARED page zeroed + WAD length at +28 + command tail at
   +1024, then Init/Tick through the crt0 thunks.
-  Two presentations, one blob:
-  - DOOM.Run / DOOM.RunHW: the v1 fullscreen SEIZE — the loop never returns to
-    Oberon.Loop, so the stub owns the raw PS/2 FIFO (make/break + E0 arrows that
-    Input.Mod drops) and the game is fully playable.
-  - DOOM.Window (seam v2, viewer presentation): an ordinary MenuViewers viewer; an
-    Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone rect (the
-    largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to keep only
-    thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
+  Two presentations, one blob, one command (the Halftone scanout, ABI.md par 11,
+  is the only presentation since 2026-07-15 — the software-dither stub path
+  retired with the hardware QSPI-resident; the blob keeps the sw path alive for
+  the harness legs, run_blob and the golden oracle):
+  - DOOM.Run: the fullscreen SEIZE — the loop never returns to Oberon.Loop, so
+    the stub owns the raw PS/2 FIFO (make/break + E0 arrows that Input.Mod
+    drops) and the game is fully playable.
+  - DOOM.Run -win: the viewer presentation — an ordinary MenuViewers viewer; an
+    Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone rect
+    (the largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to keep
+    only thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
+    The rect is single-owner (Halftone.Open claims, Off releases): -win refuses
+    up front while another client (a Mandel viewer) holds the claim, and a
+    mid-game loss of the rect just pauses the game until it frees.
+    The -win token is consumed by the stub (a presentation choice, never passed
+    to the blob); the rest of the line is the DOOM command tail as always.
     Keys are POINT-TO-PLAY (the par 6 v2 input slice): while the pointer is over
     the game frame, Input.SetSink (the raw-scancode tap patched into Input.Mod —
     patch/oberon/Input.Mod.patch, applied by mkdsk like the agent autoload patch) hands
     the untranslated make/break stream to the same Byte FSM the seize loop uses —
     full arrows/modifiers, identical feel; move the pointer off the game and the
     keyboard is Oberon's again (type in the Log mid-game). System.Close abandons
-    the game (the next Run/Window reloads fresh).*)
+    the game (the next Run reloads fresh).*)
 
   (*import order: ORB wants interface-referenced modules first — Display before
     Viewers, Viewers/Texts before Oberon, MenuViewers/TextFrames after (the proven
@@ -110,17 +118,34 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     RETURN ok
   END VerifyHeader;
 
-  (*the command tail (ABI par 8, SHARED +1024): the rest of the command line after
-    "DOOM.Run", verbatim — ended by ~, end of text, or end of line (so a bare
+  (*the command tail (ABI par 8, SHARED +1024): the rest of the command line from
+    [pos], verbatim — ended by ~, end of text, or end of line (so a bare
     DOOM.Run in a Tool doesn't swallow the lines below it)*)
-  PROCEDURE CopyArgs;
+  PROCEDURE CopyArgs(pos: INTEGER);
     VAR r: Texts.Reader; ch: CHAR; a: INTEGER; b: BYTE;
   BEGIN a := SharedBase + CmdTail;
-    Texts.OpenReader(r, Oberon.Par.text, Oberon.Par.pos); Texts.Read(r, ch);
+    Texts.OpenReader(r, Oberon.Par.text, pos); Texts.Read(r, ch);
     WHILE ~r.eot & (ch # "~") & (ch >= " ") & (a < SharedBase + CmdTail + CmdTailMax) DO
       b := ORD(ch); SYSTEM.PUT(a, b); INC(a); Texts.Read(r, ch)
     END
   END CopyArgs;
+
+  (*the -win option: peek the command line's first token; if it is "-win" the
+    stub consumes it (presentation choice) and the tail starts after it*)
+  PROCEDURE WinFlag(VAR win: BOOLEAN; VAR pos: INTEGER);
+    VAR r: Texts.Reader; ch: CHAR; n, i: INTEGER; tok: ARRAY 8 OF CHAR;
+  BEGIN win := FALSE; pos := Oberon.Par.pos;
+    Texts.OpenReader(r, Oberon.Par.text, Oberon.Par.pos); Texts.Read(r, ch); n := 1;
+    WHILE ~r.eot & (ch = " ") DO Texts.Read(r, ch); INC(n) END ;
+    i := 0;
+    WHILE ~r.eot & (ch > " ") & (ch # "~") & (i < 7) DO
+      tok[i] := ch; INC(i); Texts.Read(r, ch); INC(n)
+    END ;
+    tok[i] := 0X;
+    IF (i = 4) & (tok[0] = "-") & (tok[1] = "w") & (tok[2] = "i") & (tok[3] = "n") THEN
+      win := TRUE; pos := Oberon.Par.pos + n - 1
+    END
+  END WinFlag;
 
   (*---- raw PS/2 keyboard (par 6 path 2) ----*)
 
@@ -163,12 +188,12 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
   END Restore;
 
   (*load blob + WAD, verify, stub obligations (bss zero, SHARED zero + WAD length +
-    presentation bits at +544 + command tail), plant the entries. TRUE = ready for
-    init(). hwbits: 0 = software dither, 1 = hardware scanout (blob owns
+    presentation bits at +544 + command tail from [argPos]), plant the entries.
+    TRUE = ready for init(). hwbits: 1 = hardware scanout (blob owns
     mode+geometry), 3 = viewer presentation (bit 1: the STUB owns mode+geometry —
     the blob keeps thresholds/LUT/frame-copy). Bits only meaningful on a bitstream
-    that carries Halftone — on the stock bitstream hw modes play blind.*)
-  PROCEDURE Load(hwbits: INTEGER): BOOLEAN;
+    that carries Halftone — on the stock bitstream both presentations play blind.*)
+  PROCEDURE Load(hwbits, argPos: INTEGER): BOOLEAN;
     VAR ok: BOOLEAN; blobLen, wadLen, len, i, a, w: INTEGER;
       name: ARRAY 16 OF CHAR;
   BEGIN ok := FALSE;
@@ -194,8 +219,8 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
         FOR w := a TO a + len - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         FOR w := SharedBase TO SharedBase + SharedSize - 4 BY 4 DO SYSTEM.PUT(w, 0) END ;
         SYSTEM.PUT(SharedBase + 28, wadLen);
-        IF hwbits # 0 THEN SYSTEM.PUT(SharedBase + 544, hwbits) END ;
-        CopyArgs;
+        SYSTEM.PUT(SharedBase + 544, hwbits);
+        CopyArgs(argPos);
         SYSTEM.GET(BlobBase + 20, w); SYSTEM.PUT(SYSTEM.ADR(init), BlobBase + w);
         SYSTEM.GET(BlobBase + 24, w); SYSTEM.PUT(SYSTEM.ADR(tick), BlobBase + w);
         SYSTEM.GET(BlobBase + 28, w); SYSTEM.PUT(SYSTEM.ADR(keyin), BlobBase + w);
@@ -205,35 +230,23 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     RETURN ok
   END Load;
 
-  PROCEDURE Run0(hw: BOOLEAN);
-    VAR r, st, bits: INTEGER;
+  PROCEDURE Seize(argPos: INTEGER);
+    VAR r, st: INTEGER;
   BEGIN
-    IF V # NIL THEN Msg("DOOM: close the DOOM window first")
-    ELSE
-      IF hw THEN bits := 1 ELSE bits := 0 END ;
-      IF Load(bits) THEN
-        Msg("DOOM: Init (D_DoomMain takes a while)");
-        r := init(WadBase, SharedBase);
-        IF r # 0 THEN Restore; MsgInt("DOOM: Init failed:", r)
-        ELSE (*the seize loop: keys between ticks, until quit or I_Error*)
-          DrainKbd; st := 0; r := 0;
-          REPEAT PollKeys; r := tick(); SYSTEM.GET(SharedBase + 12, st)
-          UNTIL (r # 0) OR (st # 0);
-          Restore;
-          IF st > 1 THEN st := 0 END ; (*1 = clean quit; negatives = I_Error*)
-          MsgInt("DOOM: exit status", st)
-        END
+    IF Load(1, argPos) THEN
+      Msg("DOOM: Init (D_DoomMain takes a while)");
+      r := init(WadBase, SharedBase);
+      IF r # 0 THEN Restore; MsgInt("DOOM: Init failed:", r)
+      ELSE (*the seize loop: keys between ticks, until quit or I_Error*)
+        DrainKbd; st := 0; r := 0;
+        REPEAT PollKeys; r := tick(); SYSTEM.GET(SharedBase + 12, st)
+        UNTIL (r # 0) OR (st # 0);
+        Restore;
+        IF st > 1 THEN st := 0 END ; (*1 = clean quit; negatives = I_Error*)
+        MsgInt("DOOM: exit status", st)
       END
     END
-  END Run0;
-
-  PROCEDURE Run*;
-  BEGIN Run0(FALSE)
-  END Run;
-
-  PROCEDURE RunHW*;
-  BEGIN Run0(TRUE)
-  END RunHW;
+  END Seize;
 
   (*---- DOOM.Window: the viewer presentation (seam v2) ----*)
 
@@ -302,8 +315,12 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
       Release;
       IF modeOn THEN Halftone.Off; modeOn := FALSE END
     ELSE  (*displayed*)
-      IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)claim.
-        The blob uploaded its thresholds + LUT during Init's first frame*)
+      IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)claim — a
+        refused Open (another client holds the rect) just retries next pass, the
+        game paused until the rect frees. The blob uploaded its thresholds + LUT
+        during Init's first frame; known caveat: if another client owned the rect
+        in between, ITS tables stand here until a palette change re-uploads the
+        LUT (the blob uploads thresholds only once per Run)*)
         IF Shape(F.X, F.Y, F.W, F.H) THEN Halftone.On; modeOn := TRUE END
       END ;
       IF modeOn THEN
@@ -340,11 +357,14 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     END
   END Handle;
 
-  PROCEDURE Window*;
+  PROCEDURE Win(argPos: INTEGER);
     VAR r, X, Y: INTEGER;
   BEGIN
-    IF V # NIL THEN Msg("DOOM: window already open")
-    ELSIF Load(3) THEN
+    (*the rect is single-owner (Halftone.Open claims it): refuse up front while a
+      claim is live — BEFORE the ~10 s Load+Init, whose first frame would stomp the
+      owner's threshold/LUT tables (Init runs one tick by the doomgeneric contract)*)
+    IF Halftone.Claimed() THEN Msg("DOOM: panel rect in use (close its viewer first)")
+    ELSIF Load(3, argPos) THEN
       Msg("DOOM: Init (D_DoomMain takes a while)");
       r := init(WadBase, SharedBase);
       IF r # 0 THEN MsgInt("DOOM: Init failed:", r)
@@ -358,7 +378,16 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
         Msg("DOOM: windowed — point the mouse at the game to play; System.Close to stop")
       END
     END
-  END Window;
+  END Win;
+
+  PROCEDURE Run*;  (*DOOM.Run [-win] [DOOM args...] — -win is the stub's own*)
+    VAR win: BOOLEAN; argPos: INTEGER;
+  BEGIN
+    IF V # NIL THEN Msg("DOOM: close the DOOM window first")
+    ELSE WinFlag(win, argPos);
+      IF win THEN Win(argPos) ELSE Seize(argPos) END
+    END
+  END Run;
 
   PROCEDURE InitTables;
     VAR i: INTEGER;
