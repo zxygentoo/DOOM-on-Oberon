@@ -22,11 +22,12 @@
  (name doomrun)
  (libraries emu))
 
-; bluenoise — void-and-cluster threshold-map generator (host tooling): emits
+; bn64 — void-and-cluster blue-noise threshold-map generator (host tooling):
+; emits
 ; the __dg_bn64 table baked into libc/dither.c. Deterministic; see the file.
 
 (executable
- (name bluenoise))
+ (name bn64))
 
 ; doomboot — the Cyclesim boot ROM stub (1d sim leg): ~30 eDSL words that call
 ; the blob's crt0 entries and report progress via the SHARED page. The third
