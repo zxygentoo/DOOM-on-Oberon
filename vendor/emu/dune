@@ -2,14 +2,17 @@
 ; two halves the CIL backend needs:
 ;   - Emu.Risc5_isa : the shared instr encoding (the backend's *emit* target)
 ;   - Emu.Risc      : the interpreter (the differential jig's *execution* engine)
-; The submodule's own library is private behind its dune-project boundary, so we copy
-; its lib/ sources here and compile them (the same trick the host repo's `oracle` uses,
-; which keeps the submodule untouched). Warnings off (-w -a): vendored code, not ours to
-; lint. Only dependency is unix, matching the emulator's own lib/dune.
+; The emulator arrives as oberon-risc-hardcaml's OWN nested submodule (one pin,
+; owned by the host repo — its lockstep oracle keeps the emulator consistent with
+; the design; init with `git submodule update --init --recursive`). Its library is
+; private behind its dune-project boundary, so we copy its lib/ sources here and
+; compile them (the same trick the host repo's `oracle` uses, which keeps the
+; submodule untouched). Warnings off (-w -a): vendored code, not ours to lint.
+; Only dependency is unix, matching the emulator's own lib/dune.
 
-(copy_files ../oberon-risc-emu-ocaml/lib/*.ml)
+(copy_files ../oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml/lib/*.ml)
 
-(copy_files ../oberon-risc-emu-ocaml/lib/*.mli)
+(copy_files ../oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml/lib/*.mli)
 
 (library
  (name emu)

@@ -1,6 +1,6 @@
-; The emulator submodule is its own dune project (private library behind its own
-; dune-project boundary). Treat it as raw data here; its lib/ sources are compiled
-; INTO this project by vendor/emu (copy_files), mirroring the host repo's `oracle`.
-; This leaves the submodule pristine.
+; Vendored trees are raw data to this workspace: the hardcaml design is its
+; own (OxCaml) dune project — sim/risc5 and sim/nexys4 compile its sources in
+; the sim root; doomgeneric/oberon-agent are C/Rust/Oberon sources consumed by
+; preprocess.sh and stub/mkdisk.sh. Only vendor/emu composes here.
 
-(data_only_dirs oberon-risc-emu-ocaml)
+(data_only_dirs oberon-risc-hardcaml doomgeneric oberon-agent)

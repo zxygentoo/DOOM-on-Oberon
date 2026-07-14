@@ -1,13 +1,6 @@
-[submodule "vendor/oberon-risc-emu-ocaml"]
-	path = vendor/oberon-risc-emu-ocaml
-	url = https://github.com/zxygentoo/oberon-risc-emu-ocaml.git
-	branch = develop
-[submodule "sim/oberon-risc-hardcaml"]
-	path = sim/vendor/oberon-risc-hardcaml
+[submodule "vendor/oberon-risc-hardcaml"]
+	path = vendor/oberon-risc-hardcaml
 	url = https://github.com/zxygentoo/oberon-risc-hardcaml.git
-[submodule "vendor/oberon-risc-emu-rs"]
-	path = vendor/oberon-risc-emu-rs
-	url = https://github.com/zxygentoo/oberon-risc-emu-rs.git
 [submodule "vendor/oberon-agent"]
 	path = vendor/oberon-agent
 	url = https://github.com/zxygentoo/oberon-agent.git

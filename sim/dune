@@ -1,10 +1,12 @@
 ; The Cyclesim leg (AGENT.md 1d): doom.blob on the cycle-accurate HardCaml
-; model. The oberon-risc-hardcaml submodule is its own dune project and stays
-; PRISTINE — treat it as raw data; the risc5/ and nexys4/ wrapper dirs compile
-; its sources into THIS project (the same copy_files pattern both repos use
-; for the vendored emulator). Its own vendor/ (the nested emulator submodule,
-; uninitialized) is never scanned, so nothing collides with the main
-; workspace's `emu`.
+; model. The oberon-risc-hardcaml submodule (physically at the repo root's
+; vendor/, reached here through the sim/vendor symlink — dune deps can't
+; escape a workspace root) is its own dune project and stays PRISTINE —
+; treat it as raw data; the risc5/ and nexys4/ wrapper dirs compile its
+; sources into THIS project (the same copy_files pattern both repos use for
+; the vendored emulator). Its vendor/ (the nested emulator submodule, now
+; initialized — the main workspace's `emu` wrapper reads it) is data_only
+; here, so nothing composes twice.
 ;
 ; This root builds on the OxCaml switch (hardcaml v0.18-preview):
 ;   opam exec --switch=5.2.0+ox -- dune build --root sim
