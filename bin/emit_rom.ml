@@ -1,4 +1,4 @@
-(* doomboot — the Cyclesim boot ROM stub (AGENT.md 1d, the sim leg).
+(* emit_rom — the Cyclesim boot ROM stub (AGENT.md 1d, the sim leg).
 
    The cycle-accurate model boots from its 512-word ROM (reset PC = ROM word 0, byte
    0xFFE000); the sim harness preloads blob + WAD + SHARED page directly into the PSRAM
@@ -17,7 +17,7 @@
    no MMIO accesses; R6-R11 hold its state across calls — the crt0 thunks save and
    restore them, so they survive by the very contract test_blob proves.
 
-   Usage: doomboot [-o doomboot.rom]  — raw little-endian u32 words. *)
+   Usage: emit_rom [-o doomboot.rom]  — raw little-endian u32 words. *)
 
 module R = Emu.Risc5_isa
 module L = Doomcc_core.Linker
@@ -49,7 +49,7 @@ let l_loop = 0
 let l_done = 1
 
 let stub : L.obj =
-  { name = "doomboot"
+  { name = "emit_rom"
   ; frags =
       load_const 6 blob_base (* R6 = BLOB_BASE *)
       @ [ ldw 8 6 20 (* R8 = header Init offset *)
@@ -91,7 +91,7 @@ let () =
     | [ _ ] -> "doomboot.rom"
     | [ _; "-o"; p ] -> p
     | _ ->
-      prerr_endline "usage: doomboot [-o out.rom]";
+      prerr_endline "usage: emit_rom [-o out.rom]";
       exit 1
   in
   let image = L.link ~code_base:rom_base [ stub ] in
@@ -100,7 +100,7 @@ let () =
   List.iteri (fun i w -> Bytes.set_int32_le b (4 * i) (Int32.of_int w)) words;
   Out_channel.with_open_bin out (fun oc -> Out_channel.output_bytes oc b);
   Printf.printf
-    "doomboot: %d words -> %s (linked at 0x%06X)\n"
+    "emit_rom: %d words -> %s (linked at 0x%06X)\n"
     (List.length words)
     out
     rom_base

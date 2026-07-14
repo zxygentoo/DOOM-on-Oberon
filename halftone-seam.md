@@ -5,7 +5,7 @@ The seam for the **generalized indexed/grayscale display mode** (né
 the storage format; v2's identity is the transformation — threshold-map
 halftoning at scanout) — the host
 repo's `Halftone` (board/nexys-4/halftone.{ml,mli}) and this repo's software
-side (libc hw path, `Halftone.Mod` (shipped with the hardware: host repo board/nexys-4/Mod), doom_sim -hw). v1 of this seam was
+side (libc hw path, `Halftone.Mod` (shipped with the hardware: host repo board/nexys-4/Mod), run_sim -hw). v1 of this seam was
 the fps-lever-#3 experiment: DOOM's dither moved into scanout hardware, with
 the 320×200 → fullscreen geometry *baked* into the design. v2 is the
 generality rework (review round 2026-07-14): **the hardware keeps only
@@ -156,7 +156,7 @@ Mandel.Mod lifecycle (ModifyMsg → drop mode, next displayed tick re-`Open`s
 the largest 4:3 rect — w aligned, h = w·3/4, scale w/320 gcd-reduced;
 suspend → off; close → off + task removal; quit/I_Error → viewer closes).
 The desktop stays live around the game. **Keys are point-to-play** (the §6
-v2 input slice, 2026-07-14): `patch/oberon/Input.Mod.patch` (applied by mkdisk,
+v2 input slice, 2026-07-14): `patch/oberon/Input.Mod.patch` (applied by mkdsk,
 the agent-autoload precedent) adds `Input.SetSink` — a raw-scancode tap
 that, while set, receives the untranslated make/break stream inside
 `Peek` and silences the translated path (NIL = stock, byte-identical).
@@ -170,7 +170,7 @@ between ticks, exactly like the seize loop's PollKeys. Fullscreen
 
 ## The software faces
 
-- **DOOM blob** (`libc/dither.c` + `libc/doomgeneric_oberon.c`, raw MMIO):
+- **DOOM blob** (`libc/dither.c` + `libc/doom_oberon.c`, raw MMIO):
   `__dg_upload_thresholds` = copy `__dg_bn64` verbatim (word stores);
   `__dg_upload_geometry` = the out2 row map (`row_base = sy·320`, `thr_row`
   = the out2 dealing — the same 20-line Bresenham as the software kernel) +
@@ -200,9 +200,9 @@ between ticks, exactly like the seize loop's PollKeys. Fullscreen
    `claim = 0`; shadow-latch semantics pinned (a mid-frame geometry write
    takes effect only after a blanking fetch); status register progression.
 4. **Board gates** (DOOM repo, kept): mode-off byte-identical visual golden
-   (HALFTONE=1); doom_sim `-hw` captured scanout ≡ the host golden
+   (HALFTONE=1); run_sim `-hw` captured scanout ≡ the host golden
    bit-identical (the out2 row map transfers the oracle); jig, goldens ×4,
-   5026 exact; dskrun `-htdump`; Mandel on the booted OS.
+   5026 exact; run_dsk `-htdump`; Mandel on the booted OS.
 
 ## Cost / plumbing summary (v2 targets)
 

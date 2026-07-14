@@ -1,6 +1,7 @@
-/* doomgeneric_oberon.c — the doomgeneric platform layer for the Oberon RISC5
- * machine (AGENT.md §7, the DG_ port slice — complete). Named the way upstream
- * names its platforms (doomgeneric_sdl.c, doomgeneric_allegro.c, ...): all six
+/* doom_oberon.c — the doomgeneric platform layer for the Oberon RISC5
+ * machine (AGENT.md §7, the DG_ port slice — complete). It fills upstream's
+ * doomgeneric_<platform>.c slot (doomgeneric_sdl.c, ... — shortened to the house
+ * doom_* naming): all six
  * DG_ hooks, the key-ring producer, the DG_DrawFrame dither-blit wrapper
  * (kernel in dither.c), the three ABI §7 blob entries (Init/Tick/KeyIn), and
  * the setjmp-shaped exit().
@@ -20,7 +21,7 @@
  *     the blob never sees a scancode table.
  *
  * [__shared_base] is the SHARED page address, an extern the ENVIRONMENT
- * defines (heap_doom.c binds ABI §8's 0x300000; the jig binds a spot inside
+ * defines (doom_heap.c binds ABI §8's 0x300000; the jig binds a spot inside
  * emulator RAM) — the same pattern as mini.c's heap bounds. */
 
 typedef unsigned int uint32_t;
@@ -116,7 +117,7 @@ struct color {
 extern struct color colors[256];
 extern unsigned int palette_changed;    /* i_video's boolean */
 extern unsigned char *DG_ScreenBuffer;
-extern char *__fb_base;                 /* heap_doom.c binds 0xE7F00 */
+extern char *__fb_base;                 /* doom_heap.c binds 0xE7F00 */
 
 extern void __dg_build_lut(const unsigned char *pal);
 extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);

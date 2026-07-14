@@ -8,7 +8,7 @@
  *
  * The heap is a bump allocator over [__heap_base, __heap_end) — two extern globals the
  * ENVIRONMENT defines, because the bounds differ per world: the jig's emulator RAM vs
- * ABI §8's arena (libc/heap_doom.c). free() is a no-op: DOOM zone-allocates internally
+ * ABI §8's arena (libc/doom_heap.c). free() is a no-op: DOOM zone-allocates internally
  * out of one big block, and the few real malloc sites never free-and-reuse at a scale
  * that matters (the plan's "one-big-block malloc").
  *

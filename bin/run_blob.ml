@@ -1,4 +1,4 @@
-(* doomrun — the 1d emulator harness: play DOOM.Mod's stub against the real blob.
+(* run_blob — the 1d emulator harness: play DOOM.Mod's stub against the real blob.
 
    Loads doom.blob at BLOB_BASE and the WAD at WAD_BASE (ABI §8), verifies the §7
    header and zeroes bss, sets up the SHARED page (+28 = WAD length), attaches a UART
@@ -12,7 +12,7 @@
    A PC that doesn't advance across a step is a self-loop — doomcc's trap for refused
    or undefined symbols — reported with the address for a doom.blob.map lookup.
 
-   Usage: doomrun [-ticks N] [-dump-every N] [-steps-per-ms N] [-max-steps N]
+   Usage: run_blob [-ticks N] [-dump-every N] [-steps-per-ms N] [-max-steps N]
                   <doom.blob> <doom1.wad> *)
 
 module M = Emu.Risc
@@ -40,7 +40,7 @@ let fail fmt =
 
 let read_file path =
   try In_channel.with_open_bin path In_channel.input_all with
-  | Sys_error e -> fail "doomrun: %s" e
+  | Sys_error e -> fail "run_blob: %s" e
 ;;
 
 (* ---- args ---- *)
@@ -103,7 +103,7 @@ let rec parse_args = function
        gametic = tick count + 1, so both this harness and the host golden
        generator key dumps on counted Ticks — no game-memory access). Dumps
        frame_gNNNNN.fbw — the raw fb window, 32*768 LE words in memory order —
-       the format host/doomgeneric_golden.c writes as golden_gNNNNN.fbw;
+       the format bin/doom_golden.c writes as golden_gNNNNN.fbw;
        cmp(1) of the pair is the oracle's verdict. A .pgm rides along for
        eyeballs. Pick gametics past the demo-start wipe (>= 100). *)
     dump_at := s;
@@ -118,7 +118,7 @@ and set_int r n rest =
   | Some v ->
     r := v;
     parse_args rest
-  | None -> fail "doomrun: not an integer: %s" n
+  | None -> fail "run_blob: not an integer: %s" n
 ;;
 
 (* ---- the machine, loaded the way the stub loads it ---- *)
@@ -127,7 +127,7 @@ let word_of_bytes b off = Int32.to_int (Bytes.get_int32_le b off) land 0xFFFF_FF
 
 let load_image ram base (b : bytes) =
   let n = Bytes.length b in
-  if n land 3 <> 0 then fail "doomrun: image length %d not word-aligned" n;
+  if n land 3 <> 0 then fail "run_blob: image length %d not word-aligned" n;
   for w = 0 to (n / 4) - 1 do
     ram.((base / 4) + w) <- word_of_bytes b (4 * w)
   done
@@ -135,16 +135,16 @@ let load_image ram base (b : bytes) =
 
 let verify_header blob =
   let word off = word_of_bytes blob off in
-  if word 0 <> 0x4D4F4F44 then fail "doomrun: bad magic (not a DOOM blob)";
-  if word 4 <> 1 then fail "doomrun: blob version %d, want 1" (word 4);
+  if word 0 <> 0x4D4F4F44 then fail "run_blob: bad magic (not a DOOM blob)";
+  if word 4 <> 1 then fail "run_blob: blob version %d, want 1" (word 4);
   if word 8 <> Bytes.length blob
-  then fail "doomrun: header length %d <> file length %d" (word 8) (Bytes.length blob);
+  then fail "run_blob: header length %d <> file length %d" (word 8) (Bytes.length blob);
   let sum = ref 0 in
   for w = 16 to (Bytes.length blob / 4) - 1 do
     sum := (!sum + word (4 * w)) land 0xFFFF_FFFF
   done;
-  if word 32 <> !sum then fail "doomrun: checksum mismatch";
-  if word 20 = 0 || word 24 = 0 then fail "doomrun: Init/Tick entry missing (0)"
+  if word 32 <> !sum then fail "run_blob: checksum mismatch";
+  if word 20 = 0 || word 24 = 0 then fail "run_blob: Init/Tick entry missing (0)"
 ;;
 
 (* Run one crt0 entry to its B LNK, advancing the synthetic clock; returns R0.
@@ -167,7 +167,7 @@ let call_entry m name entry_addr ~r0 ~r1 =
     if F.pc m = stop / 4
     then ()
     else if n >= budget
-    then fail "doomrun: %s exceeded %d steps (hung? raise -max-steps)" name budget
+    then fail "run_blob: %s exceeded %d steps (hung? raise -max-steps)" name budget
     else (
       let pc_before = F.pc m in
       F.single_step m;
@@ -184,7 +184,7 @@ let call_entry m name entry_addr ~r0 ~r1 =
       if F.pc m = pc_before
       then
         fail
-          "doomrun: %s hit a self-loop trap at PC=0x%08X (see doom.blob.map)"
+          "run_blob: %s hit a self-loop trap at PC=0x%08X (see doom.blob.map)"
           name
           (pc_before * 4);
       loop (n + 1))
@@ -289,7 +289,7 @@ let write_profile ~blob ~map_path ~ticks_run out =
     let p fmt = Printf.fprintf oc fmt in
     let pct x = 100.0 *. float_of_int x /. float_of_int (max 1 !total) in
     p
-      "# doomrun flat profile — %d instrs over %d ticks (%d instrs/tick)\n"
+      "# run_blob flat profile — %d instrs over %d ticks (%d instrs/tick)\n"
       !total
       ticks_run
       (!total / max 1 ticks_run);
@@ -320,7 +320,7 @@ let write_profile ~blob ~map_path ~ticks_run out =
              (fp s_br.(i))
              (snd syms.(i))))
       order);
-  Printf.eprintf "doomrun: profile -> %s\n%!" out
+  Printf.eprintf "run_blob: profile -> %s\n%!" out
 ;;
 
 (* ---- framebuffer dump: PGM P5, fb bottom-up flipped, bit 0 leftmost ---- *)
@@ -345,13 +345,13 @@ let () =
   let blob_path, wad_path =
     match List.rev !inputs with
     | [ b; w ] -> b, w
-    | _ -> fail "usage: doomrun [options] <doom.blob> <doom1.wad>"
+    | _ -> fail "usage: run_blob [options] <doom.blob> <doom1.wad>"
   in
   let blob = Bytes.of_string (read_file blob_path) in
   let wad = read_file wad_path in
   verify_header blob;
   if String.length wad > wad_cap
-  then fail "doomrun: WAD %d bytes exceeds the §8 window %d" (String.length wad) wad_cap;
+  then fail "run_blob: WAD %d bytes exceeds the §8 window %d" (String.length wad) wad_cap;
   let m = M.make () in
   let ram = F.ram m in
   (* the stub's obligations: image at BLOB_BASE, bss zeroed per the header *)
@@ -376,7 +376,7 @@ let () =
   if String.length !blob_args > 0
   then (
     if String.length !blob_args > 3000
-    then fail "doomrun: -args longer than the §8 command-tail region";
+    then fail "run_blob: -args longer than the §8 command-tail region";
     let tail = Bytes.make ((String.length !blob_args + 4) land lnot 3) '\000' in
     Bytes.blit_string !blob_args 0 tail 0 (String.length !blob_args);
     load_image ram (shared_base + 1024) tail);
@@ -394,16 +394,16 @@ let () =
   let status () = ram.((shared_base + 12) / 4)
   and heartbeat () = ram.((shared_base + 16) / 4) in
   (* ---- Init(wad_addr, cfg_addr) ---- *)
-  Printf.eprintf "doomrun: Init...\n%!";
+  Printf.eprintf "run_blob: Init...\n%!";
   let r = call_entry m "Init" (blob_base + word 20) ~r0:wad_base ~r1:shared_base in
   flush stdout;
   Printf.eprintf
-    "doomrun: Init -> %d (status %d), %d steps, %d sim-ms\n%!"
+    "run_blob: Init -> %d (status %d), %d steps, %d sim-ms\n%!"
     r
     (status ())
     !total_steps
     !sim_ms;
-  if r <> 0 then fail "doomrun: Init failed";
+  if r <> 0 then fail "run_blob: Init failed";
   let gametic_targets =
     if !dump_at = ""
     then []
@@ -412,7 +412,7 @@ let () =
         (fun s ->
            match int_of_string_opt (String.trim s) with
            | Some v -> v
-           | None -> fail "doomrun: -dump-at: not an integer: %s" s)
+           | None -> fail "run_blob: -dump-at: not an integer: %s" s)
         (String.split_on_char ',' !dump_at)
   in
   let dump_gametic g =
@@ -420,7 +420,7 @@ let () =
     dump_raw m (base ^ ".fbw");
     dump_frame m (base ^ ".pgm");
     Printf.eprintf
-      "doomrun: gametic %d, fb %016Lx -> %s.fbw\n%!"
+      "run_blob: gametic %d, fb %016Lx -> %s.fbw\n%!"
       g
       (H.framebuffer_hash m)
       base
@@ -432,7 +432,7 @@ let () =
   if !hw
   then
     Printf.eprintf
-      "doomrun: bn window after Init: %08X %08X %08X\n%!"
+      "run_blob: bn window after Init: %08X %08X %08X\n%!"
       (F.ram m).(0x30E000 / 4)
       (F.ram m).(0x30E004 / 4)
       (F.ram m).(0x30E008 / 4);
@@ -454,11 +454,11 @@ let () =
            | [ t; k; p ] ->
              (match int_of_string_opt t, int_of_string_opt k, int_of_string_opt p with
               | Some t, Some k, Some p -> t, p land 1 lor (k lsl 8)
-              | _ -> fail "doomrun: -keys: not integers: %s" s)
-           | _ -> fail "doomrun: -keys: want tick:doomkey:pressed, got %s" s)
+              | _ -> fail "run_blob: -keys: not integers: %s" s)
+           | _ -> fail "run_blob: -keys: want tick:doomkey:pressed, got %s" s)
         (String.split_on_char ',' !keys_spec)
   in
-  if key_events <> [] && word 28 = 0 then fail "doomrun: -keys but no KeyIn entry";
+  if key_events <> [] && word 28 = 0 then fail "run_blob: -keys but no KeyIn entry";
   (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
@@ -478,7 +478,7 @@ let () =
          let path = Printf.sprintf "frame_%04d.pgm" !frame in
          dump_frame m path;
          Printf.eprintf
-           "doomrun: tick %d -> %d, heartbeat %d, %d sim-ms, fb %016Lx -> %s\n%!"
+           "run_blob: tick %d -> %d, heartbeat %d, %d sim-ms, fb %016Lx -> %s\n%!"
            t
            r
            (heartbeat ())
@@ -490,7 +490,7 @@ let () =
    with
    | Exit -> ());
   Printf.eprintf
-    "doomrun: done — status %d, heartbeat %d, %d total steps, %d sim-ms\n%!"
+    "run_blob: done — status %d, heartbeat %d, %d total steps, %d sim-ms\n%!"
     (status ())
     (heartbeat ())
     !total_steps

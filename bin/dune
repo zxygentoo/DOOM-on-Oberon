@@ -6,41 +6,41 @@
  (name doomcc)
  (libraries doomcc_core goblint-cil emu))
 
-; wadsplit — host-side WAD chunk splitter (AGENT.md §3): DOOM1.WAD -> <=3 MiB
+; split_wad — host-side WAD chunk splitter (AGENT.md §3): DOOM1.WAD -> <=3 MiB
 ; byte-range chunk files the PO filesystem can hold; the stub concatenates them
-; into himem at init. See bin/wadsplit.ml.
+; into himem at init. See bin/split_wad.ml.
 
 (executable
- (name wadsplit)
+ (name split_wad)
  (libraries doomcc_core))
 
-; doomrun — the 1d emulator harness: doom.blob + doom1.wad -> himem, the SHARED
+; run_blob — the 1d emulator harness: doom.blob + doom1.wad -> himem, the SHARED
 ; page, a UART console, and the Init/Tick loop with PGM frame dumps. The stub's
-; role, played host-side. See bin/doomrun.ml.
+; role, played host-side. See bin/run_blob.ml.
 
 (executable
- (name doomrun)
+ (name run_blob)
  (libraries emu))
 
-; bn64 — void-and-cluster blue-noise threshold-map generator (host tooling):
+; emit_bn64 — void-and-cluster blue-noise threshold-map generator (host tooling):
 ; emits
 ; the __dg_bn64 table baked into libc/dither.c. Deterministic; see the file.
 
 (executable
- (name bn64))
+ (name emit_bn64))
 
-; doomboot — the Cyclesim boot ROM stub (1d sim leg): ~30 eDSL words that call
+; emit_rom — the Cyclesim boot ROM stub (1d sim leg): ~30 eDSL words that call
 ; the blob's crt0 entries and report progress via the SHARED page. The third
 ; artifact crossing the sim seam, next to doom.blob and doom1.wad.
 
 (executable
- (name doomboot)
+ (name emit_rom)
  (libraries doomcc_core emu))
 
-; dskrun — boot a .dsk in-process and drive the booted system with a scripted
+; run_dsk — boot a .dsk in-process and drive the booted system with a scripted
 ; timeline: raw PS/2 bytes, middle-clicks, ABI par-8 SHARED probes, PGM dumps.
-; The on-system complement of doomrun's -keys. See bin/dskrun.ml.
+; The on-system complement of run_blob's -keys. See bin/run_dsk.ml.
 
 (executable
- (name dskrun)
+ (name run_dsk)
  (libraries emu))

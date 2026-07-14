@@ -3,7 +3,7 @@
 # target encodes its opam switch, so the ox-vs-default trap can't bite.
 #
 #   make blob      the DOOM blob (doomcc over _out/i + libc)
-#   make dsk       the bootable DOOM.dsk (script/mkdisk.sh)
+#   make dsk       the bootable DOOM.dsk (script/mkdsk.sh)
 #   make ref       the SDL reference build (plain gcc — the 5026 oracle)
 #   make golden    the -m32 golden-frame generator binary
 #   make goldens   run it: _out/golden/golden_g*.fbw (the pixel oracle)
@@ -22,8 +22,8 @@ DUNE  := opam exec --switch default -- dune
 DUNEX := opam exec --switch=5.2.0+ox -- dune
 
 SRCDIR := vendor/doomgeneric/doomgeneric
-LIBC   := libc/mini.c libc/stdio.c libc/fixed.c libc/heap_doom.c \
-          libc/doomgeneric_oberon.c libc/dither.c
+LIBC   := libc/mini.c libc/stdio.c libc/fixed.c libc/doom_heap.c \
+          libc/doom_oberon.c libc/dither.c
 
 .PHONY: all build blob chunks dsk rom i wad ref golden goldens test fmt sim clean
 
@@ -70,13 +70,13 @@ blob: _out/i/.stamp
 	$(DUNE) exec bin/doomcc.exe -- _out/i/*.i $(LIBC) -o _out/doom.blob
 
 chunks _out/doom1.wad.0: _out/doom1.wad
-	$(DUNE) exec bin/wadsplit.exe -- _out/doom1.wad
+	$(DUNE) exec bin/split_wad.exe -- _out/doom1.wad
 
 rom:
-	$(DUNE) exec bin/doomboot.exe -- -o _out/doomboot.rom
+	$(DUNE) exec bin/emit_rom.exe -- -o _out/doomboot.rom
 
 dsk: blob chunks
-	./script/mkdisk.sh
+	./script/mkdsk.sh
 
 # ---- the host oracles (plain gcc — keep dune-free, see header) --------------
 
@@ -102,11 +102,11 @@ $(RDIR):
 
 # the golden-frame generator: the same TUs in the port's video mode
 # (CMAP256, 320x200), -m32 -funsigned-char (the jig oracle's target model),
-# headless platform layer bin/doomgeneric_golden.c + THE SHIPPED libc/dither.c
+# headless platform layer bin/doom_golden.c + THE SHIPPED libc/dither.c
 GDIR   := _out/golden
 GFLAGS := -std=gnu99 -O2 -Wall -m32 -funsigned-char \
           -DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200
-GSRC    = $(patsubst doomgeneric_xlib.o,doomgeneric_golden.o,$(SRC_DOOM)) dither.o
+GSRC    = $(patsubst doomgeneric_xlib.o,doom_golden.o,$(SRC_DOOM)) dither.o
 GOBJS   = $(addprefix $(GDIR)/,$(GSRC))
 
 golden: $(GDIR)/golden
@@ -116,7 +116,7 @@ $(GDIR)/golden: $(GOBJS)
 $(GDIR)/%.o: $(SRCDIR)/%.c | $(GDIR)
 	$(CC) $(GFLAGS) -I$(SRCDIR) -c $< -o $@
 
-$(GDIR)/doomgeneric_golden.o: bin/doomgeneric_golden.c | $(GDIR)
+$(GDIR)/doom_golden.o: bin/doom_golden.c | $(GDIR)
 	$(CC) $(GFLAGS) -I$(SRCDIR) -c $< -o $@
 
 $(GDIR)/dither.o: libc/dither.c | $(GDIR)

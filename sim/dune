@@ -12,7 +12,7 @@
 ;   opam exec --switch=5.2.0+ox -- dune build --root sim
 
 (executable
- (name doom_sim)
+ (name run_sim)
  (libraries hardcaml nexys4_board risc5 unix)
  (preprocess
   (pps ppx_hardcaml)))

@@ -1,5 +1,5 @@
 MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
-  Mirrors bin/doomrun.ml's loader obligations (ABI par 7/8): image at BlobBase, header
+  Mirrors bin/run_blob.ml's loader obligations (ABI par 7/8): image at BlobBase, header
   verified (magic/version/length/checksum), bss zeroed per header, WAD chunks
   concatenated at WadBase, SHARED page zeroed + WAD length at +28 + command tail at
   +1024, then Init/Tick through the crt0 thunks.
@@ -13,7 +13,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     thresholds/LUT/frame-copy), and the desktop stays LIVE around the game.
     Keys are POINT-TO-PLAY (the par 6 v2 input slice): while the pointer is over
     the game frame, Input.SetSink (the raw-scancode tap patched into Input.Mod —
-    patch/oberon/Input.Mod.patch, applied by mkdisk like the agent autoload patch) hands
+    patch/oberon/Input.Mod.patch, applied by mkdsk like the agent autoload patch) hands
     the untranslated make/break stream to the same Byte FSM the seize loop uses —
     full arrows/modifiers, identical feel; move the pointer off the game and the
     keyboard is Oberon's again (type in the Log mid-game). System.Close abandons
@@ -82,7 +82,7 @@ MODULE DOOM; (*the 2c stub — load blob + WAD into himem and run DOOM.
     END
   END LoadFileAt;
 
-  (*ABI par 7 header checks, doomrun's verify_header transliterated*)
+  (*ABI par 7 header checks, run_blob's verify_header transliterated*)
   PROCEDURE VerifyHeader(len: INTEGER): BOOLEAN;
     VAR ok: BOOLEAN; w, sum, i, bs, bl: INTEGER;
   BEGIN ok := FALSE;

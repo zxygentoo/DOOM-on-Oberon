@@ -1,4 +1,4 @@
-(* doom_sim — DOOM on the cycle-accurate model (AGENT.md 1d, the Cyclesim leg).
+(* run_sim — DOOM on the cycle-accurate model (AGENT.md 1d, the Cyclesim leg).
 
    The board SoC (icache on, board PSRAM timing) closed with Cellram_model widened to
    the full 16 MiB (addr_bits 23 — the first full-SoC exercise of 2a's himem decode).
@@ -19,7 +19,7 @@
    host/doomgeneric_golden.c and doomrun.
 
    Build & run (the ox switch — see sim/dune):
-     opam exec --switch=5.2.0+ox -- dune exec --root sim ./doom_sim.exe -- \
+     opam exec --switch=5.2.0+ox -- dune exec --root sim ./run_sim.exe -- \
        ../doom.blob ../doom1.wad ../doomboot.rom -args "-timedemo demo1" \
        -ticks 2 -fbw ../sim_g00002.fbw *)
 
@@ -140,7 +140,7 @@ let fail fmt =
 
 let read_file p =
   try In_channel.with_open_bin p In_channel.input_all with
-  | Sys_error e -> fail "doom_sim: %s" e
+  | Sys_error e -> fail "run_sim: %s" e
 ;;
 
 (* ---- args ---- *)
@@ -234,7 +234,7 @@ let write_profile ~map_path ~counts ~base_word ~outside ~ticks_run out =
     let p fmt = Printf.fprintf oc fmt in
     let pct x = 100.0 *. float_of_int x /. float_of_int (max 1 (!total + outside)) in
     p
-      "# doom_sim cycle profile — %d cycles in blob code over %d ticks (%d cyc/tick), \
+      "# run_sim cycle profile — %d cycles in blob code over %d ticks (%d cyc/tick), \
        %d (%.1f%%) outside the blob\n"
       !total
       ticks_run
@@ -256,7 +256,7 @@ let write_profile ~map_path ~counts ~base_word ~outside ~ticks_run out =
              (pct !cum)
              (snd syms.(i))))
       order);
-  Printf.eprintf "doom_sim: cycle profile -> %s\n%!" out
+  Printf.eprintf "run_sim: cycle profile -> %s\n%!" out
 ;;
 
 let () =
@@ -264,7 +264,7 @@ let () =
   let blob_path, wad_path, rom_path =
     match List.rev !inputs with
     | [ b; w; r ] -> b, w, r
-    | _ -> fail "usage: doom_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>"
+    | _ -> fail "usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>"
   in
   let blob = read_file blob_path
   and wad = read_file wad_path
@@ -336,7 +336,7 @@ let () =
     else (
       match Cyclesim.lookup_node_or_reg_by_name sim "pc" with
       | Some n -> Some n
-      | None -> fail "doom_sim: -profile: no traced node named \"pc\"")
+      | None -> fail "run_sim: -profile: no traced node named \"pc\"")
   in
   let base_word = (blob_base + 64) / 4 in
   let bss_start =
@@ -366,7 +366,7 @@ let () =
        if !cycles mod (20 * chunk) = 0
        then
          Printf.eprintf
-           "doom_sim: ... %d Mcyc, hb %d (%.2f Mcyc/s)\n%!"
+           "run_sim: ... %d Mcyc, hb %d (%.2f Mcyc/s)\n%!"
            (!cycles / 1_000_000)
            hb
            (float_of_int !cycles /. 1e6 /. (Unix.gettimeofday () -. t0));
@@ -375,7 +375,7 @@ let () =
          init_done := true;
          init_cycles := !cycles;
          Printf.eprintf
-           "doom_sim: Init -> %d at ~%d Mcyc (%.0f s wall, %.2f Mcyc/s)\n%!"
+           "run_sim: Init -> %d at ~%d Mcyc (%.0f s wall, %.2f Mcyc/s)\n%!"
            (m land 0xFFFF)
            (!cycles / 1_000_000)
            (Unix.gettimeofday () -. t0)
@@ -386,13 +386,13 @@ let () =
          last_hb := hb;
          tick_marks := (hb, !cycles) :: !tick_marks;
          Printf.eprintf
-           "doom_sim: heartbeat %d at ~%d Mcyc (status %d)\n%!"
+           "run_sim: heartbeat %d at ~%d Mcyc (status %d)\n%!"
            hb
            (!cycles / 1_000_000)
            (shared 12));
        if m = done_marker then raise Exit
      done;
-     Printf.eprintf "doom_sim: cycle cap reached (%d Mcyc)\n%!" !max_mcycles
+     Printf.eprintf "run_sim: cycle cap reached (%d Mcyc)\n%!" !max_mcycles
    with
    | Exit -> ());
   (* report cycles/tick over the observed window *)
@@ -402,14 +402,14 @@ let () =
      if hn > h0
      then
        Printf.eprintf
-         "doom_sim: %d ticks over %d Mcyc -> ~%d cycles/tick (~%.1f fps at 60 MHz)\n%!"
+         "run_sim: %d ticks over %d Mcyc -> ~%d cycles/tick (~%.1f fps at 60 MHz)\n%!"
          (hn - h0)
          ((cn - c0) / 1_000_000)
          ((cn - c0) / (hn - h0))
          (60.0e6 /. float_of_int ((cn - c0) / (hn - h0)))
    | _ -> ());
   Printf.eprintf
-    "doom_sim: done — %d Mcyc total, heartbeat %d, status %d, marker %08X\n%!"
+    "run_sim: done — %d Mcyc total, heartbeat %d, status %d, marker %08X\n%!"
     (!cycles / 1_000_000)
     (shared 16)
     (shared 12)
@@ -433,7 +433,7 @@ let () =
       let probe n =
         match Cyclesim.lookup_node_or_reg_by_name sim n with
         | Some x -> x
-        | None -> fail "doom_sim: -hw: no traced node named %S" n
+        | None -> fail "run_sim: -hw: no traced node named %S" n
       in
       let ack = probe "ht_ack"
       and req = probe "vidreq"
@@ -460,7 +460,7 @@ let () =
             words.(idx) <- Cyclesim.Node.to_int wordn))
       done;
       Printf.eprintf
-        "doom_sim: -hw scanout capture: %d/24576 words over %d cycles\n%!"
+        "run_sim: -hw scanout capture: %d/24576 words over %d cycles\n%!"
         !seen
         !cyc;
       let b = Bytes.create (fb_words * 4) in
@@ -468,14 +468,14 @@ let () =
         Bytes.set_int32_le b (4 * w) (Int32.of_int (max words.(w) 0))
       done;
       Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
-      Printf.eprintf "doom_sim: scanout fb -> %s\n%!" !fbw)
+      Printf.eprintf "run_sim: scanout fb -> %s\n%!" !fbw)
     else (
       let b = Bytes.create (fb_words * 4) in
       for w = 0 to fb_words - 1 do
         Bytes.set_int32_le b (4 * w) (Int32.of_int (peek_word (fb_base_word + w)))
       done;
       Out_channel.with_open_bin !fbw (fun oc -> Out_channel.output_bytes oc b);
-      Printf.eprintf "doom_sim: fb -> %s\n%!" !fbw);
+      Printf.eprintf "run_sim: fb -> %s\n%!" !fbw);
   if !profile_out <> ""
   then
     write_profile

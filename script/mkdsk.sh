@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mkdisk.sh — assemble the bootable DOOM disk image (2c's delivery):
+# mkdsk.sh — assemble the bootable DOOM disk image (2c's delivery):
 #   stock PO2013 source (extracted from the pinned Oberon-2020-08-18.dsk)
 #   + oberon-agent's AgentTool/AgentProtocol + its Oberon.Mod boot-autoload patch
 #     (the serial agent channel — drives headless verification, harmless in play)
@@ -19,7 +19,7 @@
 # rebase in software). Raw device, no partitioning; SW0 off (on = serial boot):
 #   sudo dd if=DOOM.dsk of=/dev/sdX bs=512 seek=524290 conv=fsync status=progress
 #
-# Usage: script/mkdisk.sh [output.dsk]   (env: EMU=, OA= to relocate the tool repos)
+# Usage: script/mkdsk.sh [output.dsk]   (env: EMU=, OA= to relocate the tool repos)
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 EMU=${EMU:-$REPO/vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml}

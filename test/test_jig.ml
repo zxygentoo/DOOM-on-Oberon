@@ -58,7 +58,7 @@ let dcc_compile ?(libc = false) ?(port = false) ~src ~fname () =
          @
          if port
          then
-           [ Frontend.parse_file (libc_path "doomgeneric_oberon.c")
+           [ Frontend.parse_file (libc_path "doom_oberon.c")
            ; Frontend.parse_file (libc_path "dither.c")
            ; Frontend.parse_string ~name:"port_fakes" port_fakes
            ]

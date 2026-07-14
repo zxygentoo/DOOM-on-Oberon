@@ -9,6 +9,6 @@ _opam/
 *.blob.map
 *.fbw
 frame_*.pgm
-dskrun_*.pgm
+run_dsk_*.pgm
 scene_*.sbuf
 scene_*.pal

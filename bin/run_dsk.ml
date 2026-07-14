@@ -1,10 +1,10 @@
-(* dskrun — boot a .dsk on the vendored emulator IN-PROCESS and drive the booted
+(* run_dsk — boot a .dsk on the vendored emulator IN-PROCESS and drive the booted
    system with a deterministic script: raw PS/2 bytes (exactly what the SDL
    frontend encodes — fake-shift wrappers and all), mouse clicks (middle-click
    invokes Oberon commands, so no serial orchestration), SHARED-page probes
    (ABI §8: status / key-ring head / tail read straight from RAM), and PGM
-   frame dumps. The on-system complement of doomrun's -keys: doomrun proves
-   the blob's input path, dskrun proves DOOM.Mod's PollKeys and the whole
+   frame dumps. The on-system complement of run_blob's -keys: run_blob proves
+   the blob's input path, run_dsk proves DOOM.Mod's PollKeys and the whole
    stub on the real booted OS.
 
    The machine is paced by SIMULATED time (frame i = i/60 s), so scripts are
@@ -12,7 +12,7 @@
    printf) is captured to a log file. The disk is written IN PLACE — pass a
    copy.
 
-   Usage: dskrun [-seconds N] [-serial-log FILE]
+   Usage: run_dsk [-seconds N] [-serial-log FILE]
                  [-ps2 "ms:HEXBYTES,..."] [-click "ms:x:ytop,..."]
                  [-probe "ms,..."] [-dump "ms:name,..."]
                  [-htdump "ms:name,..."] <image.dsk>
@@ -51,7 +51,7 @@ let fail fmt =
 (* ---- args ---- *)
 
 let seconds = ref 30
-let serial_log = ref "dskrun-uart.log"
+let serial_log = ref "run_dsk-uart.log"
 let ps2_spec = ref ""
 let click_spec = ref ""
 let probe_spec = ref ""
@@ -65,7 +65,7 @@ let rec parse_args = function
      | Some v ->
        seconds := v;
        parse_args rest
-     | None -> fail "dskrun: not an integer: %s" n)
+     | None -> fail "run_dsk: not an integer: %s" n)
   | "-serial-log" :: f :: rest ->
     serial_log := f;
     parse_args rest
@@ -95,12 +95,12 @@ let split c s = List.filter (fun x -> x <> "") (String.split_on_char c (String.t
 let int_of s =
   match int_of_string_opt (String.trim s) with
   | Some v -> v
-  | None -> fail "dskrun: not an integer: %s" s
+  | None -> fail "run_dsk: not an integer: %s" s
 ;;
 
 let bytes_of_hex s =
   let n = String.length s in
-  if n = 0 || n land 1 <> 0 then fail "dskrun: odd hex string: %s" s;
+  if n = 0 || n land 1 <> 0 then fail "run_dsk: odd hex string: %s" s;
   Bytes.init (n / 2) (fun i -> Char.chr (int_of_string ("0x" ^ String.sub s (2 * i) 2)))
 ;;
 
@@ -120,26 +120,26 @@ let schedule () =
     (fun e ->
        match split ':' e with
        | [ ms; hex ] -> add (int_of ms) (Ps2 (bytes_of_hex hex))
-       | _ -> fail "dskrun: -ps2 wants ms:HEXBYTES, got %s" e)
+       | _ -> fail "run_dsk: -ps2 wants ms:HEXBYTES, got %s" e)
     (split ',' !ps2_spec);
   List.iter
     (fun e ->
        match split ':' e with
        | [ ms; x; y ] -> add (int_of ms) (Click (int_of x, int_of y))
-       | _ -> fail "dskrun: -click wants ms:x:ytop, got %s" e)
+       | _ -> fail "run_dsk: -click wants ms:x:ytop, got %s" e)
     (split ',' !click_spec);
   List.iter (fun e -> add (int_of e) Probe) (split ',' !probe_spec);
   List.iter
     (fun e ->
        match split ':' e with
        | [ ms; name ] -> add (int_of ms) (Dump name)
-       | _ -> fail "dskrun: -dump wants ms:name, got %s" e)
+       | _ -> fail "run_dsk: -dump wants ms:name, got %s" e)
     (split ',' !dump_spec);
   List.iter
     (fun e ->
        match split ':' e with
        | [ ms; name ] -> add (int_of ms) (Htdump name)
-       | _ -> fail "dskrun: -htdump wants ms:name, got %s" e)
+       | _ -> fail "run_dsk: -htdump wants ms:name, got %s" e)
     (split ',' !htdump_spec);
   List.sort compare !acts
 ;;
@@ -176,9 +176,9 @@ let () =
   let dsk =
     match !inputs with
     | [ d ] -> d
-    | _ -> fail "usage: dskrun [options] <image.dsk>  (disk is written in place)"
+    | _ -> fail "usage: run_dsk [options] <image.dsk>  (disk is written in place)"
   in
-  if not (Sys.file_exists dsk) then fail "dskrun: no such disk: %s" dsk;
+  if not (Sys.file_exists dsk) then fail "run_dsk: no such disk: %s" dsk;
   let m = M.make () in
   M.set_spi m 1 (Emu.Disk.to_spi (Emu.Disk.create (Some dsk)));
   let uart = Out_channel.open_bin !serial_log in
@@ -196,7 +196,7 @@ let () =
   let probe ms =
     let w off = ram.((shared_base + off) / 4) in
     Printf.printf
-      "dskrun: %6d ms  status %d  ring head %d tail %d  fb %016Lx\n%!"
+      "run_dsk: %6d ms  status %d  ring head %d tail %d  fb %016Lx\n%!"
       ms
       (w 12)
       (w 20)
@@ -215,7 +215,7 @@ let () =
         (match a with
          | Ps2 b ->
            M.keyboard_input m b;
-           Printf.printf "dskrun: %6d ms  ps2 %d byte(s)\n%!" ms (Bytes.length b)
+           Printf.printf "run_dsk: %6d ms  ps2 %d byte(s)\n%!" ms (Bytes.length b)
          | Click (x, ytop) ->
            (* move + middle press (SDL button 2); Oberon polls the mouse word once
               per LOOP PASS, and under DOOM.Window a pass contains a whole game
@@ -225,17 +225,17 @@ let () =
            M.mouse_moved m x (fb_lines - 1 - ytop);
            M.mouse_button m 2 true;
            acts := List.sort compare ((ms + 400, Release) :: !acts);
-           Printf.printf "dskrun: %6d ms  middle-click (%d, %d top)\n%!" ms x ytop
+           Printf.printf "run_dsk: %6d ms  middle-click (%d, %d top)\n%!" ms x ytop
          | Release -> M.mouse_button m 2 false
          | Probe -> probe ms
          | Dump name ->
-           let path = Printf.sprintf "dskrun_%s.pgm" name in
+           let path = Printf.sprintf "run_dsk_%s.pgm" name in
            dump_frame m path;
-           Printf.printf "dskrun: %6d ms  frame -> %s\n%!" ms path
+           Printf.printf "run_dsk: %6d ms  frame -> %s\n%!" ms path
          | Htdump name ->
-           let path = Printf.sprintf "dskrun_%s.pgm" name in
+           let path = Printf.sprintf "run_dsk_%s.pgm" name in
            dump_htframe m path;
-           Printf.printf "dskrun: %6d ms  htframe -> %s\n%!" ms path);
+           Printf.printf "run_dsk: %6d ms  htframe -> %s\n%!" ms path);
         fire ()
       | _ -> ()
     in

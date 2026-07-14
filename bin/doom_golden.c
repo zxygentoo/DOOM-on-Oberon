@@ -1,11 +1,11 @@
-/* doomgeneric_golden.c — the headless golden-frame generator (AGENT.md 1d).
+/* doom_golden.c — the headless golden-frame generator (AGENT.md 1d).
  *
  * The host half of the visual-golden oracle: the same game, the same WAD, the
  * same -timedemo demo1, and — the load-bearing part — THE SAME libc/dither.c,
  * blitting CMAP256 320x200 frames into a fake 1024x768 1-bit framebuffer with
  * the exact machine geometry (origin word 583*32+6, stride -32). At chosen
  * gametics the raw fb window (32*768 little-endian words, memory order — fb
- * line 0 at the bottom, bit 0 leftmost) dumps to golden_gNNNNN.fbw; doomrun's
+ * line 0 at the bottom, bit 0 leftmost) dumps to golden_gNNNNN.fbw; 
  * -dump-at writes the identical format from emulator RAM, and cmp(1) is the
  * verdict: bit-identical or the toolchain/port diverged.
  *
@@ -36,7 +36,7 @@ extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stri
 #define FB_WORDS (32 * 768)
 static unsigned int fb[FB_WORDS];
 
-/* mirror of the blob's DG_DrawFrame wrapper (libc/doomgeneric_oberon.c),
+/* mirror of the blob's DG_DrawFrame wrapper (libc/doom_oberon.c),
    byte for byte in effect: LUT-on-palette_changed, then the fullscreen blit
    (screen top-left = fb word 767*32, stride -32 — fb bottom-up) */
 void DG_DrawFrame(void)
