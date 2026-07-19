@@ -19,29 +19,14 @@ module M = Emu.Risc
 module F = Emu.Risc.For_tests
 module Isa = Emu.Risc5_isa
 module H = Emu.Headless
+module AC = Abi_constants
 
-(* ABI §8, the himem layout. *)
-let blob_base = 0x100000
-let shared_base = 0x300000
-let shared_size = 0x1000
-let wad_base = 0xA00000
-let wad_cap = 0x401000 (* the §8 window: 4 MiB + one page (the real WAD overruns 4 MiB) *)
-let fb_word_base = 0xE7F00 / 4
-let fb_words = 32 (* 1024 px / 32 *)
-let fb_lines = 768
-
-let fail fmt =
-  Printf.ksprintf
-    (fun s ->
-       prerr_endline s;
-       exit 1)
-    fmt
-;;
-
-let read_file path =
-  try In_channel.with_open_bin path In_channel.input_all with
-  | Sys_error e -> fail "run_blob: %s" e
-;;
+(* ABI §8, the himem layout — the constants page (lib/abi_constants.ml). *)
+let blob_base = AC.blob_base
+let shared_base = AC.shared_base
+let wad_cap = AC.wad_window_end - AC.wad_base
+let fail = Run_harness.fail
+let read_file = Run_harness.read_file
 
 (* ---- args ---- *)
 
@@ -135,22 +120,33 @@ let load_image ram base (b : bytes) =
 
 let verify_header blob =
   let word off = word_of_bytes blob off in
-  if word 0 <> 0x4D4F4F44 then fail "run_blob: bad magic (not a DOOM blob)";
-  if word 4 <> 1 then fail "run_blob: blob version %d, want 1" (word 4);
-  if word 8 <> Bytes.length blob
-  then fail "run_blob: header length %d <> file length %d" (word 8) (Bytes.length blob);
+  if word AC.hdr_magic <> AC.magic then fail "run_blob: bad magic (not a DOOM blob)";
+  if word AC.hdr_version <> AC.version
+  then fail "run_blob: blob version %d, want %d" (word AC.hdr_version) AC.version;
+  if word AC.hdr_length <> Bytes.length blob
+  then
+    fail
+      "run_blob: header length %d <> file length %d"
+      (word AC.hdr_length)
+      (Bytes.length blob);
   let sum = ref 0 in
-  for w = 16 to (Bytes.length blob / 4) - 1 do
+  for w = AC.header_size / 4 to (Bytes.length blob / 4) - 1 do
     sum := (!sum + word (4 * w)) land 0xFFFF_FFFF
   done;
-  if word 32 <> !sum then fail "run_blob: checksum mismatch";
-  if word 20 = 0 || word 24 = 0 then fail "run_blob: Init/Tick entry missing (0)"
+  if word AC.hdr_checksum <> !sum then fail "run_blob: checksum mismatch";
+  if word AC.hdr_init = 0 || word AC.hdr_tick = 0
+  then fail "run_blob: Init/Tick entry missing (0)"
 ;;
 
 (* Run one crt0 entry to its B LNK, advancing the synthetic clock; returns R0.
-   [total_steps] persists across calls so the ms counter never rewinds. *)
+   [total_steps] / [ms_countdown] persist across calls so the ms counter never
+   rewinds. The step loop is THE harness hot path (tens of billions of steps over
+   a timedemo), so the per-step work stays branch-cheap: the profiling test is a
+   bool hoisted out of the loop, and the ms clock is a countdown threaded through
+   the loop arguments — no division, no ref traffic per step. *)
 let total_steps = ref 0
 let sim_ms = ref 0
+let ms_countdown = ref 0 (* steps to the next ms tick; armed on first use *)
 
 let call_entry m name entry_addr ~r0 ~r1 =
   let regs = F.regs m in
@@ -163,43 +159,52 @@ let call_entry m name entry_addr ~r0 ~r1 =
   regs.(1) <- r1;
   F.set_pc m (entry_addr / 4);
   let budget = !max_steps in
-  let rec loop n =
+  let spm = !steps_per_ms in
+  if !ms_countdown = 0 then ms_countdown := spm;
+  let counts = !profile_counts in
+  let profiling = Array.length counts > 0 in
+  let base_word = !profile_base_word in
+  let rec loop n cd =
     if F.pc m = stop / 4
-    then ()
+    then (
+      total_steps := !total_steps + n;
+      ms_countdown := cd)
     else if n >= budget
     then fail "run_blob: %s exceeded %d steps (hung? raise -max-steps)" name budget
     else (
       let pc_before = F.pc m in
       F.single_step m;
-      incr total_steps;
-      (let c = !profile_counts in
-       if Array.length c > 0
-       then (
-         let w = pc_before - !profile_base_word in
-         if w >= 0 && w < Array.length c then c.(w) <- c.(w) + 1));
-      if !total_steps mod !steps_per_ms = 0
+      if profiling
       then (
-        incr sim_ms;
-        M.set_time m !sim_ms);
+        let w = pc_before - base_word in
+        if w >= 0 && w < Array.length counts then counts.(w) <- counts.(w) + 1);
+      let cd =
+        if cd = 1
+        then (
+          incr sim_ms;
+          M.set_time m !sim_ms;
+          spm)
+        else cd - 1
+      in
       if F.pc m = pc_before
       then
         fail
           "run_blob: %s hit a self-loop trap at PC=0x%08X (see doom.blob.map)"
           name
           (pc_before * 4);
-      loop (n + 1))
+      loop (n + 1) cd)
   in
-  loop 0;
+  loop 0 !ms_countdown;
   (F.regs m).(0)
 ;;
 
 (* the raw fb window: 32*768 little-endian words, memory order (fb line 0 at
    the bottom) — byte-identical to the golden generator's fwrite of its array *)
 let dump_raw m path =
-  let ram = F.ram m in
-  let b = Bytes.create (fb_words * fb_lines * 4) in
-  for w = 0 to (fb_words * fb_lines) - 1 do
-    Bytes.set_int32_le b (4 * w) (Int32.of_int ram.(fb_word_base + w))
+  let words = M.fb_width m * M.fb_height m in
+  let b = Bytes.create (words * 4) in
+  for w = 0 to words - 1 do
+    Bytes.set_int32_le b (4 * w) (Int32.of_int (M.framebuffer_word m w))
   done;
   Out_channel.with_open_bin path (fun oc -> Out_channel.output_bytes oc b)
 ;;
@@ -323,22 +328,7 @@ let write_profile ~blob ~map_path ~ticks_run out =
   Printf.eprintf "run_blob: profile -> %s\n%!" out
 ;;
 
-(* ---- framebuffer dump: PGM P5, fb bottom-up flipped, bit 0 leftmost ---- *)
-
-let dump_frame m path =
-  let ram = F.ram m in
-  Out_channel.with_open_bin path (fun oc ->
-    Printf.fprintf oc "P5\n%d %d\n255\n" (fb_words * 32) fb_lines;
-    for y = 0 to fb_lines - 1 do
-      let line = fb_lines - 1 - y in
-      for wx = 0 to fb_words - 1 do
-        let w = ram.(fb_word_base + (line * fb_words) + wx) in
-        for bit = 0 to 31 do
-          Out_channel.output_char oc (if (w lsr bit) land 1 = 1 then '\255' else '\000')
-        done
-      done
-    done)
-;;
+let dump_frame = Run_harness.dump_frame
 
 let () =
   parse_args (List.tl (Array.to_list Sys.argv));
@@ -357,21 +347,21 @@ let () =
   (* the stub's obligations: image at BLOB_BASE, bss zeroed per the header *)
   load_image ram blob_base blob;
   let word off = word_of_bytes blob off in
-  let bss_start = word 12
-  and bss_len = word 16 in
+  let bss_start = word AC.hdr_bss_base
+  and bss_len = word AC.hdr_bss_length in
   for w = bss_start / 4 to ((bss_start + bss_len) / 4) - 1 do
     ram.(w) <- 0
   done;
   (* WAD into himem (padded tail rides the pre-zeroed RAM) *)
   let wadb = Bytes.make ((String.length wad + 3) land lnot 3) '\000' in
   Bytes.blit_string wad 0 wadb 0 (String.length wad);
-  load_image ram wad_base wadb;
+  load_image ram AC.wad_base wadb;
   (* SHARED page: zeroed, then the WAD length (§8 +28) *)
-  for w = shared_base / 4 to ((shared_base + shared_size) / 4) - 1 do
+  for w = shared_base / 4 to ((shared_base + AC.shared_size) / 4) - 1 do
     ram.(w) <- 0
   done;
-  ram.((shared_base + 28) / 4) <- String.length wad;
-  if !hw then ram.((shared_base + 544) / 4) <- 1;
+  ram.((shared_base + AC.shared_wad_len) / 4) <- String.length wad;
+  if !hw then ram.((shared_base + AC.shared_present_flags) / 4) <- 1;
   (* the command tail (§8 +1024): raw bytes + NUL, exactly as the stub will *)
   if String.length !blob_args > 0
   then (
@@ -379,23 +369,21 @@ let () =
     then fail "run_blob: -args longer than the §8 command-tail region";
     let tail = Bytes.make ((String.length !blob_args + 4) land lnot 3) '\000' in
     Bytes.blit_string !blob_args 0 tail 0 (String.length !blob_args);
-    load_image ram (shared_base + 1024) tail);
-  (* UART console: tx always ready (status bit 1), rx never; printf -> stdout *)
+    load_image ram (shared_base + AC.shared_cmd_tail) tail);
+  (* UART console: printf -> stdout *)
   M.set_serial
     m
-    { Emu.Io.serial_read_status = (fun () -> 2)
-    ; serial_read_data = (fun () -> 0)
-    ; serial_write_data =
-        (fun b ->
-          print_char (Char.chr (b land 0xFF));
-          if b = 0x0A then flush stdout)
-    };
+    (Run_harness.tx_serial (fun b ->
+       print_char (Char.chr (b land 0xFF));
+       if b = 0x0A then flush stdout));
   M.set_time m 0;
-  let status () = ram.((shared_base + 12) / 4)
-  and heartbeat () = ram.((shared_base + 16) / 4) in
+  let status () = ram.((shared_base + AC.shared_status) / 4)
+  and heartbeat () = ram.((shared_base + AC.shared_heartbeat) / 4) in
   (* ---- Init(wad_addr, cfg_addr) ---- *)
   Printf.eprintf "run_blob: Init...\n%!";
-  let r = call_entry m "Init" (blob_base + word 20) ~r0:wad_base ~r1:shared_base in
+  let r =
+    call_entry m "Init" (blob_base + word AC.hdr_init) ~r0:AC.wad_base ~r1:shared_base
+  in
   flush stdout;
   Printf.eprintf
     "run_blob: Init -> %d (status %d), %d steps, %d sim-ms\n%!"
@@ -433,15 +421,15 @@ let () =
   then
     Printf.eprintf
       "run_blob: bn window after Init: %08X %08X %08X\n%!"
-      (F.ram m).(0x30E000 / 4)
-      (F.ram m).(0x30E004 / 4)
-      (F.ram m).(0x30E008 / 4);
+      (F.ram m).(AC.ht_threshold_base / 4)
+      (F.ram m).((AC.ht_threshold_base + 4) / 4)
+      (F.ram m).((AC.ht_threshold_base + 8) / 4);
   if List.mem 1 gametic_targets then dump_gametic 1;
   (* -profile: count from the first Tick on (Init excluded — frames are the cost) *)
   if !profile_out <> ""
   then (
-    let code_start = blob_base + 64
-    and bss_start = word 12 in
+    let code_start = blob_base + AC.header_size
+    and bss_start = word AC.hdr_bss_base in
     profile_base_word := code_start / 4;
     profile_counts := Array.make ((bss_start - code_start) / 4) 0);
   let key_events =
@@ -458,7 +446,8 @@ let () =
            | _ -> fail "run_blob: -keys: want tick:doomkey:pressed, got %s" s)
         (String.split_on_char ',' !keys_spec)
   in
-  if key_events <> [] && word 28 = 0 then fail "run_blob: -keys but no KeyIn entry";
+  if key_events <> [] && word AC.hdr_keyin = 0
+  then fail "run_blob: -keys but no KeyIn entry";
   (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
@@ -466,9 +455,10 @@ let () =
        List.iter
          (fun (kt, ev) ->
             if kt = t
-            then ignore (call_entry m "KeyIn" (blob_base + word 28) ~r0:ev ~r1:0))
+            then
+              ignore (call_entry m "KeyIn" (blob_base + word AC.hdr_keyin) ~r0:ev ~r1:0))
          key_events;
-       let r = call_entry m "Tick" (blob_base + word 24) ~r0:0 ~r1:0 in
+       let r = call_entry m "Tick" (blob_base + word AC.hdr_tick) ~r0:0 ~r1:0 in
        flush stdout;
        (* singletics under -timedemo: gametic = tick count + 1 *)
        if List.mem (t + 1) gametic_targets then dump_gametic (t + 1);
