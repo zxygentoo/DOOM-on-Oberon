@@ -6,6 +6,16 @@
 ; Depends on goblint-cil (the front end) and emu (Risc5_isa, the instr type we emit).
 ; The jig that exercises all of this lives in test/ (runner + test_jig).
 
+; abi_constants — the ABI constants page (ABI.md §7/§8/§11) as code: himem layout,
+; SHARED field offsets, blob header offsets. Zero-dep on purpose so the emulator
+; harnesses (bin/run_blob, bin/run_dsk) share it without pulling the compiler in.
+; Consumers alias it `module AC = Abi_constants`.
+
+(library
+ (name abi_constants)
+ (modules abi_constants))
+
 (library
  (name doomcc_core)
- (libraries goblint-cil emu))
+ (modules :standard \ abi_constants)
+ (libraries goblint-cil emu abi_constants))

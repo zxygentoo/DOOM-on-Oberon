@@ -1,11 +1,11 @@
 (* The blob envelope (ABI §7/§8). See blob.mli. The header is FROZEN v1 — offsets 0-35
-   locked; growth only in the reserved tail, anything else bumps the version byte. *)
+   locked (the {!Abi_constants} page); growth only in the reserved tail, anything else
+   bumps the version byte. *)
 
 module R = Emu.Risc5_isa
+module AC = Abi_constants
 
-let header_size = 64
-let magic = 0x4D4F4F44 (* "DOOM", little-endian *)
-let version = 1
+let header_size = AC.header_size
 
 type layout =
   { base : int
@@ -48,15 +48,15 @@ let emit ~(layout : layout) ~(code : R.instr list) ~(data : bytes) ~entries =
   done;
   (* the frozen v1 header (ABI §7) *)
   let word off v = Bytes.set_int32_le file off (Int32.of_int v) in
-  word 0 magic;
-  word 4 version;
-  word 8 layout.image_length;
-  word 12 layout.bss_base (* bss start, absolute *);
-  word 16 layout.bss_length;
-  word 20 init_off;
-  word 24 tick_off;
-  word 28 keyin_off;
-  word 32 !sum;
+  word AC.hdr_magic AC.magic;
+  word AC.hdr_version AC.version;
+  word AC.hdr_length layout.image_length;
+  word AC.hdr_bss_base layout.bss_base (* bss start, absolute *);
+  word AC.hdr_bss_length layout.bss_length;
+  word AC.hdr_init init_off;
+  word AC.hdr_tick tick_off;
+  word AC.hdr_keyin keyin_off;
+  word AC.hdr_checksum !sum;
   (* +36..+63 reserved, zero — Bytes.make gave us that *)
   file
 ;;
