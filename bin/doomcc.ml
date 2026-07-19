@@ -12,6 +12,7 @@
 
 module C = GoblintCil
 open Doomcc_core
+module AC = Abi_constants
 
 let () =
   (* ---- args: preprocessed .i inputs, optional -o ---- *)
@@ -139,14 +140,7 @@ let () =
     if (not (Hashtbl.mem defined name)) && not (Linker.is_intrinsic name)
     then Hashtbl.replace missing name ()
   in
-  List.iter
-    (fun (o : Linker.obj) ->
-       List.iter
-         (function
-           | Linker.Call n | Linker.Addr (_, n) -> note_ref n
-           | _ -> ())
-         o.Linker.frags)
-    objs;
+  List.iter (fun (o : Linker.obj) -> List.iter note_ref (Linker.referenced_syms o)) objs;
   List.iter
     (function
       | _, Globals.Code n -> note_ref n
@@ -170,10 +164,6 @@ let () =
   let entry_names =
     List.filter (fun n -> Hashtbl.mem defined n) [ "Init"; "Tick"; "KeyIn" ]
   in
-  let stack_top =
-    0x300000
-    (* STACK_TOP, ABI §8 *)
-  in
   let all = objs @ traps in
   let code_words =
     List.fold_left (fun a o -> a + Linker.code_size o) 0 all
@@ -182,10 +172,7 @@ let () =
   let data_size = globals.Globals.data_size in
   let bss_size = Bytes.length globals.Globals.image - data_size in
   let save_bss = if entry_names = [] then 0 else Crt0.save_area_size in
-  let base =
-    0x100000
-    (* BLOB_BASE, ABI §8 *)
-  in
+  let base = AC.blob_base in
   let layout = Blob.layout ~base ~code_words ~data_size ~bss_size:(bss_size + save_bss) in
   let thunks =
     List.map
@@ -194,12 +181,12 @@ let () =
            ~name:("__crt0_" ^ n)
            ~entry:n
            ~save_area:(layout.Blob.bss_base + bss_size)
-           ~stack_top
+           ~stack_top:AC.stack_top
            ~data_base:layout.Blob.data_base)
       entry_names
   in
   let all = all @ thunks in
-  if layout.Blob.bss_base + layout.Blob.bss_length > 0x2C0000
+  if layout.Blob.bss_base + layout.Blob.bss_length > AC.blob_end_cap
   then
     Printf.printf
       "link:    WARNING blob end 0x%X exceeds the 1.75 MB cap (ABI §8)\n"
@@ -219,8 +206,8 @@ let () =
   (* header entries point at the thunks, not the C functions — the thunk owns the world
      switch (ABI §7); 0 while the port layer's C entry doesn't exist yet *)
   let entry name =
-    match List.assoc_opt ("__crt0_" ^ name) image.Linker.symbols with
-    | Some off -> layout.Blob.code_base + (4 * off) - base
+    match Linker.find_sym_addr image ("__crt0_" ^ name) with
+    | Some addr -> addr - base
     | None -> 0
   in
   let blob =

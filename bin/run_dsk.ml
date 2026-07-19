@@ -29,24 +29,13 @@
 module M = Emu.Risc
 module F = Emu.Risc.For_tests
 module H = Emu.Headless
+module AC = Abi_constants
 
-let fps = 60
-let cpu_hz = 25_000_000
-let shared_base = 0x300000
-let fb_word_base = 0xE7F00 / 4
-let fb_words = 32
-let fb_lines = 768
-let ht_base = 0x310000
-let ht_w = 320
+let fps = H.fps
+let cpu_hz = H.cpu_hz
+let ht_w = 320 (* the DOOM client's halftone window geometry (ABI §11) *)
 let ht_h = 200
-
-let fail fmt =
-  Printf.ksprintf
-    (fun s ->
-       prerr_endline s;
-       exit 1)
-    fmt
-;;
+let fail = Run_harness.fail
 
 (* ---- args ---- *)
 
@@ -150,26 +139,12 @@ let dump_htframe m path =
   Out_channel.with_open_bin path (fun oc ->
     Printf.fprintf oc "P5\n%d %d\n255\n" ht_w ht_h;
     for i = 0 to (ht_w * ht_h) - 1 do
-      let b = (ram.((ht_base + i) / 4) lsr (8 * (i land 3))) land 0xFF in
+      let b = (ram.((AC.ht_pixel_base + i) / 4) lsr (8 * (i land 3))) land 0xFF in
       Out_channel.output_char oc (Char.chr b)
     done)
 ;;
 
-(* PGM P5: fb bottom-up flipped so the file reads top-down, bit 0 leftmost *)
-let dump_frame m path =
-  let ram = F.ram m in
-  Out_channel.with_open_bin path (fun oc ->
-    Printf.fprintf oc "P5\n%d %d\n255\n" (fb_words * 32) fb_lines;
-    for y = 0 to fb_lines - 1 do
-      let line = fb_lines - 1 - y in
-      for wx = 0 to fb_words - 1 do
-        let w = ram.(fb_word_base + (line * fb_words) + wx) in
-        for bit = 0 to 31 do
-          Out_channel.output_char oc (if (w lsr bit) land 1 = 1 then '\255' else '\000')
-        done
-      done
-    done)
-;;
+let dump_frame = Run_harness.dump_frame
 
 let () =
   parse_args (List.tl (Array.to_list Sys.argv));
@@ -184,23 +159,19 @@ let () =
   let uart = Out_channel.open_bin !serial_log in
   M.set_serial
     m
-    { Emu.Io.serial_read_status = (fun () -> 2) (* tx always ready, rx never *)
-    ; serial_read_data = (fun () -> 0)
-    ; serial_write_data =
-        (fun b ->
-          Out_channel.output_char uart (Char.chr (b land 0xFF));
-          Out_channel.flush uart)
-    };
+    (Run_harness.tx_serial (fun b ->
+       Out_channel.output_char uart (Char.chr (b land 0xFF));
+       Out_channel.flush uart));
   let acts = ref (schedule ()) in
   let ram = F.ram m in
   let probe ms =
-    let w off = ram.((shared_base + off) / 4) in
+    let w off = ram.((AC.shared_base + off) / 4) in
     Printf.printf
       "run_dsk: %6d ms  status %d  ring head %d tail %d  fb %016Lx\n%!"
       ms
-      (w 12)
-      (w 20)
-      (w 24)
+      (w AC.shared_status)
+      (w AC.shared_ring_head)
+      (w AC.shared_ring_tail)
       (H.framebuffer_hash m)
   in
   let frames = !seconds * fps in
@@ -222,7 +193,7 @@ let () =
               tick (~125 sim-ms) — a 50 ms pulse fell between polls. 400 ms spans
               several passes; menu commands fire on RELEASE, so a longer hold is
               still one click *)
-           M.mouse_moved m x (fb_lines - 1 - ytop);
+           M.mouse_moved m x (M.fb_height m - 1 - ytop);
            M.mouse_button m 2 true;
            acts := List.sort compare ((ms + 400, Release) :: !acts);
            Printf.printf "run_dsk: %6d ms  middle-click (%d, %d top)\n%!" ms x ytop

@@ -15,7 +15,16 @@
  (name abi_constants)
  (modules abi_constants))
 
+; run_harness — plumbing shared by the run_* emulator harnesses (bin/run_blob,
+; bin/run_dsk): CLI fail, file reads, the write-only UART, and the PGM frame
+; dump (the single statement of the fb pixel encoding).
+
+(library
+ (name run_harness)
+ (modules run_harness)
+ (libraries emu))
+
 (library
  (name doomcc_core)
- (modules :standard \ abi_constants)
+ (modules :standard \ abi_constants run_harness)
  (libraries goblint-cil emu abi_constants))

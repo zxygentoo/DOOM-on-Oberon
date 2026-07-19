@@ -21,28 +21,13 @@
 
 module R = Emu.Risc5_isa
 module L = Doomcc_core.Linker
+module AC = Abi_constants
+open Doomcc_core.Asm
 
-let blob_base = 0x100000 (* ABI §8 *)
-let shared_base = 0x300000
-let wad_base = 0xA00000
 let rom_base = 0xFFE000 (* reset vector: ROM word 0 *)
 
-let alu ?(u = false) op a b operand : L.frag =
-  Ins (R.Alu { op; u; v = false; a; b; operand })
-;;
-
-(* the canonical 2-word constant build (crt0's load_const2 shape) *)
-let load_const d n =
-  [ alu ~u:true R.Mov d 0 (R.Imm ((n lsr 16) land 0xFFFF))
-  ; alu R.Ior d d (R.Imm (n land 0xFFFF))
-  ]
-;;
-
-let ldw a base off : L.frag = Ins (R.Load { size = R.W; a; base; off })
-let stw a base off : L.frag = Ins (R.Store { size = R.W; a; base; off })
-
 let bl_reg c : L.frag =
-  Ins (R.Branch { cond = R.True; neg = false; link = true; target = R.To_reg c })
+  ins (R.Branch { cond = R.True; neg = false; link = true; target = R.To_reg c })
 ;;
 
 let l_loop = 0
@@ -51,18 +36,18 @@ let l_done = 1
 let stub : L.obj =
   { name = "emit_rom"
   ; frags =
-      load_const 6 blob_base (* R6 = BLOB_BASE *)
-      @ [ ldw 8 6 20 (* R8 = header Init offset *)
+      load_const2 6 AC.blob_base (* R6 = BLOB_BASE *)
+      @ [ ldw 8 6 AC.hdr_init (* R8 = header Init offset *)
         ; alu R.Add 8 8 (R.Reg 6) (* ... absolute *)
-        ; ldw 7 6 24 (* R7 = header Tick offset *)
+        ; ldw 7 6 AC.hdr_tick (* R7 = header Tick offset *)
         ; alu R.Add 7 7 (R.Reg 6)
         ]
-      @ load_const 9 shared_base (* R9 = SHARED *)
-      @ load_const 0 wad_base (* Init arg 0: wad_addr *)
+      @ load_const2 9 AC.shared_base (* R9 = SHARED *)
+      @ load_const2 0 AC.wad_base (* Init arg 0: wad_addr *)
       @ [ alu R.Mov 1 0 (R.Reg 9) (* Init arg 1: cfg = SHARED *)
         ; bl_reg 8 (* Init(wad, shared) *)
         ]
-      @ load_const 2 0xD00D_0000
+      @ load_const2 2 0xD00D_0000
       @ [ alu R.And 3 0 (R.Imm 0xFFFF) (* marker | (result & 0xFFFF) *)
         ; alu R.Ior 3 3 (R.Reg 2)
         ; stw 3 9 8 (* SHARED+8 = Init marker *)
@@ -75,12 +60,12 @@ let stub : L.obj =
         ; ldw 2 9 4 (* tick target (0 = forever) *)
         ; alu R.Sub 2 2 (R.Imm 0)
         ; L.Bcc (R.Eq, false, l_loop) (* no target -> keep ticking *)
-        ; ldw 3 9 16 (* heartbeat *)
+        ; ldw 3 9 AC.shared_heartbeat (* heartbeat *)
         ; alu R.Sub 4 3 (R.Reg 2)
         ; L.Bcc (R.Lt, false, l_loop) (* hb < target -> keep ticking *)
         ; L.Label l_done
         ]
-      @ load_const 2 0xD0E0_D0E0
+      @ load_const2 2 0xD0E0_D0E0
       @ [ stw 2 9 8 (* SHARED+8 = done marker *); L.Label 2; L.Jmp 2 (* park *) ]
   }
 ;;

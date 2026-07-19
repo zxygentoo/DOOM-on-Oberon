@@ -4,7 +4,8 @@
 
 (executable
  (name doomcc)
- (libraries doomcc_core goblint-cil emu))
+ (modules doomcc)
+ (libraries doomcc_core abi_constants goblint-cil emu))
 
 ; split_wad — host-side WAD chunk splitter (AGENT.md §3): DOOM1.WAD -> <=3 MiB
 ; byte-range chunk files the PO filesystem can hold; the stub concatenates them
@@ -12,6 +13,7 @@
 
 (executable
  (name split_wad)
+ (modules split_wad)
  (libraries doomcc_core))
 
 ; run_blob — the 1d emulator harness: doom.blob + doom1.wad -> himem, the SHARED
@@ -20,14 +22,16 @@
 
 (executable
  (name run_blob)
- (libraries emu))
+ (modules run_blob)
+ (libraries emu abi_constants run_harness))
 
 ; emit_bn64 — void-and-cluster blue-noise threshold-map generator (host tooling):
 ; emits
 ; the __dg_bn64 table baked into libc/dither.c. Deterministic; see the file.
 
 (executable
- (name emit_bn64))
+ (name emit_bn64)
+ (modules emit_bn64))
 
 ; emit_rom — the Cyclesim boot ROM stub (1d sim leg): ~30 eDSL words that call
 ; the blob's crt0 entries and report progress via the SHARED page. The third
@@ -35,7 +39,8 @@
 
 (executable
  (name emit_rom)
- (libraries doomcc_core emu))
+ (modules emit_rom)
+ (libraries doomcc_core abi_constants emu))
 
 ; run_dsk — boot a .dsk in-process and drive the booted system with a scripted
 ; timeline: raw PS/2 bytes, middle-clicks, ABI par-8 SHARED probes, PGM dumps.
@@ -43,4 +48,5 @@
 
 (executable
  (name run_dsk)
- (libraries emu))
+ (modules run_dsk)
+ (libraries emu abi_constants run_harness))
