@@ -52,16 +52,24 @@ i _out/i/.stamp: script/ppx_doomsrc.sh $(wildcard patch/c/*.patch)
 	@touch _out/i/.stamp
 
 # the shareware IWAD v1.9 (freely redistributable) — md5-pinned; the name
-# "doom1.wad" is baked into the blob's Init (port.4)
-WAD_URL := https://distro.ibiblio.org/slitaz/sources/packages/d/doom1.wad
+# "doom1.wad" is baked into the blob's Init (port.4). Mirrors are tried in
+# order until one matches the pin (the original slitaz URL died 2026-07):
+# the md5, not the host, is the trust anchor.
+WAD_URLS := \
+  https://raw.githubusercontent.com/Doom-Utils/shareware-collection/master/Doom%201.9/doom1.wad \
+  https://raw.githubusercontent.com/Akbar30Bill/DOOM_wads/master/doom1.wad
 WAD_MD5 := f0cefca49926d00903cf57551d901abe
 
 wad: _out/doom1.wad
 _out/doom1.wad:
 	@mkdir -p _out
-	curl -fL $(WAD_URL) -o $@.tmp
-	@test "$$(md5sum $@.tmp | cut -d' ' -f1)" = "$(WAD_MD5)" \
-	  || { echo "md5 mismatch (want shareware 1.9)"; rm -f $@.tmp; exit 1; }
+	@ok=; for url in $(WAD_URLS); do \
+	  echo "curl $$url"; \
+	  if curl -fL --connect-timeout 20 "$$url" -o $@.tmp \
+	     && test "$$(md5sum $@.tmp | cut -d' ' -f1)" = "$(WAD_MD5)"; \
+	  then ok=1; break; else echo "  mirror failed or md5 mismatch — trying next"; fi; \
+	done; \
+	test -n "$$ok" || { echo "no mirror yielded shareware 1.9 (md5 $(WAD_MD5))"; rm -f $@.tmp; exit 1; }
 	mv $@.tmp $@
 
 # ---- the port's artifacts ---------------------------------------------------
