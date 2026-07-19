@@ -33,9 +33,6 @@ type t =
         (ABI §7 bss start/length) *)
   }
 
-(** No globals at all (the default for bare {!Fundec.compile} calls). *)
-val no_globals : t
-
 (** Evaluate a compile-time integer constant: integer arithmetic through any cast chain
     (width-exact — narrowing casts wrap as the machine will), and constant *double*
     expressions under an integer cast, truncating toward zero — the automap zoom idiom

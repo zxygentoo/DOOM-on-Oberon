@@ -53,17 +53,6 @@ let merge (units : file list) ~(name : string) : file =
   m
 ;;
 
-(* The (single) function definition named [fname] in [file]. *)
-let find_fundec (file : file) (fname : string) : fundec =
-  let found = ref None in
-  iterGlobals file (function
-    | GFun (fd, _) when fd.svar.vname = fname -> found := Some fd
-    | _ -> ());
-  match !found with
-  | Some fd -> fd
-  | None -> failwith (Printf.sprintf "function %s not found in parsed unit" fname)
-;;
-
 let fundecs (file : file) : fundec list =
   let acc = ref [] in
   iterGlobals file (function

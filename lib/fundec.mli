@@ -10,7 +10,7 @@
 
 (** [compile ~globals fd] lowers a function to its unresolved {!Linker.obj}: integer args
     arrive in R0.., the result leaves in R0 (ABI §3), and it returns via [B LNK]; globals
-    resolve to DB-relative offsets through [globals] (default {!Globals.no_globals}: any
-    global access refuses). {!Linker.link} turns the obj (with any callees) into a flat code
-    image. Raises {!Check.Unsupported} on anything outside the supported subset. *)
-val compile : ?globals:Globals.t -> GoblintCil.fundec -> Linker.obj
+    resolve to DB-relative offsets through [globals]. {!Linker.link} turns the obj (with
+    any callees) into a flat code image. Raises {!Check.Unsupported} on anything outside
+    the supported subset. *)
+val compile : globals:Globals.t -> GoblintCil.fundec -> Linker.obj

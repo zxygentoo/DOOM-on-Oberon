@@ -166,6 +166,11 @@ let home ctx (v : C.varinfo) =
   | None -> unsupported "unmapped local %s — internal error" v.vname
 ;;
 
+(* The single definition of "this variable lives in a register": a local (not a
+   global) that was never slotted (s4.3 aggregates/address-taken, spill rungs).
+   The seam a future allocator rung reimplements. *)
+let is_reg_local ctx (v : C.varinfo) = (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
+
 (* A global's DB-relative offset. A [Globals]-skipped global re-raises its skip reason
    here, attributing the refusal to each function that touches it; a vid the layout
    never saw is a declaration with no definition anywhere — the linker/libc's problem. *)
@@ -235,17 +240,28 @@ let alu ?(u = false) ?(v = false) op a b operand : R.instr =
 
 let mov_reg d s = alu R.Mov d 0 (R.Reg s) (* R[d] <- R[s] *)
 
-(* R[d] <- 32-bit constant n: one MOV if it fits a zero-extended 16-bit immediate, else
-   MOV-high (u=1: R[d] = hi<<16) + IOR-low (zero-extended) — the canonical RISC5 build. *)
+(* R[d] <- 32-bit constant n: one MOV if it fits a zero-extended 16-bit immediate,
+   else the canonical 2-word build ({!Linker.load_const_pair}). *)
 let load_const ctx d n =
   let n = n land 0xFFFF_FFFF in
-  let lo = n land 0xFFFF
-  and hi = (n lsr 16) land 0xFFFF in
-  if hi = 0
-  then emit ctx (alu R.Mov d 0 (R.Imm lo))
-  else (
-    emit ctx (alu ~u:true R.Mov d 0 (R.Imm hi));
-    emit ctx (alu R.Ior d d (R.Imm lo)))
+  if n <= 0xFFFF
+  then emit ctx (alu R.Mov d 0 (R.Imm n))
+  else List.iter (emit ctx) (L.load_const_pair d n)
+;;
+
+(* RISC5 has no compare instruction — flags come from a real ALU write into a dead
+   scratch, allocated and freed on the spot so it never widens a live range: SUB a,b
+   sets the relational flags [rel_cond] reads; a MOV sets N/Z (the truthiness test). *)
+let flags_of_sub ctx a b =
+  let s = alloc_scratch ctx in
+  emit ctx (alu R.Sub s a (R.Reg b));
+  free_scratch ctx s
+;;
+
+let flags_of_reg ctx r =
+  let s = alloc_scratch ctx in
+  emit ctx (mov_reg s r);
+  free_scratch ctx s
 ;;
 
 (* [pow2_log n] is [Some k] iff n = 2^k — the strength-reduction test. *)
@@ -287,6 +303,32 @@ let pointee_size (t : C.typ) =
   match C.unrollType t with
   | C.TPtr (elem, _) -> C.bitsSizeOf elem / 8
   | _ -> unsupported "pointer arithmetic on a non-pointer — unexpected CIL shape"
+;;
+
+(* The single routing authority for backend-generated Runtime helper calls (ABI §5):
+   does [e]'s top node lower to a helper BL, and to which? Consulted by codegen
+   (gen_expr's Div/Mod arm takes the helper NAME from it) and by the
+   [calls_runtime_helper] pre-scan that sizes the div area — one definition, so the
+   two cannot drift. Div/Mod always call (signedness picks the pair); unsigned [>>]
+   only for a variable count (constant counts inline as ROR+mask, s5.2b); ptr−ptr
+   only for a non-pow-2 element size (pow-2 strength-reduces to ASR). *)
+let runtime_helper_of (e : C.exp) : string option =
+  match e with
+  | C.BinOp (((C.Div | C.Mod) as op), _, _, t) ->
+    Some
+      (match op, is_unsigned_int t with
+       | C.Div, false -> "__div"
+       | C.Div, true -> "__udiv"
+       | C.Mod, false -> "__mod"
+       | _ -> "__umod")
+  | C.BinOp (C.Shiftrt, _, e2, t)
+    when is_unsigned_int t && C.getInteger (C.constFold true e2) = None -> Some "__lsr"
+  | C.BinOp (C.MinusPP, e1, _, _) ->
+    (try if pow2_log (pointee_size (C.typeOf e1)) = None then Some "__div" else None with
+     | Check.Unsupported _ | C.SizeOfError _ ->
+       (* codegen will refuse this expression itself, with the right message *)
+       None)
+  | _ -> None
 ;;
 
 (* Fresh register <- [p] + [delta] (signed): one immediate ADD/SUB when [delta] fits the
@@ -431,8 +473,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
      | None ->
        unsupported
          "string literal not interned (data image past DB's +512 KB reach) — 3b linker")
-  | C.Lval (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
-    ->
+  | C.Lval (C.Var v, C.NoOffset) when is_reg_local ctx v ->
     home
       ctx
       v (* a register local; a slotted one falls through to the memory load below *)
@@ -505,19 +546,17 @@ let rec gen_expr ctx (e : C.exp) : reg =
   | C.BinOp (((C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP) as op), e1, e2, t) ->
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
-  | C.BinOp (((C.Div | C.Mod) as op), e1, e2, t) ->
+  | C.BinOp ((C.Div | C.Mod), e1, e2, t) as whole ->
     (* / and % are calls, not instructions (ABI §5: "the backend never emits a bare DIV") —
        the hardware DIV floors where C truncates and takes only divisors in [1, 2^31-1], so
        the sign/envelope wrapping lives once, in the Runtime helpers. Usual arithmetic
        conversions are already applied (CIL), so the result type's signedness picks the
-       helper pair. *)
+       helper pair — via [runtime_helper_of], the shared routing authority. *)
     Check.check_unsupported_types t;
     let name =
-      match op, is_unsigned_int t with
-      | C.Div, false -> "__div"
-      | C.Div, true -> "__udiv"
-      | C.Mod, false -> "__mod"
-      | _ -> "__umod"
+      match runtime_helper_of whole with
+      | Some n -> n
+      | None -> assert false (* Div/Mod always routes to a helper *)
     in
     gen_helper_call2 ctx name (fun () -> gen_expr ctx e1) (fun () -> gen_expr ctx e2)
   | C.BinOp (((C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne) as op), e1, e2, t) ->
@@ -532,9 +571,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     in
     let r1 = gen_expr ctx e1 in
     let r2 = gen_expr ctx e2 in
-    let s = alloc_scratch ctx in
-    emit ctx (alu R.Sub s r1 (R.Reg r2)) (* flags = e1 - e2; s is dead *);
-    free_scratch ctx s;
+    flags_of_sub ctx r1 r2 (* flags = e1 - e2 *);
     free_scratch ctx r1;
     free_scratch ctx r2;
     bool_from_flags ctx tcond tneg
@@ -591,9 +628,7 @@ and gen_unop ctx op e' =
     (* !x is (x == 0) as a 0/1 value (s5.1): set flags from x (MOV sets N/Z), then materialize
        the Eq condition. Works for any scalar — int, char, pointer — since all test against 0. *)
     let r = gen_expr ctx e' in
-    let s = alloc_scratch ctx in
-    emit ctx (mov_reg s r) (* flags: Z = (x == 0); s is dead *);
-    free_scratch ctx s;
+    flags_of_reg ctx r (* flags: Z = (x == 0) *);
     free_scratch ctx r;
     bool_from_flags ctx R.Eq false
 
@@ -856,13 +891,14 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
   free_scratch ctx base
 ;;
 
-(* Write scratch [r] into a scalar lval that may be a register-homed local — the
-   general gen_store path errors on those (a homed variable has no address); everything
-   else routes through the normal memory calculus. The va builtins need this because
-   CIL special-cases va_arg's &dst (no vaddrof), so the destination keeps its home. *)
+(* Write scratch [r] into any scalar lval: a register-homed local takes a MOV into
+   its home (the general gen_store path errors on those — a homed variable has no
+   address); everything else routes through the normal memory calculus. The one
+   dispatch behind scalar assignment and the va builtins (CIL special-cases
+   va_arg's &dst — no vaddrof — so the destination keeps its register home). *)
 let store_lval ctx (lv : C.lval) (r : reg) =
   match lv with
-  | C.Var v, C.NoOffset when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
+  | C.Var v, C.NoOffset when is_reg_local ctx v ->
     let h = home ctx v in
     if h <> r then emit ctx (mov_reg h r)
   | _ -> gen_store ctx lv r
@@ -964,20 +1000,12 @@ let gen_instr ctx (i : C.instr) =
       | _ -> unsupported "aggregate assignment from a non-lval — unexpected CIL shape"
     in
     gen_struct_copy ctx dst src (C.bitsSizeOf (C.typeOfLval dst) / 8)
-  | C.Set ((C.Var v, C.NoOffset), e, _, _)
-    when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid) ->
-    (* a register local: evaluate, then MOV into its home. A slotted local (aggregate or
-       address-taken) falls through to the memory store below — and a whole-aggregate copy
-       lands there too, where gen_store refuses it (s4.4). *)
-    let r = gen_expr ctx e in
-    let h = home ctx v in
-    if r <> h then emit ctx (mov_reg h r);
-    free_scratch ctx r
   | C.Set (lv, e, _, _) ->
-    (* memory write: value first, then the address+store (CIL: both side-effect-free, so
-       the order is free). gen_store picks STW/STB or composes the halfword. *)
+    (* scalar assignment: value first (CIL: both sides side-effect-free, so the order
+       is free), then store_lval routes it — a MOV into a register local's home, or
+       the memory calculus (STW/STB, the composed halfword) for everything else. *)
     let r = gen_expr ctx e in
-    gen_store ctx lv r;
+    store_lval ctx lv r;
     free_scratch ctx r
   | C.Call (_, C.Lval (C.Var f, C.NoOffset), args, _, _)
     when String.length f.vname >= 13 && String.sub f.vname 0 13 = "__builtin_va_" ->
@@ -1049,8 +1077,7 @@ let gen_instr ctx (i : C.instr) =
     do_call ();
     (match lvopt with
      | None -> () (* void call / result discarded *)
-     | Some (C.Var v, C.NoOffset) when (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
-       ->
+     | Some (C.Var v, C.NoOffset) when is_reg_local ctx v ->
        let h = home ctx v in
        if h <> return_reg then emit ctx (mov_reg h return_reg)
      | Some lv ->
@@ -1073,9 +1100,7 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   (* fallback: treat [cond] as a value, false iff zero (the register write sets Z) *)
   let truthy () =
     let r = gen_expr ctx cond in
-    let d = alloc_scratch ctx in
-    emit ctx (mov_reg d r);
-    free_scratch ctx d;
+    flags_of_reg ctx r;
     free_scratch ctx r;
     bcc ctx R.Eq false false_label
   in
@@ -1086,10 +1111,7 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
      | Some (tcond, tneg) ->
        let r1 = gen_expr ctx e1 in
        let r2 = gen_expr ctx e2 in
-       let s = alloc_scratch ctx in
-       emit ctx (alu R.Sub s r1 (R.Reg r2));
-       (* flags = e1 - e2; s is dead *)
-       free_scratch ctx s;
+       flags_of_sub ctx r1 r2 (* flags = e1 - e2 *);
        free_scratch ctx r1;
        free_scratch ctx r2;
        (* jump when the comparison is FALSE: {tcond, not tneg} *)
@@ -1162,9 +1184,7 @@ let rec gen_stmt ctx (s : C.stmt) =
                 in
                 let vr = alloc_scratch ctx in
                 load_const ctx vr v;
-                let s = alloc_scratch ctx in
-                emit ctx (alu R.Sub s r (R.Reg vr)) (* flags = switch - case; s is dead *);
-                free_scratch ctx s;
+                flags_of_sub ctx r vr (* flags = switch - case *);
                 free_scratch ctx vr;
                 bcc ctx R.Eq false l (* switch == case -> that case *)
               | C.Default _ -> default := Some l
@@ -1236,13 +1256,12 @@ let call_arity (fd : C.fundec) : int option =
   !widest
 ;;
 
-(* Does the body contain a construct that lowers to a Runtime helper call (ABI §5) — a
-   [/] or [%], a ptr−ptr whose element size isn't a power of two, or an unsigned [>>]
-   by a variable count (__lsr)? A yes sizes the div
-   area into the frame and forces the non-leaf shape (the BL clobbers LNK and the
-   caller-saved scratch pool). Division hides in any expression position (an index, a
-   condition, a call argument), so this is a visitor, not a statement walk like
-   [call_arity]'s. *)
+(* Does the body contain a construct that lowers to a Runtime helper call (ABI §5)?
+   A yes sizes the div area into the frame and forces the non-leaf shape (the BL
+   clobbers LNK and the caller-saved scratch pool). Division hides in any expression
+   position (an index, a condition, a call argument), so this is a visitor, not a
+   statement walk like [call_arity]'s; the routing itself is [runtime_helper_of]'s —
+   the same authority codegen dispatches on, so the two cannot disagree. *)
 let calls_runtime_helper (fd : C.fundec) : bool =
   let found = ref false in
   let scan =
@@ -1250,19 +1269,7 @@ let calls_runtime_helper (fd : C.fundec) : bool =
       inherit C.nopCilVisitor
 
       method! vexpr e =
-        (match e with
-         | C.BinOp ((C.Div | C.Mod), _, _, _) -> found := true
-         | C.BinOp (C.Shiftrt, _, e2, t)
-           when is_unsigned_int t && C.getInteger (C.constFold true e2) = None ->
-           (* must mirror gen_expr's routing: only unsigned + variable count calls *)
-           found := true
-         | C.BinOp (C.MinusPP, e1, _, _) ->
-           (* must mirror gen_ptr_arith's routing exactly: only the non-pow-2 case calls *)
-           (try if pow2_log (pointee_size (C.typeOf e1)) = None then found := true with
-            | Check.Unsupported _ | C.SizeOfError _ ->
-              (* codegen will refuse this expression itself, with the right message *)
-              ())
-         | _ -> ());
+        if runtime_helper_of e <> None then found := true;
         C.DoChildren
     end
   in
@@ -1360,6 +1367,11 @@ let flatten_fundec (fd : C.fundec) : unit =
     let e' = shallow loc e in
     List.rev !prelude, e'
   in
+  (* a statement keeps its skind shape, with the prelude (if any) wrapped in front
+     via a Block — mutated in place so labels / case markers stay on [s] *)
+  let rewrap pre k =
+    if pre = [] then k else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ])
+  in
   let rec do_stmt (s : C.stmt) : unit =
     match s.skind with
     | C.Instr il -> s.skind <- C.Instr (List.concat_map do_instr il)
@@ -1367,26 +1379,14 @@ let flatten_fundec (fd : C.fundec) : unit =
       do_block b1;
       do_block b2;
       let pre, e' = flat_top l1 e in
-      let k = C.If (e', b1, b2, l1, l2) in
-      s.skind
-      <- (if pre = []
-          then k
-          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+      s.skind <- rewrap pre (C.If (e', b1, b2, l1, l2))
     | C.Switch (e, b, cases, l1, l2) ->
       do_block b;
       let pre, e' = flat_top l1 e in
-      let k = C.Switch (e', b, cases, l1, l2) in
-      s.skind
-      <- (if pre = []
-          then k
-          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+      s.skind <- rewrap pre (C.Switch (e', b, cases, l1, l2))
     | C.Return (Some e, loc, eloc) ->
       let pre, e' = flat_top loc e in
-      let k = C.Return (Some e', loc, eloc) in
-      s.skind
-      <- (if pre = []
-          then k
-          else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ]))
+      s.skind <- rewrap pre (C.Return (Some e', loc, eloc))
     | C.Block b | C.Loop (b, _, _, _, _) -> do_block b
     | _ -> ()
   and do_block (b : C.block) : unit = List.iter do_stmt b.bstmts in
@@ -1694,7 +1694,7 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   { L.name = fd.svar.vname; frags = prologue @ List.rev ctx.rev_frags }
 ;;
 
-let compile ?(globals = Globals.no_globals) (fd : C.fundec) : L.obj =
+let compile ~globals (fd : C.fundec) : L.obj =
   try compile_once ~globals fd with
   | Scratch_exhausted ->
     (* the three-address retry: flatten the body (temporaries become ordinary

@@ -38,16 +38,6 @@ type t =
        the blob file carries only [0, data_size) and the stub zeroes the rest (ABI §7) *)
   }
 
-let no_globals =
-  { offsets = Hashtbl.create 1
-  ; skipped = Hashtbl.create 1
-  ; strings = Hashtbl.create 1
-  ; relocs = []
-  ; image = Bytes.empty
-  ; data_size = 0
-  }
-;;
-
 (* Mem-op offsets are 20-bit signed (ABI §1): DB reaches +512 KB — the whole image
    must sit inside (DOOM's data 62 K + bss 245 K ≈ 307 K does, spike-measured). *)
 let max_db_offset = 0x7FFFF
@@ -118,8 +108,10 @@ and float_const (e : C.exp) : float option =
   | _ -> None
 ;;
 
+(* [e] arrives already constant-folded: serialize_init folds once, for both this and
+   ptr_target. *)
 let word_of_init (e : C.exp) : int =
-  match int_core (C.constFold true e) with
+  match int_core e with
   | Some n -> n
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
