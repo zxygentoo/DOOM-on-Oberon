@@ -25,15 +25,7 @@
 
 module R = Emu.Risc5_isa
 module L = Linker
-
-let ins i = L.Ins i
-let alu ?(u = false) op a b operand = ins (R.Alu { op; u; v = false; a; b; operand })
-let bcc cond l = L.Bcc (cond, false, l)
-let bcc_not cond l = L.Bcc (cond, true, l)
-
-let ret =
-  ins (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg 15 })
-;;
+open Asm
 
 (* R[d] <- H (Mov u, register form, v=0) — the divider's remainder / MUL's high word. *)
 let mov_h d = alu ~u:true R.Mov d 0 (R.Reg 0)
@@ -207,9 +199,6 @@ let umod_obj : L.obj =
       ]
   }
 ;;
-
-let stw a base off = ins (R.Store { size = R.W; a; base; off })
-let ldw a base off = ins (R.Load { size = R.W; a; base; off })
 
 (* __setjmp / __longjmp — the exit escape (ABI §7: exit/I_Error return through
    the thunk, never halt). A jmp_buf on this ABI is exactly the callee-saved

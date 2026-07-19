@@ -13,23 +13,15 @@
    across a call) and R0/R1 carry the entry's args — so R5 takes the address, and is
    reloaded for the restore (the C entry clobbered it). LNK itself is saved as R15 and
    restored before the final B LNK, so the thunk returns to the stub even though its
-   own BL overwrote it. All constants use the fixed 2-word load (MOV-high + IOR, even
-   for a zero high half): the thunk's size must not depend on values that only exist
-   after layout — the same discipline as the linker's Addr frag. *)
+   own BL overwrote it. All constants use the fixed 2-word load (Asm.load_const2,
+   even for a zero high half): the thunk's size must not depend on values that only
+   exist after layout — the same discipline as the linker's Addr frag. *)
 
 module R = Emu.Risc5_isa
 module L = Linker
+open Asm
 
 let save_area_size = 40 (* R6-R15: 10 words *)
-let ins i = L.Ins i
-let alu ?(u = false) op a b operand = ins (R.Alu { op; u; v = false; a; b; operand })
-
-(* the fixed 2-word absolute-constant load (see module comment on why never 1 word) *)
-let load_const2 d n =
-  [ alu ~u:true R.Mov d 0 (R.Imm ((n lsr 16) land 0xFFFF))
-  ; alu R.Ior d d (R.Imm (n land 0xFFFF))
-  ]
-;;
 
 let saves base_reg area_to_ins =
   List.init 10 (fun i -> ins (area_to_ins (6 + i) base_reg (4 * i)))
@@ -47,8 +39,7 @@ let thunk ~name ~entry ~save_area ~stack_top ~data_base : L.obj =
     @ [ L.Call entry ]
     @ load_const2 5 save_area (* the C entry clobbered R5 *)
     @ saves 5 (fun r base off -> R.Load { size = R.W; a = r; base; off })
-    @ [ ins (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg 15 })
-      ]
+    @ [ ret ]
   in
   let o = { L.name; frags } in
   assert (L.code_size o = size);

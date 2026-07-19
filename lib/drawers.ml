@@ -32,25 +32,7 @@
 
 module R = Emu.Risc5_isa
 module L = Linker
-
-let ins i = L.Ins i
-let alu ?(u = false) op a b operand = ins (R.Alu { op; u; v = false; a; b; operand })
-let ldw a base off = ins (R.Load { size = R.W; a; base; off })
-let ldb a base off = ins (R.Load { size = R.B; a; base; off })
-let stw a base off = ins (R.Store { size = R.W; a; base; off })
-let mov d s = alu R.Mov d 0 (R.Reg s)
-let movi d n = alu R.Mov d 0 (R.Imm n)
-
-(* the fixed 2-word constant build (Crt0's discipline: size independent of value) *)
-let load_const2 d n =
-  [ alu ~u:true R.Mov d 0 (R.Imm ((n lsr 16) land 0xFFFF))
-  ; alu R.Ior d d (R.Imm (n land 0xFFFF))
-  ]
-;;
-
-let ret =
-  ins (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg 15 })
-;;
+open Asm
 
 let dither ~lum_off ~bn_off : L.obj =
   let l_row = 0
@@ -159,8 +141,6 @@ let dither ~lum_off ~bn_off : L.obj =
 
 let bl_sym name = L.Call name
 let ldw_db a off = ldw a 13 off
-let bcc c l = L.Bcc (c, false, l)
-let bcc_not c l = L.Bcc (c, true, l)
 
 let span ~off ~str : L.obj =
   let ds_y = off "ds_y"
@@ -557,10 +537,10 @@ let build ~(off : string -> int option) ~(str : string -> int option) : L.obj li
       ~mask_off:(off "__dg_fs_mask")
       ~ready_off:(off "__dg_fs_ready")
   in
-  let frame_copy_b ~off:_ ~str:_ = frame_copy in
   try_build dither_b
   @ try_build dither_fs_b
   @ try_build span
   @ try_build column
-  @ try_build frame_copy_b
+  @ [ frame_copy ]
 ;;
+(* consults no symbols — nothing to fail on *)
