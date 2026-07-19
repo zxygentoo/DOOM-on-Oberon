@@ -28,7 +28,9 @@ type obj =
 
 type image =
   { code : R.instr list (* the flat resolved code, functions in [link] order *)
-  ; symbols : (string * int) list (* function name -> word offset within [code] *)
+  ; symbols : (string * int) list
+    (* function name -> word offset within [code], in layout order (the map dump) *)
+  ; sym_tbl : (string, int) Hashtbl.t (* the same mapping, for O(1) lookups *)
   ; code_base : int (* the byte address the code is linked at (the [link] argument) *)
   }
 
@@ -43,10 +45,23 @@ val is_intrinsic : string -> bool
     intrinsic [Call]s their expansion width). *)
 val code_size : obj -> int
 
+(** The canonical fixed 2-word absolute-constant build — MOV' the high halfword, IOR
+    the low, ALWAYS two words even for a zero high half: everything sized before
+    layout exists (the [Addr] expansion, crt0, the 1a eDSL's [load_const2]) depends
+    on the width never varying with the value. The single definition of the shape. *)
+val load_const_pair : R.reg -> int -> R.instr list
+
+(** Every symbol a function's frags reference ([Call] and [Addr] targets) — the
+    linker's own definition of "references", for undefined-symbol scans. *)
+val referenced_syms : obj -> string list
+
 (** A linked function's absolute byte address — what an [Addr] frag loads, and what a
     code-valued data reloc (a function-pointer initializer, {!Globals.reloc_target})
     patches in. Raises {!Check.Unsupported} on a name no object defines. *)
 val sym_addr : image -> string -> int
+
+(** [sym_addr]'s option-returning variant: [None] if no object defines [name]. *)
+val find_sym_addr : image -> string -> int option
 
 (** [link ~code_base objs] lays the functions out in order starting at byte address
     [code_base] and resolves every branch, call, and address to a concrete value. Raises
