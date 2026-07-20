@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # mkdsk.sh — assemble the bootable DOOM disk image (2c's delivery):
 #   stock PO2013 source (extracted from the pinned Oberon-2020-08-18.dsk)
-#   + oberon-agent's AgentTool/AgentProtocol + its Oberon.Mod boot-autoload patch
-#     (the serial agent channel — drives headless verification, harmless in play)
+#   + the emulator's oat/Mod AgentTool/AgentProtocol + Oberon.Mod boot-autoload
+#     patch (the serial agent channel — drives headless verification via the
+#     same repo's `oat` CLI, harmless in play)
 #   + patch/oberon/DOOM.Mod (compiled in-image by the norebo ORP, fully orthodox)
 #   + doom.blob, doom1.wad.0/.1 packed verbatim (.packonly)
 #   + a DOOM section appended to System.Tool
@@ -19,11 +20,10 @@
 # rebase in software). Raw device, no partitioning; SW0 off (on = serial boot):
 #   sudo dd if=DOOM.dsk of=/dev/sdX bs=512 seek=524290 conv=fsync status=progress
 #
-# Usage: script/mkdsk.sh [output.dsk]   (env: EMU=, OA= to relocate the tool repos)
+# Usage: script/mkdsk.sh [output.dsk]   (env: EMU= to relocate the tool repo)
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 EMU=${EMU:-$REPO/vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml}
-OA=${OA:-$REPO/vendor/oberon-agent}
 BIN=$EMU/_build/default/tools/bin
 OUT=${1:-$REPO/_out/DOOM.dsk}
 
@@ -46,7 +46,7 @@ trap 'rm -rf "$T"' EXIT
 
 # 2. the agent channel: autoload patch + the two modules (LF text -> Oberon CR)
 "$BIN/ob2txt.exe" "$T/src/Oberon.Mod" >/dev/null
-patch --silent "$T/src/Oberon.Mod.txt" <"$OA/Mod/ProjectOberon/Oberon.Mod.patch"
+patch --silent "$T/src/Oberon.Mod.txt" <"$EMU/oat/Mod/ProjectOberon/Oberon.Mod.patch"
 "$BIN/txt2ob.exe" "$T/src/Oberon.Mod.txt" >/dev/null
 rm "$T/src/Oberon.Mod.txt"
 
@@ -57,7 +57,7 @@ rm "$T/src/Oberon.Mod.txt"
 patch --silent "$T/src/Input.Mod.txt" <"$REPO/patch/oberon/Input.Mod.patch"
 "$BIN/txt2ob.exe" "$T/src/Input.Mod.txt" >/dev/null
 rm "$T/src/Input.Mod.txt"
-for f in "$OA/Mod/Common/AgentProtocol.Mod" "$OA/Mod/ProjectOberon/AgentTool.Mod"; do
+for f in "$EMU/oat/Mod/Common/AgentProtocol.Mod" "$EMU/oat/Mod/ProjectOberon/AgentTool.Mod"; do
   cp "$f" "$T/src/$(basename "$f").txt"
   "$BIN/txt2ob.exe" "$T/src/$(basename "$f").txt" >/dev/null
   rm "$T/src/$(basename "$f").txt"

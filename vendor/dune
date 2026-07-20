@@ -1,6 +1,8 @@
 ; Vendored trees are raw data to this workspace: the hardcaml design is its
 ; own (OxCaml) dune project — sim/risc5 and sim/nexys4 compile its sources in
-; the sim root; doomgeneric/oberon-agent are C/Rust/Oberon sources consumed by
-; preprocess.sh and stub/mkdisk.sh. Only vendor/emu composes here.
+; the sim root; doomgeneric is C sources consumed by script/ppx_doomsrc.sh.
+; Only vendor/emu composes here. (The agent channel — oat + the AgentTool
+; Mod sources script/mkdsk.sh compiles in — lives in the nested emulator
+; submodule since its 88f5fe8 absorbed oberon-agent; one pin covers it.)
 
-(data_only_dirs oberon-risc-hardcaml doomgeneric oberon-agent)
+(data_only_dirs oberon-risc-hardcaml doomgeneric)
