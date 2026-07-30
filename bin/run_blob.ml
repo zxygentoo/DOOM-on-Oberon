@@ -324,7 +324,43 @@ let write_profile ~blob ~map_path ~ticks_run out =
              (fp s_store.(i))
              (fp s_br.(i))
              (snd syms.(i))))
-      order);
+      order;
+    (* call census: calls(f) = executions of f's entry word — exact when that
+       word runs once per invocation; a prologue-less leaf opening with a loop
+       puts the loop head ON the entry word, so read it as an upper bound *)
+    let calls = Array.make n 0 in
+    Array.iteri
+      (fun i (addr, _) ->
+         let w = (addr / 4) - base_word in
+         if w >= 0 && w < Array.length counts then calls.(i) <- counts.(w))
+      syms;
+    let t_calls = Array.fold_left ( + ) 0 calls in
+    p "#\n";
+    p
+      "# call census — calls = entry-word executions (upper bound: a loop head landing \
+       on the entry word counts its iterations too)\n";
+    p
+      "# total calls %d (%d/tick); BL + B LNK glue = %d instrs = %.1f%% of all\n"
+      t_calls
+      (t_calls / max 1 ticks_run)
+      (2 * t_calls)
+      (pct (2 * t_calls));
+    p "#  rank     calls   i/call     instrs    %%   name\n";
+    let corder = Array.init n (fun i -> i) in
+    Array.sort (fun a b -> compare calls.(b) calls.(a)) corder;
+    Array.iteri
+      (fun rank i ->
+         if rank < 45 && calls.(i) > 0
+         then
+           p
+             "%6d %9d %8.1f %10d %5.1f  %s\n"
+             (rank + 1)
+             calls.(i)
+             (float_of_int s_instr.(i) /. float_of_int calls.(i))
+             s_instr.(i)
+             (pct s_instr.(i))
+             (snd syms.(i)))
+      corder);
   Printf.eprintf "run_blob: profile -> %s\n%!" out
 ;;
 
