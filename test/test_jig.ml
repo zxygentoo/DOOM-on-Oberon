@@ -997,6 +997,15 @@ let samples =
       (* deep expressions as CALL ARGUMENTS: hoisted temps meet the arg
          marshaller (args must be atoms while R0-R3 are claimed) *)
     )
+  ; ( "struct __attribute__((packed)) ph { char pad[0x7FFFF]; short s; }; int hbig(int \
+       v){ unsigned char b[2]; struct ph *p = (struct ph *)(b - 0x7FFFF); p->s = v; \
+       return p->s + 7 * b[1]; }"
+    , "hbig"
+    , 1
+      (* a halfword at residual exactly 0x7FFFF, the top of the 20-bit mem-op offset:
+         its high byte at off + 1 would wrap to -0x80000, so gen_addr keeps one byte of
+         headroom and folds this residual into the base. p is aimed so p->s IS b *)
+    )
   ; ( "int bpad[20000]; int btab[8]; int biga(int i){ int k; int *p; for (k = 0; k < 8; \
        k++) btab[k] = k * 1000 + 7; p = &btab[i & 7]; return p[0]; }"
     , "biga"
@@ -1066,28 +1075,57 @@ let samples =
 ;;
 
 (* The pre-codegen gate must REFUSE these (ABI §4 bans + not-yet-supported forms),
-   raising Unsupported rather than silently miscompiling. Note `int k(int *p){ return *p; }`
-   COMPILES as of s3.2a but can't run here — the harness passes ints, and a random int is
-   not a valid pointer on either side; deref coverage comes from drf/arrow above. *)
+   raising Unsupported rather than silently miscompiling — each for the reason its
+   third field names (a substring of the message). Rejects only compile, never run, so
+   they may take pointers. Note `int k(int *p){ return *p; }` COMPILES as of s3.2a but
+   can't run as a sample — the harness passes ints, and a random int is not a valid
+   pointer on either side; deref coverage comes from drf/arrow above. *)
 let rejects =
-  [ "float f(float x){ return x; }", "f" (* float — ABI §4 *)
-  ; "long long g(long long x){ return x + 1; }", "g" (* 64-bit — ABI §4 *)
+  [ "float f(float x){ return x; }", "f", "float" (* ABI §4 *)
+  ; "long long g(long long x){ return x + 1; }", "g", "64-bit" (* ABI §4 *)
   ; ( "struct pt { int x; int y; }; extern struct pt mk(int); int usemk(int x){ struct \
        pt p = mk(x); return p.x; }"
-    , "usemk" (* aggregate return by value — none in DOOM (census); deferred *) )
+    , "usemk"
+    , "aggregate return" (* by value — none in DOOM (census); deferred *) )
   ; ( "extern int ext; int rex(int x){ return ext + x; }"
-    , "rex" (* declared, never defined — 3b linker *) )
+    , "rex"
+    , "extern global without a definition" (* declared, never defined *) )
   ; ( "struct t3 { unsigned int v:3; }; int rj3(int x){ struct t3 s; s.v = x; return \
        s.v; }"
-    , "rj3" (* a real bitfield (:3) — only the byte-aligned :8 degenerate lowers *) )
+    , "rj3"
+    , "bitfield" (* a real bitfield (:3) — only the byte-aligned :8 degenerate lowers *) )
   ; ( "struct t48 { unsigned int a:4; unsigned int b:8; }; int rj48(int x){ struct t48 \
        s; s.b = x; return s.b; }"
-    , "rj48" (* an :8 pushed off-byte (bit offset 4) — width alone isn't enough *) )
+    , "rj48"
+    , "bitfield" (* an :8 pushed off-byte (bit offset 4) — width alone isn't enough *) )
   ; ( "struct t5 { unsigned int v:5; }; int rjp(int x){ return ((struct t5 *)&x)->v; }"
     , "rjp"
+    , "bitfield"
       (* a banned bitfield reached through a CAST pointer: no declaration gate ever
          sees struct t5, so this exercises gen_addr/classify_access's own guard *)
     )
+  ; ( "int rfr(int i){ char big[70000]; big[i & 0xFFFF] = 1; return big[0]; }"
+    , "rfr"
+    , "stack frame" (* a frame past the 16-bit SUB SP immediate *) )
+  ; ( "struct __attribute__((packed)) pk { unsigned char c; int x; }; int rpk(struct pk \
+       *p){ return p->x; }"
+    , "rpk"
+    , "misaligned word access" (* a packed int at +1: LDW would read the word around it *)
+    )
+  ; ( "struct __attribute__((packed)) pa { int x; char c; }; struct pa ga[2]; int \
+       rpa(int i){ ga[1].x = i; return 0; }"
+    , "rpa"
+    , "misaligned word access"
+      (* x is at offset 0 of its struct, but 5-byte elements put ga[1].x at +5: the
+         gate reads the whole residual, not the field offset *)
+    )
+  ; ( "int rbo(int x){ _Bool b = x; return b; }"
+    , "rbo"
+    , "_Bool" (* (_Bool)256 is 1, not 256 & 0xFF *) )
+  ; ( "struct big { char a[600000]; }; int rsc(struct big *d, struct big *s){ *d = *s; \
+       return 0; }"
+    , "rsc"
+    , "struct copy" (* byte offsets past the 20-bit mem-op field *) )
   ]
 ;;
 
@@ -1651,12 +1689,23 @@ let check_sample ?(libc = false) ?(port = false) ?(gcc_extra = "") (src, fname, 
   List.length tuples, !sfails
 ;;
 
-(* one reject: the gate must raise Unsupported rather than miscompile; returns 1 if it leaked *)
-let check_reject (src, fname) : int =
+let contains ~sub s =
+  let n = String.length sub in
+  let rec at i = i + n <= String.length s && (String.sub s i n = sub || at (i + 1)) in
+  at 0
+;;
+
+(* one reject: the gate must raise Unsupported rather than miscompile — and for the
+   reason [want] names (any refusal would otherwise do: a sample whose gate regressed
+   could still be refused downstream for something else); returns 1 on a failure *)
+let check_reject (src, fname, want) : int =
   match dcc_compile ~src ~fname () with
-  | exception Check.Unsupported msg ->
+  | exception Check.Unsupported msg when contains ~sub:want msg ->
     Printf.printf "  reject %-6s ✓ (%s)\n" fname msg;
     0
+  | exception Check.Unsupported msg ->
+    Printf.printf "  reject %-6s ✗ — refused for the WRONG reason: %s\n" fname msg;
+    1
   | _ ->
     Printf.printf "  reject %-6s ✗ — GATE LEAK: compiled a banned construct\n" fname;
     1

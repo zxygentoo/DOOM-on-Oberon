@@ -233,6 +233,22 @@ let classify_access (lv : C.lval) : access =
   | None -> classify_scalar lv
 ;;
 
+(* A Word access's constant residual must be a multiple of 4. Every base gen_addr hands
+   out is word-aligned (DB, SP, a pointer to its pointee's alignment), and LDW/STW drop
+   the address's low two bits — so an unaligned residual (a packed struct's int at +1, or
+   [a[1].x] over 5-byte packed elements) would silently read or write the aligned word
+   around it. Halfwords compose from bytes and are immune. What this can't see: a word
+   field of a packed struct reached through a pointer the program misaligned at run time
+   — DOOM's packed WAD structs live in aligned zone buffers. *)
+let check_word_offset off =
+  if off land 3 <> 0
+  then
+    unsupported
+      "misaligned word access at offset %d (LDW/STW drop the low address bits — a packed \
+       struct?)"
+      off
+;;
+
 (* ---- instruction builders ---- *)
 let alu ?(u = false) ?(v = false) op a b operand : R.instr =
   R.Alu { op; u; v; a; b; operand }
@@ -639,6 +655,10 @@ and gen_unop ctx op e' =
    here: STB truncates for free, and gen_store composes the halfword itself.) *)
 and gen_narrow ctx (t : C.typ) (e' : C.exp) : reg =
   match C.unrollType t with
+  | C.TInt (C.IBool, _) ->
+    (* _Bool is 8 bits wide, but converting to it is (x != 0), not a byte mask:
+       (_Bool)256 is 1. CIL folds constant conversions itself; DOOM has no _Bool *)
+    unsupported "conversion to _Bool (nonzero becomes 1, not a byte mask) — none in DOOM"
   | C.TInt (ik, _) when C.bitsSizeOf t = 8 || C.bitsSizeOf t = 16 ->
     narrow_to ctx (gen_expr ctx e') ~bits:(C.bitsSizeOf t) ~signed:(C.isSigned ik)
   | _ -> unsupported "narrowing cast to a non-integer sub-word type — later slice"
@@ -801,7 +821,10 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
       gen_expr ctx e, 0, pointee
   in
   let base, residual = fold base residual host_t off in
-  if residual >= -0x80000 && residual <= 0x7FFFF
+  (* the mem-op offset is 20-bit signed, [-0x80000, 0x7FFFF] — less one byte at the top:
+     a halfword access also emits off + 1 (its high byte), which at 0x7FFFF would
+     wrap to -0x80000 *)
+  if residual >= -0x80000 && residual <= 0x7FFFE
   then base, residual
   else (
     (* a residual past the 20-bit mem-op range (giant constant index) folds into the
@@ -847,6 +870,7 @@ and gen_load ctx (lv : C.lval) : reg =
   let base, off = gen_addr ctx lv in
   match acc with
   | Word ->
+    check_word_offset off;
     free_scratch ctx base;
     (* dest may reuse base: LDW Ra,Ra,off reads before writing *)
     let r = alloc_scratch ctx in
@@ -880,7 +904,9 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
   let acc = classify_access lv in
   let base, off = gen_addr ctx lv in
   (match acc with
-   | Word -> emit ctx (R.Store { size = R.W; a = r; base; off })
+   | Word ->
+     check_word_offset off;
+     emit ctx (R.Store { size = R.W; a = r; base; off })
    | Byte _ -> emit ctx (R.Store { size = R.B; a = r; base; off })
    | Half _ ->
      emit ctx (R.Store { size = R.B; a = r; base; off });
@@ -972,6 +998,8 @@ let gen_va_builtin ctx name (args : C.exp list) =
    later optimization. Both ends go through materialize_addr, so [a=b], [*dp=*sp] and [arr[i]=s]
    all reduce to two base addresses + a byte shuttle — and every offset stays in [0, size). *)
 let gen_struct_copy ctx (dst : C.lval) (src : C.lval) (size : int) : unit =
+  if size > 0x80000
+  then unsupported "struct copy of %d B (past the 20-bit mem-op offset)" size;
   let sptr = materialize_addr ctx src in
   let dptr = materialize_addr ctx dst in
   let tmp = alloc_scratch ctx in
@@ -1594,6 +1622,11 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   let fp_off = saves_end in
   let lnk_off = saves_end + if needs_fp then 4 else 0 in
   let frame = lnk_off + if leaf then 0 else 4 in
+  (* SUB SP / ADD SP / FP = SP + frame carry the frame as an ALU immediate — a raw
+     16-bit field (risc5_isa masks the rest silently): a bigger frame would open short
+     of its own saves and locals and write into the caller's *)
+  if frame > 0xFFFF
+  then unsupported "stack frame of %d B (SUB SP takes a 16-bit immediate)" frame;
   (* epilogue at func_end: restore saves (+ LNK for a non-leaf), drop the frame, B LNK *)
   place ctx ctx.func_end;
   List.iteri
