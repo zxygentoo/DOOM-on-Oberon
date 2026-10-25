@@ -18,6 +18,11 @@ let ensure_init () =
   if not !initialized
   then (
     envMachine := Some risc5_mach;
+    (* a Call's destination has exactly the callee's return type — CIL routes any
+       conversion through a temporary (x = f() becomes tmp = f(); x = (T)tmp). Fundec's
+       call-result move (MOV home, R0) relies on it: it never narrows. goblint-cil's
+       default, pinned so a library change can't quietly flip it *)
+    Cabs2cil.doCollapseCallCast := false;
     initCIL ();
     initialized := true)
 ;;

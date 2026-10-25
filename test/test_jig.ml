@@ -771,6 +771,13 @@ let samples =
   ; ( "char cgc; int idc2(int x){ return x; } int cch(int i){ cgc = idc2(i); return cgc; }"
     , "cch"
     , 1 (* sub-word destination: STB truncates, LDB re-widens — mod-256 both sides *) )
+  ; ( "int gw(int x){ return x * 1000 + 7; } int cnr(int x){ short s = gw(x); return s; }"
+    , "cnr"
+    , 1
+      (* a call result narrowed into a REGISTER home: correct only because CIL routes
+         the conversion through a temporary (tmp = gw(x); s = (short)tmp) — the
+         doCollapseCallCast = false pin in Frontend; flipped, s keeps the whole int *)
+    )
     (* unions: members all at byte offset 0, size/align = max over members; a static
        initializer names exactly one member and the rest stays zero. DOOM's unions are
        actionf_t (function-pointer variants) and intercept_t's thing/line — same-width
@@ -1126,6 +1133,20 @@ let rejects =
        return 0; }"
     , "rsc"
     , "struct copy" (* byte offsets past the 20-bit mem-op field *) )
+    (* only DOUBLE constants fold (Globals.float_const): a float or long double one
+       folded at double precision gives the wrong integer, so it must reach the ban *)
+  ; ( "int rff(int x){ return (int)16777217.0f + x; }"
+    , "rff"
+    , "float" (* the float constant IS 16777216.0f: 24-bit significand *) )
+  ; ( "int rfc(int x){ return (int)(float)16777217.0 + x; }"
+    , "rfc"
+    , "float" (* the (float) cast rounds the same way *) )
+  ; ( "int rld(int x){ return (int)(9007199254740993.0L - 9007199254740992.0L) + x; }"
+    , "rld"
+    , "float" (* 1 in long double; 2^53 + 1 isn't a double, so 0 at double precision *) )
+  ; ( "int rgv = (int)16777217.0f; int rgi(int x){ return rgv + x; }"
+    , "rgi"
+    , "float" (* the same fold in a global initializer *) )
   ]
 ;;
 

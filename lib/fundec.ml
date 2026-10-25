@@ -480,6 +480,11 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r (Char.code ch);
     r
+  | C.Const (C.CReal _) ->
+    (* a floating constant only reaches codegen as a runtime value: under an int cast,
+       a double one has already folded (the CastE case) — and a float or long double
+       one deliberately doesn't (Globals.float_const) *)
+    unsupported "float (ABI §4: banned in blob v1)"
   | C.Const (C.CStr (s, _)) ->
     (* a string literal is a char* to anonymous static bytes interned in the data image
        (Globals); materialize its address DB + offset, exactly as &global does (add_const frees

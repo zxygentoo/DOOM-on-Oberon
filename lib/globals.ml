@@ -83,14 +83,20 @@ let rec int_core (e : C.exp) : int option =
      | _ -> None)
 
 (* the double-expression evaluator behind the fixed-point fold; mirrors what gcc's own
-   compile-time folding computes, so the jig's oracle agrees bit-for-bit *)
+   compile-time folding computes, so the jig's oracle agrees bit-for-bit. DOUBLE only:
+   an OCaml float is a double, so a float (1.0f, (float)x — 24-bit significand) or long
+   double (1.0L) constant would fold at the wrong precision ((int)16777217.0f is
+   16777216). Those answer None — not a compile-time constant — and reach the ABI §4
+   float ban instead. CIL's constFold leaves float-to-int casts alone, so this is the
+   only folder. Operands gate the BinOp/Neg cases: a double result needs double
+   operands here. *)
 and float_const (e : C.exp) : float option =
   match e with
-  | C.Const (C.CReal (f, _, _)) -> Some f
+  | C.Const (C.CReal (f, C.FDouble, _)) -> Some f
   | C.UnOp (C.Neg, e', _) -> Option.map Float.neg (float_const e')
   | C.CastE (_, t, e')
     when match C.unrollType t with
-         | C.TFloat _ -> true
+         | C.TFloat (C.FDouble, _) -> true
          | _ -> false ->
     (match float_const e' with
      | Some _ as f -> f
@@ -111,8 +117,20 @@ and float_const (e : C.exp) : float option =
 (* [e] arrives already constant-folded: serialize_init folds once, for both this and
    ptr_target. *)
 let word_of_init (e : C.exp) : int =
+  (* a float-typed value anywhere in [e]: the non-double constants float_const won't fold *)
+  let rec mentions_float (e : C.exp) =
+    (match C.unrollType (C.typeOf e) with
+     | C.TFloat _ -> true
+     | _ -> false)
+    ||
+    match e with
+    | C.CastE (_, _, e') | C.UnOp (_, e', _) -> mentions_float e'
+    | C.BinOp (_, a, b, _) -> mentions_float a || mentions_float b
+    | _ -> false
+  in
   match int_core e with
   | Some n -> n
+  | None when mentions_float e -> Check.unsupported "float (ABI §4: banned in blob v1)"
   | None -> Check.unsupported "global initializer needs a link-time address — 3b linker"
 ;;
 
