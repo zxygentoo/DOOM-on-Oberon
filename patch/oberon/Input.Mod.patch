@@ -4,7 +4,7 @@
    IMPORT SYSTEM;
  
    CONST msAdr = -40; kbdAdr = -36;
-+  TYPE Sink* = PROCEDURE (b: BYTE);  (*raw scancode tap (DOOM.Window): while set,
++  TYPE Sink* = PROCEDURE (b: BYTE);  (*raw scancode tap (DOOM.Run -win): while set,
 +    Peek hands the untranslated make/break stream to the sink and the translated
 +    path (Available/Read) goes silent; NIL = stock behaviour*)
    VAR kbdCode: BYTE; (*last keyboard code read*)
