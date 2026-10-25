@@ -1,6 +1,6 @@
 /* doom_oberon.c — the doomgeneric platform layer for the Oberon RISC5 machine,
  * in upstream's doomgeneric_<platform>.c slot: the six DG_ hooks, the key ring, the
- * DG_DrawFrame wrapper over dither.c's kernels and the Halftone path, the three
+ * DG_DrawFrame wrapper over dither.c's kernel and the Halftone path, the three
  * ABI §7 blob entries (Init/Tick/KeyIn), and a setjmp-shaped exit().
  *
  * Plain C, preprocessor-free like mini.c: no includes, types spelled as the
@@ -80,7 +80,7 @@ void DG_KeyEnqueue(int pressed, unsigned char key)
 /* Video. doomgeneric renders 320x200 palette indices into DG_ScreenBuffer (RESX/RESY
  * are pinned to 320x200 at preprocess time, so fb_scaling = 1, and patch 0003 makes
  * it I_VideoBuffer itself, so I_FinishUpdate copies nothing) and calls DG_DrawFrame.
- * The kernels live in dither.c; this wrapper owns the DOOM-side globals and the
+ * The kernel lives in dither.c; this wrapper owns the DOOM-side globals and the
  * machine geometry:
  *   - colors[256] (BGRA bytes in memory — the byte-aligned :8 layout) is refilled
  *     by I_SetPalette on every palette switch, gamma applied; palette_changed

@@ -3,20 +3,17 @@
     spec — the jig diffs each drawer against gcc compiling that C, and the golden
     frames demand pixel identity with the host build. *)
 
-(** [dither ~lum_off ~bn_off] — [__dg_dither]. [lum_off]/[bn_off] are the DB-relative
-    offsets of [__dg_lum] and [__dg_bn64] ({!Globals.offset_of_name}): hand code reaches
-    C data through DB, as compiled code does. Clobbers R0-R5 and R12 (FP) beyond the
-    standard caller-saved set; saves R6-R11 + LNK. *)
-val dither : lum_off:int -> bn_off:int -> Linker.obj
-
 (** [R_DrawSpan], including its RANGECHECK I_Error path. *)
 val span : off:(string -> int) -> str:(string -> int) -> Linker.obj
 
 (** [R_DrawColumn], including its RANGECHECK I_Error path. *)
 val column : off:(string -> int) -> str:(string -> int) -> Linker.obj
 
-(** [__dg_dither_fs] — the fullscreen kernel. Calls the C initializer [__dg_fs_build]
-    once, via the ready flag. Clobbers R12 (FP) like {!dither}. *)
+(** [__dg_dither_fs] — the fullscreen kernel. The offsets are the DB-relative addresses
+    of its C data ({!Globals.offset_of_name}): hand code reaches C data through DB, as
+    compiled code does. Calls the C initializer [__dg_fs_build] once, via the ready
+    flag. Clobbers R0-R5 and R12 (FP) beyond the standard caller-saved set; saves
+    R6-R11 + LNK. *)
 val dither_fs : lum_off:int -> cut_off:int -> mask_off:int -> ready_off:int -> Linker.obj
 
 (** [__dg_frame_copy] — the hardware-scanout path's per-frame copy: 16000 words, both

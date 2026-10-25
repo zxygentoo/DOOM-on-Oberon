@@ -1,6 +1,6 @@
-/* dither.c — the 1-bit ordered-dither kernels, and the Halftone uploads.
+/* dither.c — the 1-bit ordered-dither kernel, and the Halftone uploads.
  *
- * Pure memory -> memory: no MMIO in the kernels, no DOOM externs, no includes, so
+ * Pure memory -> memory: no MMIO in the kernel, no DOOM externs, no includes, so
  * the whole file is also oracle-side source — the jig diffs this exact code against
  * host gcc, and bin/doom_golden.c links it into the host golden frames.
  *
@@ -295,39 +295,6 @@ void __dg_build_lut(const unsigned char *pal)
     }
 }
 
-/* Dither-blit [w x h] palette indices ([w] a multiple of 16) as a 2x2-doubled
- * 1-bit image, one decision per source pixel. DG_DrawFrame no longer calls it
- * (the fullscreen kernel below replaced it); the jig and lib/drawers.ml still
- * cover it. [dst] is the word holding the rect's top-left in SCREEN
- * coordinates; [stride] is words per screen line DOWNWARD; bit 0 of a word is
- * its LEFTMOST pixel (the Oberon convention). Oberon's framebuffer is
- * BOTTOM-UP, so the machine caller passes stride -32 (1024 px = 32-word
- * lines, upward in memory); the jig passes small positive strides into plain
- * arrays — the vertical flip is a parameter, not a special case. */
-void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int stride)
-{
-    int x, y, k;
-    for (y = 0; y < h; y++) {
-        const unsigned char *row = __dg_bn64 + 64 * (y & 63);
-        unsigned int *out = dst;
-        for (x = 0; x < w; x += 16) {
-            /* x is a multiple of 16, so a 16-px chunk never crosses the map's
-               64-column period: one pointer serves the chunk, no per-pixel mask */
-            const unsigned char *thr = row + (x & 63);
-            unsigned int bits = 0;
-            for (k = 0; k < 16; k++) {
-                if (__dg_lum[src[x + k]] > thr[k])
-                    bits |= 3u << (2 * k);
-            }
-            out[0] = bits;
-            out[stride] = bits;
-            out = out + 1;
-        }
-        src += w;
-        dst += 2 * stride;
-    }
-}
-
 /* The fullscreen kernel: 320x200 -> the whole 1024x768 panel.
  *
  * Scale 3.2 x 3.84 — and 3.84/3.2 = 1.2, exactly VGA mode 13h's pixel aspect:
@@ -351,9 +318,10 @@ void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int 
  * exceeds (4 branchless compares) + one mask fetch: 128,000 rank lookups per
  * frame (2 rows x 320 px x 200 lines) instead of 786,432 pixel compares.
  *
- * Same contract as the 2x2 kernel: [dst] = the screen top-left word, [stride]
- * = words per screen line DOWNWARD (the machine passes -32; the jig, small
- * positives into plain arrays). */
+ * [dst] is the word holding the screen's top-left pixel; [stride] is words per
+ * screen line downward; bit 0 of a word is its leftmost pixel (the Oberon
+ * convention). Oberon's framebuffer is bottom-up, so the machine passes -32: the
+ * vertical flip is a parameter, not a special case. */
 
 /* slot j of a word covers XW[j] output bits starting at bit XOFF[j] */
 static const int __dg_xw[10] = { 3, 3, 3, 3, 4, 3, 3, 3, 3, 4 };

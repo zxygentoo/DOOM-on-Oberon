@@ -1252,17 +1252,15 @@ let port_prelude =
    extern void DG_KeyEnqueue(int pressed, unsigned char key); extern int DG_GetKey(int \
    *pressed, unsigned char *key); extern unsigned int DG_GetTicksMs(); extern void \
    DG_SleepMs(unsigned int ms); extern void DG_DrawFrame(void); extern void \
-   __dg_build_lut(const unsigned char *pal); extern void __dg_dither(const unsigned char \
-   *src, int w, int h, unsigned int *dst, int stride); extern void __dg_dither_fs(const \
-   unsigned char *src, unsigned int *dst, int stride); extern int Init(int wad_addr, int \
+   __dg_build_lut(const unsigned char *pal); extern void __dg_dither_fs(const unsigned \
+   char *src, unsigned int *dst, int stride); extern int Init(int wad_addr, int \
    cfg_addr); extern int Tick(void); extern void KeyIn(int ev); extern void exit(int \
    status); extern int __setjmp(unsigned int *env); extern void __longjmp(unsigned int \
    *env, int val); extern unsigned int __exit_env[9]; "
 ;;
 
-(* port self-checks: the key ring, the ms-counter spin (the assertion in slp is
-   termination — a frozen clock would spin into the step cap), and the dither kernel's
-   semantics, which the differential can't catch when both sides run the same wrong C *)
+(* port self-checks: the key ring, the frame copy and the ms-counter spin (the
+   assertion in slp is termination — a frozen clock would spin into the step cap) *)
 let port_selfchecks =
   List.map (fun (src, name, cases) -> port_prelude ^ src, name, cases)
   @@ [ ( "int kr1(int i){ int p; unsigned char k; int acc; int n; acc = 0; n = 0; if \
@@ -1308,26 +1306,6 @@ let port_selfchecks =
          (* the spin waits at least [ms] on the Runner's synthetic clock — and
             terminates, which is the assertion a frozen clock would fail *)
        , [ 0, 1; 2, 1 ] )
-     ; ( "unsigned char pal[1024]; unsigned char fr[32]; unsigned int ob[4]; unsigned \
-          int oc[4]; int kd1(int i){ int k; int r; for (k = 0; k < 1024; k++) pal[k] = \
-          0; pal[4] = 255; pal[5] = 255; pal[6] = 255; __dg_build_lut(pal); for (k = 0; \
-          k < 8; k++) fr[k] = 0; for (k = 8; k < 16; k++) fr[k] = 1; for (k = 16; k < \
-          32; k++) fr[k] = (k & 1) ? 0 : 1; __dg_dither(fr, 16, 2, ob, 1); r = (ob[0] == \
-          0xFFFF0000u) + (ob[1] == 0xFFFF0000u) * 2 + (ob[2] == 0x33333333u) * 4 + \
-          (ob[3] == 0x33333333u) * 8; __dg_dither(fr, 16, 2, oc + 3, -1); r += (oc[3] == \
-          0xFFFF0000u) * 16 + (oc[2] == 0xFFFF0000u) * 32 + (oc[1] == 0x33333333u) * 64 \
-          + (oc[0] == 0x33333333u) * 128; return r + (i - i); }"
-       , "kd1"
-         (* the dither semantics, hand-computed from the ENDPOINTS ONLY (lum 0
-            never fires, 255 always does — the 1..254 threshold-range contract),
-            so the vectors hold for any map, Bayer or blue noise. Row 0 = 8 black
-            + 8 white source px -> doubled word 0xFFFF0000 (LSB = LEFTMOST: the
-            low 16 bits are the black half). Row 1 = alternating white/black px
-            -> bit pairs 11 00 11 00 ... = 0x33333333 (pins per-pixel doubling).
-            Each word stored to BOTH output lines (2x2 doubling). Second pass:
-            same frame, dst = oc+3, stride = -1 — the bottom-up flip as the
-            machine uses it, same words mirror-ordered. *)
-       , [ 0, 255; 4, 255 ] )
      ; ( "unsigned int env1[9]; int jhelp(int n){ if (n == 0) __longjmp(env1, 42); \
           return jhelp(n - 1) + 1; } int sj1(int i){ int r; int acc; acc = 0; r = \
           __setjmp(env1); acc = acc + 1; if (r == 0) { jhelp(3); return -1; } return r * \
@@ -1456,31 +1434,24 @@ let port_selfchecks_big =
   ]
 ;;
 
-(* the dither differential: the shipped dither.c compiles on both sides, so any divergence
-   is a miscompile of the real kernel. Small frames only; checksums cross the diff, never
-   pointers. *)
+(* the dither differential: gcc compiles the shipped dither.c, our side runs the hand
+   drawer in its place, so a divergence is a drawer (or codegen) bug. Checksums cross the
+   diff, never pointers. *)
 let dither_src = In_channel.with_open_text (libc_path "dither.c") In_channel.input_all
 
 let port_diff_samples =
   List.map (fun (src, name, arity) -> port_prelude ^ src, name, arity)
-  @@ [ ( "unsigned char dpal[1024]; unsigned char dfr[64]; unsigned int dob[8]; int \
-          dd1(int a){ int i; unsigned int s; for (i = 0; i < 256; i++) { dpal[4 * i] = \
-          i; dpal[4 * i + 1] = (i * 3) & 255; dpal[4 * i + 2] = (i * 7) & 255; dpal[4 * \
-          i + 3] = 0; } __dg_build_lut(dpal); for (i = 0; i < 64; i++) dfr[i] = (i * 17 \
-          + (a & 0xFFFF)) & 255; __dg_dither(dfr, 16, 4, dob, 1); s = 0; for (i = 0; i < \
-          8; i++) s = s * 31 + dob[i]; return s; }"
-       , "dd1"
-       , 1 (* LUT + dither over an arg-seeded 16x4 frame *) )
-     ; ( "unsigned char epal[1024]; unsigned char efr[128]; unsigned int eob[16]; int \
-          dd2(int a){ int i; unsigned int s; for (i = 0; i < 256; i++) { epal[4 * i] = \
-          (i * 5) & 255; epal[4 * i + 1] = (255 - i) & 255; epal[4 * i + 2] = (i ^ 99) & \
-          255; epal[4 * i + 3] = 0; } __dg_build_lut(epal); for (i = 0; i < 128; i++) \
-          efr[i] = (i * 13 + (a & 4095)) & 255; __dg_dither(efr, 32, 4, eob + 14, -2); s \
-          = 0; for (i = 0; i < 16; i++) s = s * 31 + eob[i]; return s; }"
-       , "dd2"
+  @@ [ ( "unsigned char gpal[1024]; unsigned char gsrc[64000]; unsigned int gfb[24576]; \
+          int dfs(int a){ int i; unsigned int s; for (i = 0; i < 256; i++) { gpal[4 * i] \
+          = i; gpal[4 * i + 1] = (i * 3) & 255; gpal[4 * i + 2] = (i * 7) & 255; gpal[4 \
+          * i + 3] = 0; } __dg_build_lut(gpal); for (i = 0; i < 64000; i++) gsrc[i] = (i \
+          * 17 + (a & 0xFFFF)) & 255; __dg_dither_fs(gsrc, gfb + 767 * 32, -32); s = 0; \
+          for (i = 0; i < 24576; i++) s = s * 31 + gfb[i]; return s; }"
+       , "dfs"
        , 1
-         (* multi-word rows + NEGATIVE stride (the machine's bottom-up shape)
-              into a 2-word-wide, 8-line buffer filled from the top end *)
+         (* the hand __dg_dither_fs, and __dg_build_lut, against gcc compiling them:
+            an arg-seeded frame through every rank of every slot, the whole panel
+            hashed in order *)
        )
      ]
 ;;
@@ -1497,7 +1468,12 @@ let nrand = 40
 
 (* one sample: compile with both backends, diff R0 over edge + random arg-tuples;
    returns (run cases, mismatches) for the caller to total up *)
-let check_sample ?(libc = false) ?(port = false) ?(gcc_extra = "") (src, fname, arity)
+let check_sample
+      ?(libc = false)
+      ?(port = false)
+      ?(gcc_extra = "")
+      ?steps
+      (src, fname, arity)
   : int * int
   =
   let body, data = dcc_compile ~libc ~port ~src ~fname () in
@@ -1509,7 +1485,7 @@ let check_sample ?(libc = false) ?(port = false) ?(gcc_extra = "") (src, fname, 
   let sfails = ref 0 in
   List.iter
     (fun args ->
-       let ours = u32 (Runner.run ~data body args) in
+       let ours = u32 (Runner.run ~data ?steps body args) in
        let refv = gcc_run exe args in
        if ours <> refv
        then (
@@ -1595,7 +1571,14 @@ let () =
   let dither_fold acc =
     List.fold_left
       (fun (cases, fails) sample ->
-         let c, f = check_sample ~libc:true ~port:true ~gcc_extra:dither_src sample in
+         let c, f =
+           check_sample
+             ~libc:true
+             ~port:true
+             ~gcc_extra:dither_src
+             ~steps:10_000_000
+             sample
+         in
          cases + c, fails + f)
       acc
       port_diff_samples
