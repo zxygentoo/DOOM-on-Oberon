@@ -103,13 +103,17 @@ let sym_addr (img : image) name =
 
 let link ~(code_base : int) (objs : obj list) : image =
   (* pass 1: base offset per function — the assoc list keeps layout order (the map
-     dump), the table serves the per-frag lookups in O(1) (first binding wins, like
-     List.assoc, should a name ever repeat) *)
+     dump), the table serves the per-frag lookups in O(1). One name, one function: a
+     second obj under a taken name would resolve at the first one's base, its own
+     BLs landing wrong — refuse it (a repeat is a bug upstream: Mergecil renames
+     static collisions, the drawer swap replaces what it shadows) *)
   let sym_tbl = Hashtbl.create 1024 in
   let _, rev_syms =
     List.fold_left
       (fun (off, syms) o ->
-         if not (Hashtbl.mem sym_tbl o.name) then Hashtbl.add sym_tbl o.name off;
+         if Hashtbl.mem sym_tbl o.name
+         then invalid_arg ("Linker.link: duplicate symbol " ^ o.name);
+         Hashtbl.add sym_tbl o.name off;
          off + code_size o, (o.name, off) :: syms)
       (0, [])
       objs

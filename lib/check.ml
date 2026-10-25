@@ -9,6 +9,11 @@ exception Unsupported of string
 
 let unsupported fmt = Printf.ksprintf (fun s -> raise (Unsupported s)) fmt
 
+(* the other channel: a broken backend invariant (a doomcc bug) — never a refusal *)
+exception Internal of string
+
+let internal fmt = Printf.ksprintf (fun s -> raise (Internal s)) fmt
+
 (* A byte-aligned :8 bitfield is degenerate — GCC's little-endian ABI allocates
    bitfields LSB-first within the storage unit, so an 8-bit field at bit offset 8k
    IS byte k of the struct: one addressable byte, served by LDB/STB (the s3.3

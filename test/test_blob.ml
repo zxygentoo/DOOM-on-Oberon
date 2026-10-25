@@ -150,3 +150,13 @@ let () =
     !fails;
   if !fails > 0 then exit 1
 ;;
+
+(* one name, one function: a second obj under a taken name used to resolve at the
+   first one's base (its own BLs landing wrong) — the link now refuses it *)
+let () =
+  let ret = Isa.Branch { cond = True; neg = false; link = false; target = To_reg 15 } in
+  let f = { Linker.name = "f"; frags = [ Linker.Ins ret ] } in
+  match Linker.link ~code_base:base [ f; f ] with
+  | exception Invalid_argument msg -> Printf.printf "link: duplicate refused (%s)\n" msg
+  | _ -> failwith "test_blob: Linker.link accepted a duplicate symbol"
+;;

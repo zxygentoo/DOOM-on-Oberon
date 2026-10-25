@@ -41,6 +41,7 @@ module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
 module L = Linker (* the unresolved frag stream + instr-level linker (ABI §6) *)
 
 let unsupported = Check.unsupported
+let internal = Check.internal
 
 let is_unsigned_int (t : C.typ) =
   match C.unrollType t with
@@ -163,7 +164,7 @@ let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 let home ctx (v : C.varinfo) =
   match Hashtbl.find_opt ctx.homes v.vid with
   | Some r -> r
-  | None -> unsupported "unmapped local %s — internal error" v.vname
+  | None -> internal "unmapped local %s" v.vname
 ;;
 
 (* The single definition of "this variable lives in a register": a local (not a
@@ -381,11 +382,11 @@ let binop_instr op rd b c : R.instr =
   | C.Div | C.Mod ->
     (* / and % never reach the two-register builder: gen_expr intercepts them into
        Runtime helper calls (ABI §5) *)
-    unsupported "division — internal error (should be intercepted upstream)"
+    internal "division reached the two-register builder (gen_expr intercepts it)"
   | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne ->
     (* a comparison never reaches the two-register builder: as a value gen_expr intercepts it
        (bool_from_flags, s5.1), as a condition gen_cond does *)
-    unsupported "comparison — internal error (should be intercepted upstream)"
+    internal "comparison reached the two-register builder (gen_expr intercepts it)"
   | C.LAnd | C.LOr ->
     (* CIL lowers && / || in both value and condition contexts to control flow (a temp + if),
        so these two rarely survive as a BinOp; if one does, it's a later slice *)
@@ -393,7 +394,8 @@ let binop_instr op rd b c : R.instr =
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
     (* pointer arithmetic needs the pointee size to scale — gen_expr intercepts it
        (gen_ptr_arith) before this two-register builder is ever reached *)
-    unsupported "pointer arithmetic — internal error (should be intercepted upstream)"
+    internal
+      "pointer arithmetic reached the two-register builder (gen_expr intercepts it)"
 ;;
 
 (* Narrow a value to a [bits]-wide sub-word (the one primitive behind cast narrowing,
@@ -717,7 +719,7 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
             let c = alloc_scratch ctx in
             load_const ctx c size;
             c))
-  | _ -> unsupported "gen_ptr_arith: non-pointer op — internal error"
+  | _ -> internal "gen_ptr_arith: non-pointer op"
 
 (* Call a 2-arg Runtime helper (ABI §5) from *inside* an expression. CIL's guarantee that
    expressions contain no calls covers only source calls — this BL is backend-generated, so
@@ -730,8 +732,7 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
    save every still-busy scratch, load R0/R1, BL, park the result in a fresh register
    (alloc excludes the saved set by construction), restore. *)
 and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg =
-  if ctx.div_base < 0
-  then unsupported "helper call without a div area — pre-scan mismatch (internal error)";
+  if ctx.div_base < 0 then internal "helper call without a div area (pre-scan mismatch)";
   let ra = gen_a () in
   let rb = gen_b () in
   emit ctx (R.Store { size = R.W; a = ra; base = sp_reg; off = ctx.div_base });
@@ -815,8 +816,7 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
          DB-relative base, so the fold below layers fields/indexes on top identically *)
       (match Hashtbl.find_opt ctx.slots v.vid with
        | Some off -> sp_reg, ctx.slots_base + off, v.vtype
-       | None ->
-         unsupported "local %s used as memory but has no slot — internal error" v.vname)
+       | None -> internal "local %s used as memory but has no slot" v.vname)
     | C.Mem e ->
       let pointee =
         match C.unrollType (C.typeOf e) with
@@ -941,6 +941,8 @@ let store_lval ctx (lv : C.lval) (r : reg) =
    va_list is ONE POINTER into the caller's home area: va_start = FP + 4*n_formals,
    va_arg = load a word and advance — default promotions make every legal variadic
    argument exactly one word (char/short widen to int, float would be double = banned). *)
+let is_va_builtin (f : C.varinfo) = String.starts_with ~prefix:"__builtin_va_" f.vname
+
 let gen_va_builtin ctx name (args : C.exp list) =
   let as_ap e =
     match e with
@@ -1040,8 +1042,7 @@ let gen_instr ctx (i : C.instr) =
     let r = gen_expr ctx e in
     store_lval ctx lv r;
     free_scratch ctx r
-  | C.Call (_, C.Lval (C.Var f, C.NoOffset), args, _, _)
-    when String.length f.vname >= 13 && String.sub f.vname 0 13 = "__builtin_va_" ->
+  | C.Call (_, C.Lval (C.Var f, C.NoOffset), args, _, _) when is_va_builtin f ->
     (* stdarg builtins inline — they must never become real calls (a BL to va_start
        would clobber the very registers and stack shape it is asking about) *)
     gen_va_builtin ctx f.vname args
@@ -1379,6 +1380,12 @@ let flatten_fundec (fd : C.fundec) : unit =
     let i' =
       match i with
       | C.Set (lv, e, loc, eloc) -> C.Set (flat_lval loc lv, shallow loc e, loc, eloc)
+      | C.Call (_, C.Lval (C.Var f, C.NoOffset), _, _, _) when is_va_builtin f ->
+        (* untouched: gen_va_builtin matches their exact shape — va_arg's &dst must
+           stay an AddrOf (CIL leaves dst register-homed, no slot), and hoisting it
+           into a temp would ask for the address of a register. Their args are
+           cheap already: ap, a sizeof, &dst *)
+        i
       | C.Call (ret, f, args, loc, eloc) ->
         (* args become full atoms: the marshaller loads them while R0-R3 (and an
            indirect target) are claimed, so no arg may need deep evaluation *)
@@ -1741,5 +1748,5 @@ let compile ~globals (fd : C.fundec) : L.obj =
     flatten_fundec fd;
     (try compile_once ~globals fd with
      | Scratch_exhausted ->
-       unsupported "out of registers even after three-address flattening — internal error")
+       internal "out of registers even after three-address flattening")
 ;;

@@ -875,6 +875,18 @@ let samples =
        + v; } int vshift(int i){ return vf2(1, 2, i & 7); }"
     , "vshift"
     , 1 (* two fixed params: the va_start anchor is FP+8, not FP+4 *) )
+  ; ( "int gde[16] = { 5, 9, 2, 7, 1, 8, 3, 6, 4, 10, 11, 12, 13, 14, 15, 16 }; int \
+       vf(int n, ...){ __builtin_va_list ap; int x; __builtin_va_start(ap, n); x = \
+       __builtin_va_arg(ap, int); __builtin_va_end(ap); return gde[0] - (gde[1] - \
+       (gde[2] - (gde[3] - (gde[4] - (gde[5] - (gde[6] - (gde[7] - (gde[8] - (gde[9] - \
+       (gde[10] - (gde[11] - (gde[12] - (gde[13] - (gde[14] - (gde[15] + \
+       x))))))))))))))); } int vflat(int a){ return vf(1, a); }"
+    , "vflat"
+    , 1
+      (* varargs meet the three-address retry: vf's return needs the flattening (16
+         levels over memory leaves), and flattening must leave va_arg's &x alone — CIL
+         keeps x register-homed, so a hoisted &x asked for a register's address *)
+    )
     (* code addresses (3b.1): a function's address exists only at link time, so &f is an
        Addr frag (expanded to the load_const pair at layout) and a fn-ptr initializer is
        a Code reloc (patched via sym_addr). An indirect call is BL-to-register: the

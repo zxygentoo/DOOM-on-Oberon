@@ -97,6 +97,10 @@ let compile_functions ~(globals : Globals.t) (merged : C.file) : Linker.obj list
        | exception Check.Unsupported msg ->
          incr rejected;
          bump msg
+       | exception Check.Internal msg ->
+         (* a doomcc bug, not a refusal: fail the build instead of trapping it *)
+         Printf.eprintf "doomcc: internal error compiling %s: %s\n" fd.svar.vname msg;
+         exit 3
        | exception C.SizeOfError (why, _) ->
          incr rejected;
          bump ("sizeof failed (incomplete type?): " ^ why))
@@ -212,10 +216,15 @@ let link_program ~(globals : Globals.t) (objs : Linker.obj list) (traps : Linker
       entry_names
   in
   if layout.Blob.bss_base + layout.Blob.bss_length > AC.blob_end_cap
-  then
-    Printf.printf
-      "link:    WARNING blob end 0x%X exceeds the 1.75 MB cap (ABI §8)\n"
-      (layout.Blob.bss_base + layout.Blob.bss_length);
+  then (
+    (* past the cap the bss runs into the C stack's row (ABI §8): a blob that would
+       corrupt itself at run time is a failed build, not a warning *)
+    Printf.eprintf
+      "doomcc: blob end 0x%X exceeds the 1.75 MB cap 0x%X (ABI §8: bss would run into \
+       the C stack)\n"
+      (layout.Blob.bss_base + layout.Blob.bss_length)
+      AC.blob_end_cap;
+    exit 1);
   let image = Linker.link ~code_base:layout.Blob.code_base (all @ thunks) in
   layout, image, code_words
 ;;

@@ -65,5 +65,6 @@ val find_sym_addr : image -> string -> int option
 
 (** [link ~code_base objs] lays the functions out in order starting at byte address
     [code_base] and resolves every branch, call, and address to a concrete value. Raises
-    {!Check.Unsupported} on a call to (or address of) a name no object defines. *)
+    {!Check.Unsupported} on a call to (or address of) a name no object defines, and
+    [Invalid_argument] when two objects share a name. *)
 val link : code_base:int -> obj list -> image
