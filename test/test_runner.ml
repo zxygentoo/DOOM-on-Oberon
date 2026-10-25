@@ -1,18 +1,12 @@
-(* feat/cil-backend bring-up: emit -> encode -> run, through the vendored emulator.
-
-   The plumbing proof: build Risc5_isa.instr lists by hand, encode them, and run them via
-   Runner (the jig's shared emulator exec, test-local). Beyond the first straight-line ADD,
-   this pins — in isolation, before Fundec emits a single branch — the branch mechanism the
-   control-flow slice is built on: the PC-relative offset arithmetic
-   (off = target - branch - 1), signed-compare flags (Lt = N≠V, Le = (N≠V)|Z, from SUB), and
-   run-until-fall-off-the-end termination. The real CIL -> instr compilation lives in
-   doomcc_core's Fundec and is exercised by test_jig. *)
+(* The Runner's own plumbing, on hand-built instruction lists: encode and run, plus
+   the branch mechanics everything else relies on — off = target - branch - 1, the
+   signed compare flags (Lt = N≠V, Le = (N≠V)|Z after SUB), and termination. *)
 
 module Isa = Emu.Risc5_isa
 
 let u32 x = x land 0xFFFF_FFFF
 
-(* ADD R0,R0,R1 — the original straight-line smoke (a in R0, b in R1). *)
+(* ADD R0,R0,R1 (a in R0, b in R1) *)
 let add = Isa.[ Alu { op = Add; u = false; v = false; a = 0; b = 0; operand = Reg 1 } ]
 
 (* Forward branches + signed compare + fall-off-end:

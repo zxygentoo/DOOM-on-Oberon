@@ -1,15 +1,11 @@
-(* The blob envelope + boundary protocol, end to end (3b.2/3b.3, ABI §7/§8): compile a
-   small program, emit the blob file through Blob with a crt0 thunk as the Init entry,
-   then play DOOM.Mod's stub — load the file bytes at BLOB_BASE, verify the header
-   (magic, version, lengths, checksum), zero the bss range the header names, and BL the
-   header's entry — in the vendored emulator, at the real ABI §8 addresses: the
-   emulator's default machine carries 16 MiB, so the blob loads, runs, and stacks in
-   himem exactly as it will on the hardware.
+(* The blob envelope and boundary protocol, end to end: compile a small program, emit
+   the blob with a crt0 thunk as its Init entry, then play DOOM.Mod's stub in the
+   emulator at the real ABI §8 addresses — load the file, verify the header, zero the
+   bss it names, and BL the header's entry.
 
-   The loader sets NOTHING but what a stub's BL would: R0 (the arg), LNK (the return
-   address), PC (the header's entry offset). DB and SP belong to the thunk — and
-   R6-R15 arrive as Oberon's world, seeded with sentinels here, asserted intact after
-   the excursion into C: the save/restore contract, observed from the stub's side. *)
+   The loader sets nothing but what a stub's BL would: R0 (the arg), LNK, and PC. DB
+   and SP belong to the thunk, and R6-R14 arrive as Oberon's world — seeded with
+   sentinels, asserted intact after the excursion into C. *)
 
 module Isa = Emu.Risc5_isa
 module M = Emu.Risc
@@ -29,19 +25,18 @@ let src =
 let expected x = x + 6 + Char.code 'e'
 
 let () =
-  (* ---- compile + lay out + emit, exactly as doomcc does ---- *)
+  (* compile, lay out and emit as doomcc does *)
   let file = Frontend.parse_string ~name:"blob" src in
   let globals = Globals.from_file file in
   let objs = List.map (Fundec.compile ~globals) (Frontend.fundecs file) @ Runtime.objs in
-  (* the thunk's size is a constant, so the code section is sizable before the layout
-     (and so the thunk's baked-in constants) exist — the whole point of Crt0.size *)
+  (* Crt0.size is a constant, so the code section is sized before the layout exists *)
   let code_words =
     List.fold_left (fun a o -> a + Linker.code_size o) 0 objs + Crt0.size
   in
   let data_size = globals.Globals.data_size in
   let bss_size = Bytes.length globals.Globals.image - data_size in
   assert (bss_size >= 4) (* gb really is in the bss tail *);
-  (* the register save area rides at the end of bss: stub-zeroed blob memory *)
+  (* the save area rides at the end of bss, which the stub zeroes *)
   let layout =
     Blob.layout ~base ~code_words ~data_size ~bss_size:(bss_size + Crt0.save_area_size)
   in
@@ -66,24 +61,24 @@ let () =
     globals.Globals.relocs;
   let entry_off = Linker.sym_addr image "__crt0_Init" - base in
   let blob = Blob.emit ~layout ~code:image.Linker.code ~data ~entries:(entry_off, 0, 0) in
-  (* ---- verify the frozen v1 header (ABI §7) from the FILE BYTES alone ---- *)
+  (* the header, checked from the file bytes alone *)
   let word off = Int32.to_int (Bytes.get_int32_le blob off) land 0xFFFF_FFFF in
   assert (word 0 = 0x4D4F4F44) (* "DOOM" LE *);
-  assert (word 4 = 1) (* version *);
-  assert (word 8 = Bytes.length blob) (* image length = the file *);
+  assert (word 4 = 1);
+  assert (word 8 = Bytes.length blob);
   assert (word 12 = layout.Blob.bss_base);
   assert (word 16 = bss_size + Crt0.save_area_size) (* the save area is stub-zeroed too *);
   assert (word 20 = entry_off);
-  assert (word 24 = 0 && word 28 = 0) (* Tick/KeyIn: no thunks yet *);
+  assert (word 24 = 0 && word 28 = 0) (* no Tick/KeyIn thunks *);
   let sum = ref 0 in
   for w = 16 to (Bytes.length blob / 4) - 1 do
     sum := (!sum + word (4 * w)) land 0xFFFF_FFFF
   done;
-  assert (word 32 = !sum) (* checksum over the words after the header *);
+  assert (word 32 = !sum);
   for off = 36 to 63 do
     assert (Bytes.get blob off = '\000') (* reserved tail *)
   done;
-  (* ---- play stub: load at base, poison then zero bss per the header, run ent ---- *)
+  (* play the stub *)
   let run x =
     let m = M.make () in
     let ram = M.For_tests.ram m in
@@ -91,8 +86,8 @@ let () =
       ram.((base / 4) + w)
       <- Int32.to_int (Bytes.get_int32_le blob (4 * w)) land 0xFFFF_FFFF
     done;
-    (* the loader owes the blob a zeroed bss (ABI §7): poison first so the zeroing is
-       load-bearing — gb would read 0xAAAAAAAA if the stub skipped it *)
+    (* poison the bss first, so the zeroing is load-bearing: gb would read
+       0xAAAAAAAA if the stub skipped it *)
     let bss_start = word 12
     and bss_len = word 16 in
     for w = bss_start / 4 to ((bss_start + bss_len) / 4) - 1 do
@@ -102,8 +97,8 @@ let () =
       ram.(w) <- 0
     done;
     let regs = M.For_tests.regs m in
-    (* Oberon's world: R6-R14 seeded with sentinels the thunk must bring back — no DB,
-       no SP from us, the thunk owns the switch. R15 is the stub's BL return address. *)
+    (* Oberon's world: no DB or SP from us — the thunk owns the switch. R15 is the
+       stub's BL return address. *)
     List.iter (fun r -> regs.(r) <- 0xCAFE_0000 lor r) [ 6; 7; 8; 9; 10; 11; 12; 13; 14 ];
     let stop = (base + word 8) / 4 in
     regs.(15) <- stop * 4;
@@ -120,7 +115,7 @@ let () =
     in
     loop 0;
     let regs = M.For_tests.regs m in
-    (* the boundary contract, observed from the stub's side: R6-R14 restored bit-exact *)
+    (* R6-R14 restored bit-exact *)
     List.iter
       (fun r ->
          if regs.(r) <> 0xCAFE_0000 lor r
@@ -151,8 +146,7 @@ let () =
   if !fails > 0 then exit 1
 ;;
 
-(* one name, one function: a second obj under a taken name used to resolve at the
-   first one's base (its own BLs landing wrong) — the link now refuses it *)
+(* the linker refuses a second object under a taken name *)
 let () =
   let ret = Isa.Branch { cond = True; neg = false; link = false; target = To_reg 15 } in
   let f = { Linker.name = "f"; frags = [ Linker.Ins ret ] } in

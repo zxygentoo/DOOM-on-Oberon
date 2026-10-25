@@ -1,6 +1,6 @@
-(* Wad.split invariants (AGENT.md §3): reassembly identity, chunk size bounds,
-   the boundary shapes (remainder, exact multiple, sub-chunk, single), and the
-   PO filesystem constants the defaults ride inside. *)
+(* Wad.split invariants: reassembly identity, chunk size bounds, the boundary shapes
+   (remainder, exact multiple, sub-chunk, single), the PO filesystem cap, and the
+   stub's chunk limits. *)
 
 open Doomcc_core
 
@@ -54,8 +54,7 @@ let () =
     (match Wad.split ~chunk_size:0 (data 4) with
      | exception Invalid_argument _ -> true
      | _ -> false);
-  (* The PO file cap: FileDir.Mod's 64 direct + 12x256 indirect 1 KB sectors
-     minus the 352-byte header — and the default chunk sits inside it. *)
+  (* FileDir.Mod: 64 direct + 12x256 indirect 1 KB sectors, minus the 352-byte header *)
   eqi "po_file_cap" Wad.po_file_cap 3_210_912;
   check "default_inside_cap" (Wad.default_chunk_size <= Wad.po_file_cap);
   (* The real payload: shareware DOOM1.WAD splits into exactly two chunks whose
