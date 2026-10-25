@@ -1,25 +1,17 @@
-/* dither.c — the 1-bit ordered-dither blit kernel (AGENT.md §5, the DG_ port
- * slice). Pure memory -> memory: no MMIO, no DOOM externs, no includes — so
- * the WHOLE file rides the differential jig as oracle-side source too, and
- * the exact code shipping in the blob is diffed against host gcc. That is
- * 1d's "same dither code, bit-identical" contract, started at the function
- * level two milestones early.
+/* dither.c — the 1-bit ordered-dither kernels, and the Halftone uploads.
  *
- * The pipeline: palette -> 256-byte luminance LUT (ITU-601 weights; gamma is
- * already folded in, I_SetPalette applies gammatable as it fills colors[]) ->
- * threshold against a 64x64 void-and-cluster BLUE-NOISE map -> 1-bit output,
- * 2x2 pixel-doubled. Blue noise is still ordered dithering — the decision is
- * a pure function of (x, y, luminance), so it keeps Bayer's frame-to-frame
- * stability — but the map's high-frequency spectrum removes the crosshatch:
- * near-Floyd-Steinberg tone with none of error diffusion's temporal crawl.
- * ONE dither decision per SOURCE pixel (§5's budget: ~64k decisions/frame):
- * the bit doubles into both output columns and the packed word stores to both
- * output lines. The result is a 320x200 dither pattern, pixel-doubled — the
- * Playdate look; dithering the doubled columns separately is the (2x cost)
- * quality knob if 1d's framebuffer dumps disappoint. */
+ * Pure memory -> memory: no MMIO in the kernels, no DOOM externs, no includes, so
+ * the whole file is also oracle-side source — the jig diffs this exact code against
+ * host gcc, and bin/doom_golden.c links it into the host golden frames.
+ *
+ * The pipeline: palette -> 256-byte luminance LUT (gamma is already folded in:
+ * I_SetPalette applies gammatable as it fills colors[]) -> threshold against a 64x64
+ * void-and-cluster blue-noise map -> 1-bit output. Blue noise is still ordered
+ * dithering — each decision is a pure function of (x, y, luminance), so frames stay
+ * stable from one to the next — but its high-frequency spectrum removes Bayer's
+ * crosshatch: near-Floyd-Steinberg tone without error diffusion's temporal crawl. */
 
-/* non-static since feat/halftone: the hardware-scanout path (doom_oberon.c)
- * uploads these 256 bytes to the Halftone LUT window on palette change */
+/* not static: doom_oberon.c's hardware path uploads it to the Halftone LUT */
 unsigned char __dg_lum[256];
 
 /* thresholds 1..254 over the luminance scale: luminance 0 is always black,
@@ -289,12 +281,11 @@ static const unsigned char __dg_bn64[64 * 64] = {
 /* Rebuild the LUT from a 256-entry BGRA byte palette — the raw bytes of
  * i_video's struct color[256]: b at +0, g at +1, r at +2 (the byte-aligned :8
  * little-endian layout the jig's bf1 sample pins). Weights sum to 256, so
- * full white maps to 255 exactly — and any GRAY maps to itself under any
- * sum-256 weights, which is what keeps walls/floors invariant across weight
- * changes. (150,80,26) replaced ITU-601's (77,150,29) in the 2026-07-09
- * legibility pass, chosen on lab contact sheets: DOOM's UI text, HUD numbers
- * and messages are PURE RED, which ITU put at ~26%-white — unreadable in the
- * dither; red-weighted luminance lifts text to ~50% while grays don't move. */
+ * full white maps to 255 exactly — and any gray maps to itself under any sum-256
+ * weights, so walls and floors don't move when the weights do. (150,80,26)
+ * rather than ITU-601's (77,150,29): DOOM's UI text, HUD numbers and messages
+ * are pure red, which ITU puts at ~26% white — unreadable dithered; red-weighted
+ * luminance lifts them to ~50%. */
 void __dg_build_lut(const unsigned char *pal)
 {
     int i;
@@ -305,7 +296,9 @@ void __dg_build_lut(const unsigned char *pal)
 }
 
 /* Dither-blit [w x h] palette indices ([w] a multiple of 16) as a 2x2-doubled
- * 1-bit image. [dst] is the word holding the rect's top-left in SCREEN
+ * 1-bit image, one decision per source pixel. DG_DrawFrame no longer calls it
+ * (the fullscreen kernel below replaced it); the jig and lib/drawers.ml still
+ * cover it. [dst] is the word holding the rect's top-left in SCREEN
  * coordinates; [stride] is words per screen line DOWNWARD; bit 0 of a word is
  * its LEFTMOST pixel (the Oberon convention). Oberon's framebuffer is
  * BOTTOM-UP, so the machine caller passes stride -32 (1024 px = 32-word
@@ -335,7 +328,7 @@ void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int 
     }
 }
 
-/* ---- the fullscreen kernel: 320x200 -> the whole 1024x768 panel ----
+/* The fullscreen kernel: 320x200 -> the whole 1024x768 panel.
  *
  * Scale 3.2 x 3.84 — and 3.84/3.2 = 1.2, exactly VGA mode 13h's pixel aspect:
  * DOOM authored 320x200 for a 4:3 CRT, so the full stretch RESTORES the
@@ -343,15 +336,12 @@ void __dg_dither(const unsigned char *src, int w, int h, unsigned int *dst, int 
  * (3+3+3+3+4 bits, twice; LSB leftmost), 25 source lines fill exactly 96
  * output lines (a Bresenham accumulator deals the 3s and 4s, 200 -> 768).
  *
- * Decisions are fine-grained on BOTH axes (the 2026-07-09 legibility pass;
- * chosen on lab contact sheets over per-source replication, which cannot
- * render 8-px menu glyphs at 3.2x3.84 chunk size at any contrast — the quit
- * prompt was invisible): horizontally per OUTPUT pixel, vertically TWO
- * decision rows per source line — a source line's 3-or-4 output rows
- * alternate between blue-noise rows (2*sy)&63 and (2*sy+1)&63 ("out2" on the
- * lab sheets: indistinguishable from full per-output in the game frames at
- * half the cost; full per-output was 3.84x the decisions for text-crispness
- * no one could tell apart at play distance).
+ * Decisions are finer than the source on both axes, because one decision per
+ * source pixel (3.2x3.84 chunks) cannot render DOOM's 8-px menu glyphs at any
+ * contrast: horizontally one per output pixel, vertically two decision rows per
+ * source line — a source line's 3-or-4 output rows alternate between blue-noise
+ * rows (2*sy)&63 and (2*sy+1)&63 ("out2"). That looks the same as a decision per
+ * output row in game frames, at half the decisions.
  *
  * The trick that makes output-granular decisions affordable: the blue-noise
  * thresholds under one source pixel's 3-or-4 output bits are FIXED per
@@ -453,16 +443,12 @@ void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride)
     }
 }
 
-/* ---- feat/halftone v2: the hardware-scanout uploads ----
- *
- * The Halftone hardware ships CONTENT-FREE — and since the v2 generality
- * rework, GEOMETRY-FREE (ABI.md §11): before mode-on a
- * client uploads its 64x64 threshold map VERBATIM (the v1 slot-quad packing
- * died with the baked slot tables), a 768-word row map carrying the vertical
- * geometry, and the rect/scale registers. DOOM's rendition is __dg_bn64 —
- * the same table __dg_dither_fs thresholds against — and the row map is the
- * EXACT out2 dealing the software kernel computes, so hardware and software
- * mode render identical pixels by construction. */
+/* The Halftone uploads. The hardware holds no tables and no geometry of its own
+ * (ABI.md §11): before mode-on a client uploads its 64x64 threshold map verbatim,
+ * a 768-word row map carrying the vertical geometry, and the rect/scale registers.
+ * DOOM's map is __dg_bn64, the table __dg_dither_fs thresholds against, and its row
+ * map is exactly the software kernel's out2 dealing, so the hardware and software
+ * paths render identical pixels by construction. */
 void __dg_upload_thresholds(void)
 {
     volatile unsigned int *dst = (volatile unsigned int *)0x30E000;
@@ -506,14 +492,11 @@ void __dg_upload_geometry(void)
     reg[7] = 0;    /* XOFF */
 }
 
-/* ---- the hw-scanout frame copy (feat/halftone) ----
- *
- * DG_DrawFrame's per-frame block copy: the finished 320x200 frame, zone
- * buffer -> the Halftone pixel window, both ends word-aligned by contract
- * (Z_Malloc returns 4-aligned; the window base is 64K-aligned). Kept
- * dead-simple as the executable spec — drawer #5 (lib/drawers.ml) replaces
- * it at link time (~2.3 instrs/word vs ~20 naive-compiled), and the jig
- * diffs the hand code against gcc compiling exactly this. */
+/* The hardware path's per-frame copy: the finished 320x200 frame, zone buffer ->
+ * the Halftone pixel window, both ends word-aligned (Z_Malloc returns 4-aligned;
+ * the window base is 64K-aligned). This C is the spec: lib/drawers.ml replaces it
+ * at link time (~2.3 instrs/word against ~20 compiled), and the jig diffs the hand
+ * code against gcc compiling exactly this. */
 void __dg_frame_copy(const unsigned char *src, unsigned char *dst)
 {
     const unsigned int *s = (const unsigned int *)src;

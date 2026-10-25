@@ -1,23 +1,23 @@
-/* stdio.c — the memory-backed stdio + console (1c.3).
+/* stdio.c — memory-backed stdio and the UART console.
  *
- * The blob never touches storage (AGENT.md §2.7): every readable "file" is a byte
- * range in himem that the port layer registers by name (__file_register — the stub
- * loads the WAD, Init registers it; doomgeneric's w_file_stdc then fopen/freads it
- * none the wiser). Writes are v1 no-ops per the §5 boundary contract: fopen for
- * writing returns NULL, and M_LoadDefaults & co already tolerate the missing files.
+ * The blob never touches storage: every readable "file" is a byte range in himem
+ * registered by name (__file_register — the stub loads the WAD, Init registers it,
+ * and doomgeneric's w_file_stdc fopens and freads it none the wiser). Nothing is
+ * ever written: fopen for writing returns NULL, and M_LoadDefaults & co already
+ * tolerate the missing files.
  *
- * The tree's .i files carry glibc's COMPLETE struct _IO_FILE (32 fields), so FILE
- * stays an incomplete type here and the real cursor lives in a private struct, cast at
- * the public boundary — callers treat FILE* as opaque, which is stdio's own contract.
- * Type spellings (size_t = unsigned long, long offsets) mirror the .i prototypes
- * exactly: Mergecil is nominal about types (the 1c.1 lesson, twice now).
+ * The tree's .i files carry glibc's complete struct _IO_FILE (32 fields), so FILE
+ * stays an incomplete type here and the real cursor lives in a private struct, cast
+ * at the public boundary — callers treat FILE* as opaque, which is stdio's own
+ * contract. Type spellings (size_t = unsigned long, long offsets) mirror the .i
+ * prototypes exactly, because Mergecil matches types by name.
  *
  * The console (printf/puts/putchar, and fprintf to stdout/stderr) formats through
  * mini.c's vsnprintf and drains to the RS232 UART, Oberon-style: wait on status bit 1
  * (tx ready) at 0xFFFFFFCC, write data at 0xFFFFFFC8 — the sign-extended MMIO
- * addresses both the emulator and the 24-bit bus agree on. NOTE: with no serial
- * attached (the bare jig emulator) the status never reads ready, so jig samples must
- * not call the console functions; the 1d harness attaches a serial. */
+ * addresses both the emulator and the 24-bit bus agree on. With no serial attached
+ * (the bare jig emulator) the status never reads ready, so jig samples must not
+ * call the console functions. */
 
 typedef unsigned long size_t;
 typedef unsigned int __mode_t;
@@ -43,7 +43,7 @@ FILE *stdin = 0;
 FILE *stdout = (FILE *)&__console;
 FILE *stderr = (FILE *)&__console;
 
-/* ---- the registry: name -> himem range, filled by the port layer at Init ---- */
+/* the registry: name -> himem range, filled by Init */
 
 typedef struct __mreg {
     const char *name;
@@ -66,14 +66,12 @@ void __file_register(const char *name, const void *base, size_t size)
     }
 }
 
-/* ---- the fopen family ---- */
-
 static __mfile_t __handles[4];
 
 FILE *fopen(const char *name, const char *mode)
 {
     int k;
-    if (!mode || mode[0] == 'w' || mode[0] == 'a') return 0;   /* writes: v1 no-op */
+    if (!mode || mode[0] == 'w' || mode[0] == 'a') return 0;   /* nothing writes */
     for (k = 0; k < 4; k++) {
         if (__files[k].name && strcmp(__files[k].name, name) == 0) {
             int h;
@@ -133,8 +131,6 @@ long ftell(FILE *f)
     return (long)m->pos;
 }
 
-/* ---- the console: format through vsnprintf, drain to the UART ---- */
-
 static void __uart_putc(int c)
 {
     while (!(*(volatile unsigned *)0xFFFFFFCC & 2)) { }   /* tx ready (RS232 status) */
@@ -154,7 +150,7 @@ int puts(const char *s)
     return 0;
 }
 
-/* one line at a time; longer output truncates — a v1 debug console, not a stream */
+/* one line at a time; longer output truncates — a debug console, not a stream */
 static int __console_emit(const char *fmt, va_list ap)
 {
     char buf[256];
@@ -178,7 +174,7 @@ int fprintf(FILE *f, const char *fmt, ...)
 {
     va_list ap;
     int r;
-    if ((__mfile_t *)f != &__console) return 0;   /* only the console writes in v1 */
+    if ((__mfile_t *)f != &__console) return 0;   /* only the console writes */
     __builtin_va_start(ap, fmt);
     r = __console_emit(fmt, ap);
     __builtin_va_end(ap);
@@ -207,7 +203,7 @@ size_t fwrite(const void *ptr, size_t size, size_t n, FILE *f)
     return n;
 }
 
-/* ---- the polite refusals: no filesystem exists behind these ---- */
+/* no filesystem exists behind these */
 
 int remove(const char *path)
 {
@@ -235,9 +231,8 @@ int system(const char *cmd)
     return -1;
 }
 
-/* v1: no config file ever loads (fopen("...cfg") misses the registry), so sscanf has
-   no live callers; a zero-conversions stub keeps the link honest without pretending
-   to parse. Revisit if a registered file ever feeds it. */
+/* no config file ever loads (fopen("...cfg") misses the registry), so sscanf has no
+   live callers; a zero-conversions stub links without pretending to parse */
 int sscanf(const char *s, const char *fmt, ...)
 {
     (void)s;

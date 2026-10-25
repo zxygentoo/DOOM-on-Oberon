@@ -1,34 +1,28 @@
-/* doom_oberon.c — the doomgeneric platform layer for the Oberon RISC5
- * machine (AGENT.md §7, the DG_ port slice — complete). It fills upstream's
- * doomgeneric_<platform>.c slot (doomgeneric_sdl.c, ... — shortened to the house
- * doom_* naming): all six
- * DG_ hooks, the key-ring producer, the DG_DrawFrame dither-blit wrapper
- * (kernel in dither.c), the three ABI §7 blob entries (Init/Tick/KeyIn), and
- * the setjmp-shaped exit().
+/* doom_oberon.c — the doomgeneric platform layer for the Oberon RISC5 machine,
+ * in upstream's doomgeneric_<platform>.c slot: the six DG_ hooks, the key ring, the
+ * DG_DrawFrame wrapper over dither.c's kernels and the Halftone path, the three
+ * ABI §7 blob entries (Init/Tick/KeyIn), and a setjmp-shaped exit().
  *
- * Plain C, preprocessor-free (mini.c's rules): no includes, types spelled as
- * the host-preprocessed .i files spell them (uint32_t = unsigned int, ILP32).
+ * Plain C, preprocessor-free like mini.c: no includes, types spelled as the
+ * host-preprocessed .i files spell them (uint32_t = unsigned int, ILP32).
  *
- * The machine surface is two things only:
- *   - the millisecond counter, MMIO at 0xFFFFFFC0 — the sign-extended form of
- *     the 24-bit 0xFFFFC0, the same convention as stdio.c's UART at
- *     0xFFFFFFC8/CC (a mem-op computes its address in 32 bits; the bus and
- *     the emulator decode agree on the sign-extended spelling);
- *   - the SHARED-page key ring (ABI §8): head u32 at +20, tail u32 at +24,
- *     256 two-byte events at +32. Event = the §6 wire framing verbatim:
- *     byte 0 = pressed (1 make, 0 break), byte 1 = doomkey code — i_input.c's
- *     TranslateKey is the identity, so the SENDER owns all translation and
- *     the blob never sees a scancode table.
+ * The machine surface:
+ *   - the millisecond counter, MMIO at 0xFFFFFFC0 — the sign-extended form of the
+ *     24-bit 0xFFFFC0, as with stdio.c's UART at 0xFFFFFFC8/CC (a mem-op computes
+ *     its address in 32 bits; the bus and the emulator agree on that spelling);
+ *   - the SHARED page (ABI §8): status, heartbeat, presentation flags, the command
+ *     tail, and the key ring — head u32 at +20, tail u32 at +24, 256 two-byte events
+ *     at +32: byte 0 = pressed (1 make, 0 break), byte 1 = doomkey. i_input.c's
+ *     TranslateKey is the identity, so the sender owns all translation and the
+ *     blob never sees a scancode;
+ *   - the framebuffer, and the Halftone window when the loader advertises it.
  *
- * [__shared_base] is the SHARED page address, an extern the ENVIRONMENT
- * defines (doom_heap.c binds ABI §8's 0x300000; the jig binds a spot inside
- * emulator RAM) — the same pattern as mini.c's heap bounds. */
+ * [__shared_base] and [__fb_base] are externs the environment defines (doom_heap.c
+ * on the machine, the jig inside emulator RAM), like mini.c's heap bounds. */
 
 typedef unsigned int uint32_t;
 
 extern char *__shared_base;
-
-/* ---- time: the ms counter ---- */
 
 uint32_t DG_GetTicksMs(void)
 {
@@ -42,20 +36,17 @@ void DG_SleepMs(uint32_t ms)
 {
     uint32_t start = DG_GetTicksMs();
     /* unsigned subtraction is wrap-correct across the counter rollover.
-       Spinning IS the sleep: v1 is the fullscreen seize, DOOM is the
-       machine's only occupant (and the emulator detects exactly this
-       ms-counter idle-spin and yields to its host frame loop). */
+       Spinning is the sleep: nothing else needs the CPU meanwhile (and the
+       emulator detects this ms-counter spin and yields to its frame loop). */
     while (DG_GetTicksMs() - start < ms) { }
 }
 
-/* ---- keys: the SHARED-page ring (single producer, single consumer) ----
- *
- * Head and tail are free-running u32 counters masked at use (index =
- * counter & 255): empty is head == tail, full is head - tail == 256, and
- * the wrap arithmetic stays correct across the u32 rollover. The producer
- * (the stub's KeyIn / the UART poll, later sub-slices via DG_KeyEnqueue)
- * bumps head; the consumer (DG_GetKey, called from I_GetEvent's drain
- * loop) bumps tail. Head/tail start equal: the stub zeroes the page. */
+/* The key ring, single producer and single consumer. Head and tail are
+ * free-running u32 counters masked at use (index = counter & 255): empty is
+ * head == tail, full is head - tail == 256, and the arithmetic stays correct
+ * across the u32 rollover. KeyIn (via DG_KeyEnqueue) bumps head; DG_GetKey,
+ * called from I_GetEvent's drain loop, bumps tail. Both start at 0: the stub
+ * zeroes the page. */
 
 int DG_GetKey(int *pressed, unsigned char *key)
 {
@@ -71,9 +62,8 @@ int DG_GetKey(int *pressed, unsigned char *key)
     return 1;
 }
 
-/* The producer half — KeyIn's core (the ABI §7 entry unpacks its event word
- * into this). A full ring drops the event: 256 queued keystrokes outlast any
- * human, and dropping beats corrupting the ring. */
+/* A full ring drops the event: 256 queued keystrokes outlast any human, and
+ * dropping beats corrupting the ring. */
 void DG_KeyEnqueue(int pressed, unsigned char key)
 {
     volatile uint32_t *head = (volatile uint32_t *)(__shared_base + 20);
@@ -87,25 +77,19 @@ void DG_KeyEnqueue(int pressed, unsigned char key)
     *head = h + 1;
 }
 
-/* ---- video: the dither-blit wrapper (AGENT.md §5) ----
- *
- * doomgeneric fills DG_ScreenBuffer (320x200 palette indices — RESX/RESY are
- * pinned to 320x200 at preprocess time, so fb_scaling = 1 and I_FinishUpdate
- * is a straight per-line copy) and calls DG_DrawFrame. The dither pipeline —
- * luminance LUT + 4x4 Bayer + 2x2-doubled 1-bit packing — lives in dither.c
- * (pure memory->memory, jig-diffed against host gcc); this wrapper owns the
- * DOOM-side globals and the machine geometry:
- *   - colors[256] (BGRA bytes in memory — the byte-aligned :8 layout) is
- *     refilled by I_SetPalette on every palette switch, gamma pre-applied;
- *     palette_changed signals it and the LUT rebuilds — §5's "14 precomputed
- *     LUTs" simplified to one-LUT-on-change (the next frame dithers through
- *     the new palette, which is the visible flash);
- *   - the target: the WHOLE 1024x768 panel (dither.c's fullscreen kernel,
- *     3.2 x 3.84 = DOOM's authentic 4:3 CRT aspect). Oberon's framebuffer is
- *     BOTTOM-UP (screen line y lives at fb line 767-y, bit 0 leftmost), so
- *     the screen's top-left word is fb word 767*32 and the stride is -32
- *     words per screen line. Every fb word is written each frame — no border
- *     to keep clean. */
+/* Video. doomgeneric renders 320x200 palette indices into DG_ScreenBuffer (RESX/RESY
+ * are pinned to 320x200 at preprocess time, so fb_scaling = 1, and patch 0003 makes
+ * it I_VideoBuffer itself, so I_FinishUpdate copies nothing) and calls DG_DrawFrame.
+ * The kernels live in dither.c; this wrapper owns the DOOM-side globals and the
+ * machine geometry:
+ *   - colors[256] (BGRA bytes in memory — the byte-aligned :8 layout) is refilled
+ *     by I_SetPalette on every palette switch, gamma applied; palette_changed
+ *     signals it, and the one LUT is rebuilt (the next frame dithers through the
+ *     new palette, which is the visible flash);
+ *   - the software target is the whole 1024x768 panel (3.2 x 3.84 = DOOM's 4:3 CRT
+ *     aspect). Oberon's framebuffer is bottom-up (screen line y is fb line 767-y,
+ *     bit 0 leftmost), so the screen's top-left word is fb word 767*32 and the
+ *     stride is -32 words per screen line. Every fb word is written each frame. */
 
 struct color {
     uint32_t b:8;
@@ -122,31 +106,26 @@ extern char *__fb_base;                 /* doom_heap.c binds 0xE7F00 */
 extern void __dg_build_lut(const unsigned char *pal);
 extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stride);
 
-/* ---- feat/halftone: the hardware-scanout presentation path ----
- *
- * The seam (ABI.md §11; hardware: host repo Halftone): a 64 KiB
- * window at HT_BASE (ABI §8's back-buffer row, repurposed) that the board
- * shadows into BRAM — pixels at +0 (I_VideoBuffer is PLACED there via
- * i_video.c's __dg_fixed_vbuf, patch 0004, so DOOM composites straight into
- * the scanout source), the 256-byte luminance LUT at +64000, the control
- * word (bit 0 = mode) at +64256. The loader advertises the hardware in
- * SHARED +544 bit 0 (a zeroed page = software dither, so every existing
- * harness and the stub run unchanged). Mode goes on at the FIRST frame —
- * never at Init, or the panel would scan out an uninitialized buffer through
- * D_DoomMain's long init — and off in exit(), which restores the desktop
- * instantly (the mono framebuffer was never touched). */
+/* The Halftone path (ABI.md §11; the hardware is the host repo's Halftone): a
+ * 64 KiB window at HT_BASE that the board shadows into BRAM and dithers at scanout
+ * — pixels at +0 (each finished frame is copied there), the 256-byte luminance LUT
+ * at +64000, the control word (bit 0 = mode) at +64256. The loader advertises the
+ * hardware in SHARED +544 bit 0; a zeroed page means the software dither. Mode goes
+ * on at the first frame — never at Init, or the panel would scan out an
+ * uninitialized buffer through D_DoomMain's long init — and off in exit(), which
+ * brings the desktop back at once (the mono framebuffer was never touched). */
 
 enum { HT_BASE = 0x310000, HT_LUT = 0x310000 + 64000, HT_CTL = 0x310000 + 64256 };
 
 extern unsigned char __dg_lum[256];      /* dither.c's LUT (filled by __dg_build_lut) */
 extern unsigned char *__dg_fixed_vbuf;   /* i_video.c (patch 0004): fixed buffer placement */
 extern void __dg_upload_thresholds(void);/* dither.c: DOOM's blue noise -> the threshold window */
-extern void __dg_upload_geometry(void); /* dither.c v2: the out2 row map + rect/scale registers */
+extern void __dg_upload_geometry(void); /* dither.c: the out2 row map + rect/scale registers */
 
 static unsigned int __dg_hw;             /* SHARED +544 bit 0, latched by DG_Init */
-static unsigned int __dg_hw_viewer;      /* +544 bit 1: viewer presentation — the STUB
-                                            owns mode + geometry (seam v2); the blob
-                                            keeps only thresholds + LUT + frame copy */
+static unsigned int __dg_hw_viewer;      /* +544 bit 1: viewer presentation — the stub
+                                            owns mode + geometry; the blob keeps only
+                                            thresholds + LUT + frame copy */
 static unsigned int __dg_hw_on;          /* mode written once, at the first frame */
 
 extern void __dg_frame_copy(const unsigned char *src, unsigned char *dst);
@@ -154,12 +133,10 @@ extern void __dg_frame_copy(const unsigned char *src, unsigned char *dst);
 void DG_DrawFrame(void)
 {
     if (__dg_hw) {
-        /* frame-boundary copy into the window — the double buffer DOOM's
-           renderer assumes. Board lesson (2026-07-10): placing I_VideoBuffer
-           IN the window let the raster watch R_RenderPlayerView mid-sweep —
-           constant-rate flicker at the render rate. The copy restores the sw
-           path's contract (the panel only ever scans complete frames, written
-           once, in raster order); drawer #5 hand-rolls it. */
+        /* copy the finished frame into the window: the double buffer DOOM's
+           renderer assumes. Rendering straight into the window let the raster
+           show R_RenderPlayerView mid-sweep (flicker at the render rate on the
+           board); with the copy the panel only ever scans complete frames. */
         __dg_frame_copy(DG_ScreenBuffer, (unsigned char *)HT_BASE);
         if (palette_changed) {
             int i;
@@ -169,12 +146,10 @@ void DG_DrawFrame(void)
             palette_changed = 0;
         }
         if (!__dg_hw_on) {
-            /* the content-free contract, v2: the hardware powers up with ZERO
-               tables AND a zero-sized rect — upload DOOM's rendition (the same
-               __dg_bn64 the software path thresholds against) plus the out2
-               row map and the fullscreen 16/5 geometry before the panel
-               switches (seam v2: the shadowed registers latch at the next
-               vblank entry, so the desktop lingers at most one frame) */
+            /* the hardware powers up with zero tables and a zero-sized rect:
+               upload the thresholds, plus (fullscreen) the row map and geometry,
+               before the mode goes on. The registers latch at the next vblank,
+               so the desktop lingers at most one frame. */
             __dg_upload_thresholds();
             if (!__dg_hw_viewer) {
                 __dg_upload_geometry();
@@ -191,32 +166,25 @@ void DG_DrawFrame(void)
     __dg_dither_fs(DG_ScreenBuffer, (unsigned int *)__fb_base + 767 * 32, -32);
 }
 
-/* ---- chrome ---- */
-
 void DG_SetWindowTitle(const char *title)
 {
-    (void)title;   /* locked decision (AGENT.md §2.4): set-title is a no-op */
+    (void)title;
 }
 
 extern int printf(const char *fmt, ...);
 
 void DG_Init(void)
 {
-    /* the presentation flag (SHARED +544 bit 0, loader-written; zero = the
-       software dither, the default every existing harness gets). The
-       compositing buffer stays zone-allocated even in hw mode — the renderer
-       must NOT draw directly into the scanout window (the board flicker
-       lesson; see DG_DrawFrame). __dg_fixed_vbuf (patch 0004) stays unset —
-       kept as the seam a hardware double-buffer variant would use. */
+    /* The compositing buffer stays zone-allocated in hardware mode too (see
+       DG_DrawFrame's copy). __dg_fixed_vbuf (patch 0004) stays unset: it is the
+       seam a hardware double-buffer would use. */
     __dg_hw = *(volatile unsigned int *)(__shared_base + 544) & 1;
     __dg_hw_viewer = (*(volatile unsigned int *)(__shared_base + 544) >> 1) & 1;
     __dg_hw_on = 0;
     printf("DOOM on Oberon: blob alive\n");
 }
 
-/* ---- the blob entries (ABI §7) + exit ----
- *
- * doomgeneric's patched D_DoomLoop runs the graphics init plus ONE tick and
+/* The blob entries (ABI §7) and exit(). doomgeneric's D_DoomLoop runs the graphics init plus ONE tick and
  * RETURNS — so Init genuinely comes back, and Tick is one clean frame. The
  * only non-returning path is exit(): I_Quit -> atexit chain -> exit(0),
  * I_Error -> message (already on the UART) -> exit(-1), both at arbitrary
@@ -234,9 +202,9 @@ extern void __longjmp(unsigned int *env, int val);
    arm it directly when testing exit(). */
 unsigned int __exit_env[9];
 
-/* The DOOM command line (ABI §8, SHARED +1024): the loader writes the raw
- * command tail verbatim — an Oberon stub byte-copies Oberon.Par's text up to
- * '~', the harness its -args string; no parsing happens on the loader side.
+/* The DOOM command line (ABI §8, SHARED +1024): the loader writes the raw command
+ * tail verbatim — DOOM.Mod copies the rest of the command's line, run_blob its
+ * -args string; no parsing happens on the loader side.
  * Init prepends the three baked words and tokenizes the tail on blanks IN
  * PLACE (the split writes the NULs), so the region belongs to the blob after
  * Init and myargv's pointers stay valid: the SHARED page persists. A zeroed
@@ -245,7 +213,7 @@ enum { ARGV_MAX = 16 };   /* Frontc parses these files cpp-free: no #define */
 
 static char *__argv[ARGV_MAX] = { "doom", "-iwad", "doom1.wad" };
 
-/* Non-static so the jig pins it directly (pcl1). */
+/* Non-static so the jig can test it directly. */
 int __parse_cmdline(char *s, char **argv, int argc, int max)
 {
     for (;;) {
@@ -261,8 +229,7 @@ int __parse_cmdline(char *s, char **argv, int argc, int max)
 void exit(int status)
 {
     /* hardware scanout off first: the mono framebuffer was never written, so
-       the desktop reappears the instant the mode bit drops (the stub's
-       Restore broadcast becomes belt-and-braces) */
+       the desktop reappears the instant the mode bit drops */
     if (__dg_hw && !__dg_hw_viewer) {
         *(volatile unsigned int *)HT_CTL = 0;
         __dg_hw_on = 0;
@@ -274,12 +241,11 @@ void exit(int status)
 
 int Init(int wad_addr, int cfg_addr)
 {
-    (void)cfg_addr;   /* v1: the cfg page IS the §8 SHARED page, reached via
-                         the baked __shared_base binding like all shared traffic */
+    (void)cfg_addr;   /* the SHARED page, reached through __shared_base instead */
     if (__setjmp(__exit_env))
         return *(volatile int *)(__shared_base + 12);   /* I_Error during init */
-    /* the §2.7 moment: the WAD arrives as a pointer + length (SHARED +28),
-       never as storage; -iwad pins the exact name D_FindWADByName will fopen */
+    /* the WAD arrives as a pointer + length (SHARED +28), never as storage;
+       -iwad pins the exact name D_FindWADByName will fopen */
     __file_register("doom1.wad", (const void *)wad_addr,
                     *(volatile unsigned int *)(__shared_base + 28));
     doomgeneric_Create(__parse_cmdline(__shared_base + 1024, __argv, 3, ARGV_MAX),

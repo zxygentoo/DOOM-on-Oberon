@@ -20,7 +20,7 @@
 #   make sim       the Cyclesim leg (dune --root sim, OxCaml switch)
 #   make clean     rm -rf _out (the vendor tree stays patched)
 #
-# Independence property (AGENT.md §9): the ref/golden recipes are plain gcc
+# Independence property: the ref/golden recipes are plain gcc
 # on the vendor sources — patched by git apply alone, the same patch/c set
 # the blob gets — with no CIL, no doomcc, no dune anywhere in them, so a
 # toolchain bug can't corrupt both sides of a differential. The
@@ -83,9 +83,8 @@ i _out/i/.stamp: script/ppx_doomsrc.sh _out/.patched
 	@touch _out/i/.stamp
 
 # the shareware IWAD v1.9 (freely redistributable) — md5-pinned; the name
-# "doom1.wad" is baked into the blob's Init (port.4). Mirrors are tried in
-# order until one matches the pin (the original slitaz URL died 2026-07):
-# the md5, not the host, is the trust anchor.
+# "doom1.wad" is baked into the blob's Init. Mirrors are tried in order until
+# one matches the pin: the md5, not the host, is the trust anchor.
 WAD_URLS := \
   https://raw.githubusercontent.com/Doom-Utils/shareware-collection/master/Doom%201.9/doom1.wad \
   https://raw.githubusercontent.com/Akbar30Bill/DOOM_wads/master/doom1.wad
@@ -169,7 +168,7 @@ $(GDIR):
 
 # run the generator (cwd = _out/golden: the engine fopens "doom1.wad" in cwd,
 # frames land as golden_gNNNNN.fbw next to it); GOLDEN_TICS/KEYS/SCENES/ARGS
-# pass through for the lab side doors
+# pass through (bin/doom_golden.c)
 goldens: golden _out/doom1.wad
 	@ln -sf ../doom1.wad $(GDIR)/doom1.wad
 	cd $(GDIR) && ./golden; st=$$?; test $$st -eq 255 -o $$st -eq 0 || exit $$st
@@ -177,7 +176,7 @@ goldens: golden _out/doom1.wad
 
 # ---- the oracles, end to end ------------------------------------------------
 
-# the emulator oracle set (AGENT.md 1d): the golden generator and the blob on
+# the emulator oracle set: the golden generator and the blob on
 # run_blob both play -timedemo demo1 — frames bit-identical at the chosen
 # gametics, both runs ending at 5026. script/check_oracles.sh owns the
 # verdicts; results land in _out/check/ (~6 min, nearly all emulation)

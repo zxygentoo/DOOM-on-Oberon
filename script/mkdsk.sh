@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mkdsk.sh — assemble the bootable DOOM disk image (2c's delivery):
+# mkdsk.sh — assemble the bootable DOOM disk image:
 #   stock PO2013 source (extracted from the pinned Oberon-2020-08-18.dsk)
 #   + the emulator's oat/Mod AgentTool/AgentProtocol + Oberon.Mod boot-autoload
 #     patch (the serial agent channel — drives headless verification via the
@@ -16,7 +16,7 @@
 #   dune exec --root vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml \
 #     bin/risc.exe -- "$PWD/_out/DOOM.dsk"
 #
-# Real hardware (Nexys 4, the 2a bitstream): the .dsk is a filesystem-only image
+# Real hardware (Nexys 4, the board bitstream): the .dsk is a filesystem-only image
 # (first word 0x9B1EA38D); BootLoad reads the FS from SD block 0x80000 (BootLoad.Mod
 # FSoffset), image byte 0 = block 0x80002 (the emulator's disk.ml applies the same
 # rebase in software). Raw device, no partitioning; SW0 off (on = serial boot):
@@ -53,9 +53,9 @@ patch --silent "$T/src/Oberon.Mod.txt" <"$EMU/oat/Mod/ProjectOberon/Oberon.Mod.p
 "$BIN/txt2ob.exe" "$T/src/Oberon.Mod.txt" >/dev/null
 rm "$T/src/Oberon.Mod.txt"
 
-# 2b. the raw-scancode tap (seam v2 input slice): Input.SetSink diverts the
-#     untranslated make/break stream to a registered client (DOOM.Window's
-#     point-to-play capture); NIL = stock behaviour, byte-identical
+# 2b. the raw-scancode tap: Input.SetSink diverts the untranslated make/break
+#     stream to a registered client (DOOM.Run -win's point-to-play capture);
+#     NIL = stock behaviour
 "$BIN/ob2txt.exe" "$T/src/Input.Mod" >/dev/null
 patch --silent "$T/src/Input.Mod.txt" <"$REPO/patch/oberon/Input.Mod.patch"
 "$BIN/txt2ob.exe" "$T/src/Input.Mod.txt" >/dev/null
@@ -66,11 +66,9 @@ for f in "$EMU/oat/Mod/Common/AgentProtocol.Mod" "$EMU/oat/Mod/ProjectOberon/Age
   rm "$T/src/$(basename "$f").txt"
 done
 
-# 3. the display mode's Oberon face + its demo client — both ship WITH the
-#    hardware they drive (the vendored host repo, board/nexys-4/Mod: one pin =
-#    design + emulator + driver + demo) — then our own system patch: DOOM.Mod +
-#    Input.Mod.patch, patch/oberon/ (the delta this repo applies to stock PO2013);
-#    compiled in dependency order (Halftone before its importers)
+# 3. Halftone.Mod and its demo client Mandel.Mod, which ship with the hardware
+#    (the host repo's board/nexys-4/Mod), then DOOM.Mod; build_po_image compiles
+#    in dependency order (Halftone before its importers)
 for m in Halftone.Mod Mandel.Mod; do
   cp "$REPO/vendor/oberon-risc-hardcaml/board/nexys-4/Mod/$m" "$T/src/$m.txt"
   "$BIN/txt2ob.exe" "$T/src/$m.txt" >/dev/null

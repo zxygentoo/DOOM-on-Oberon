@@ -1,20 +1,18 @@
-/* fixed.c — the m_fixed.c replacement (AGENT.md §4's second real trap).
+/* fixed.c — FixedDiv, replacing doomgeneric's m_fixed.c.
  *
- * doomgeneric's m_fixed.c is int64_t code — and the host-preprocessed .i files spell
- * int64_t as `long` (x86-64 stdint.h), which our ILP32 machdep legitimately sizes at
- * 32 bits: the tree's FixedMul compiled SILENTLY WRONG (the census caught it in the
- * disassembly — MUL's high word, sitting right there in H, never read). So m_fixed is
- * replaced wholesale, exactly as planned: doomcc skips m_fixed.i, FixedMul expands as
- * the ABI §5 linker intrinsic (MUL + MOV' from H + repack, 6 instructions), and
- * FixedDiv lives here in C that never touches a 64-bit value.
+ * m_fixed.c is int64_t code, and the host-preprocessed .i files spell int64_t as
+ * `long` (x86-64 stdint.h), which our ILP32 target sizes at 32 bits: it would
+ * compile silently wrong. So doomcc skips m_fixed.i, FixedMul expands as the ABI §5
+ * linker intrinsic (MUL, then MOV' of the high word from H, then a repack: 6
+ * instructions), and FixedDiv lives here, in C that never touches a 64-bit value.
  *
- * FixedDiv = (a<<16)/b with a 48-bit dividend the 32/32 divider can't take: one
- * hardware division gives the integer part and its remainder, then 16 restoring steps
- * produce the fraction bits — ~200 cycles, inside the plan's 200-300 estimate. The
- * overflow guard is doomgeneric's own (saturate when |a|>>14 >= |b|), and it bounds
- * the quotient below 2^30, so the 16 shifts can't overflow. All magnitudes run
- * unsigned (0u - x negates INT_MIN safely); C's truncation = floor on magnitudes,
- * sign applied last — matching the int64_t original bit for bit. */
+ * FixedDiv = (a<<16)/b, a 48-bit dividend the 32/32 divider can't take: one hardware
+ * division gives the integer part and its remainder, then 16 restoring steps
+ * produce the fraction bits (~200 cycles). The overflow guard is doomgeneric's own
+ * (saturate when |a|>>14 >= |b|), and it bounds the quotient below 2^30, so the 16
+ * shifts can't overflow. Magnitudes run unsigned (0u - x negates INT_MIN safely);
+ * truncation = floor on magnitudes, sign applied last — bit for bit the int64_t
+ * original. */
 
 typedef int fixed_t;
 

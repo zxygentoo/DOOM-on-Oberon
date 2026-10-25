@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_oracles.sh — the emulator oracle set (`make check`, AGENT.md 1d). One
+# check_oracles.sh — the emulator oracle set (`make check`). One
 # deterministic -timedemo demo1 run on each side of the differential:
 #   host    the golden generator: plain gcc -m32 over the same patched DOOM
 #           and THE SHIPPED libc/dither.c (make golden — no CIL, no doomcc);

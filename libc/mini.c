@@ -1,37 +1,29 @@
-/* mini.c — the mini-libc (AGENT.md 1c), part 1: the no-varargs core.
+/* mini.c — the mini-libc core: mem*, str*, a bump malloc, the glibc ctype/errno
+ * seam, and vsnprintf/snprintf. stdio.c builds the files and the console on it.
  *
- * Plain C, preprocessor-free (no includes: it parses directly and owns its types —
- * size_t is unsigned int under ILP32), compiled by doomcc like any other translation
- * unit and merged by Mergecil. Every function here is differential-jig-tested against
- * the host's real glibc: our memcpy, compiled by our backend, running in the emulator,
- * diffed against the genuine article.
+ * Plain C, preprocessor-free (no includes; it declares its own types), compiled by
+ * doomcc and merged with the DOOM units like any other. The jig diffs every function
+ * here against the host's glibc: our code, compiled by our backend and run in the
+ * emulator, against the genuine article.
  *
- * The heap is a bump allocator over [__heap_base, __heap_end) — two extern globals the
- * ENVIRONMENT defines, because the bounds differ per world: the jig's emulator RAM vs
- * ABI §8's arena (libc/doom_heap.c). free() is a no-op: DOOM zone-allocates internally
- * out of one big block, and the few real malloc sites never free-and-reuse at a scale
- * that matters (the plan's "one-big-block malloc").
- *
- * Deferred to later slices: the printf family (needs the varargs compiler slice),
- * fopen/fread & co (the memory-backed w_file over the preloaded WAD). */
+ * The heap is a bump allocator over [__heap_base, __heap_end), two externs the
+ * environment defines (doom_heap.c on the machine, the jig inside emulator RAM).
+ * free() is a no-op: DOOM zone-allocates out of one big block, and its few other
+ * malloc sites never free and reuse at a scale that matters. */
 
-/* size_t, textually as the host-preprocessed .i files typedef it (unsigned long —
- * 32-bit under our ILP32 machdep): Mergecil unifies types STRUCTURALLY BY NAME, so a
- * plain `unsigned` here would be "two distinct globals" against the tree's glibc
- * prototypes. */
+/* size_t spelled as the host-preprocessed .i files typedef it (unsigned long, 32-bit
+ * under ILP32): Mergecil matches types by name, so a plain `unsigned` here would
+ * clash ("two distinct globals") with the tree's glibc prototypes. */
 typedef unsigned long size_t;
-
-/* ---- mem* ---- */
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
     char *d = dst;
     const char *s = src;
-    /* Word fast path — the 1d flat profile found the byte loop carrying 22%
-     * of every frame (I_FinishUpdate's 64 KB screen copy and friends, ~5
-     * instrs/byte). Bulk copies in DOOM are word-aligned in practice; when
-     * both pointers are, move 4 bytes per iteration and leave the tail (and
-     * any unaligned call) to the byte loop below. */
+    /* word fast path: DOOM's bulk copies are word-aligned in practice, and the
+     * byte loop costs ~5 instrs/byte. When both pointers are aligned, move 4
+     * bytes per iteration and leave the tail (and any unaligned call) to the
+     * byte loop below. */
     if ((((unsigned)d | (unsigned)s) & 3u) == 0) {
         unsigned *dw = (unsigned *)d;
         const unsigned *sw = (const unsigned *)s;
@@ -47,7 +39,7 @@ void *memmove(void *dst, const void *src, size_t n)
 {
     char *d = dst;
     const char *s = src;
-    if (d < s) {                       /* pointer compare: unsigned, exact (s5.2) */
+    if (d < s) {
         while (n) { *d++ = *s++; n--; }
     } else {
         while (n) { n--; d[n] = s[n]; }  /* backward: overlap-safe when d > s */
@@ -61,8 +53,6 @@ void *memset(void *dst, int c, size_t n)
     while (n) { *d++ = (char)c; n--; }
     return dst;
 }
-
-/* ---- str* ---- */
 
 size_t strlen(const char *s)
 {
@@ -149,8 +139,6 @@ char *strncpy(char *dst, const char *src, size_t n)
     return dst;
 }
 
-/* ---- ctype-ish / conversions ---- */
-
 int toupper(int c)
 {
     if (c >= 'a' && c <= 'z') return c - 32;
@@ -177,10 +165,9 @@ int atoi(const char *s)
     return r;
 }
 
-/* the byte-swap builtins (i_swap.h's SwapBE path): defined as ordinary functions —
-   CIL kept the calls symbolic, our linker resolves them by name like any other. The
-   signatures match CIL's own builtin registrations exactly (short/int — probed, not
-   guessed); the math runs unsigned internally so the shifts are logical. */
+/* CIL leaves the byte-swap builtins (i_swap.h's SwapBE path) as ordinary calls, so
+   they are defined here, with the signatures CIL registers for them (short/int). The
+   math runs unsigned so the shifts are logical. */
 short __builtin_bswap16(short v)
 {
     unsigned int u = (unsigned short)v;
@@ -192,8 +179,6 @@ int __builtin_bswap32(int v)
     unsigned int u = (unsigned int)v;
     return (int)((u << 24) | ((u & 0xFF00) << 8) | ((u >> 8) & 0xFF00) | (u >> 24));
 }
-
-/* ---- the one-big-block malloc ---- */
 
 extern char *__heap_base;              /* the environment owns the bounds */
 extern char *__heap_end;
@@ -243,9 +228,7 @@ char *strdup(const char *s)
     return p;
 }
 
-/* ---- the glibc ctype/errno seam (host-header artifacts) ----
- *
- * The host-preprocessed .i files expand isspace()/isdigit() & co. into
+/* The host-preprocessed .i files expand isspace()/isdigit() & co. into
  * (*__ctype_b_loc())[c] & _ISxxx — glibc's classification-table protocol — and
  * errno into *__errno_location(). The table is 384 unsigned shorts indexed from
  * -128 (so isspace(EOF) is legal; the negative side and 128..255 read 0 in the
@@ -294,9 +277,7 @@ int *__errno_location(void)
     return &__errno_storage;
 }
 
-/* ---- the printf core: vsnprintf/snprintf (varargs slice) ----
- *
- * va_list is CIL's __builtin_va_list — one pointer into the caller's home area, where
+/* va_list is CIL's __builtin_va_list — one pointer into the caller's home area, where
  * our marshaller leaves every argument in memory (ABI §3's "varargs for free"). The
  * emitters share bounded-buffer state through a pointed-to struct: passing buf/cap/pos
  * separately would push helpers past the naive allocator's 6 register homes.
@@ -337,9 +318,8 @@ static void sn_str(sn_t *st, const char *s, int prec, int width, int left)
 /* flags bits: 1 = negative (emit '-'), 2 = zero-pad, 4 = left-align, 8 = uppercase.
  * prec >= 0 is the C99 integer precision: minimum digit count (zero-extended),
  * and it defeats the '0' flag; %.0d of 0 prints no digits (glibc-exact). The
- * digit buffer caps the effective precision at 11 — past any 32-bit value, and
- * DOOM's only precision use is the STCFN%.3d font names (HU_Init, found at 1d
- * bring-up: unpadded "STCFN33" missed the lump). */
+ * digit buffer caps the effective precision at 11 — past any 32-bit value; DOOM's
+ * only precision use is HU_Init's STCFN%.3d font lump names. */
 static void sn_num(sn_t *st, unsigned v, unsigned base, int flags, int width, int prec)
 {
     char d[12];
