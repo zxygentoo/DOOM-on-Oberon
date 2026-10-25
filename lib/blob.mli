@@ -1,11 +1,9 @@
-(** The blob envelope (ABI §7/§8): section layout at a base address, the fixed 64-byte
+(** The blob envelope (ABI §7, §8): section layout at a base address, the 64-byte
     header, the additive checksum, and the file bytes the stub loads into himem.
 
-    Sections, in file order: header (64 B) · code · data; bss is *reserved, not
-    emitted* — the header carries its absolute start and length and the stub zeroes the
-    range. DB points at [data_base]; the flat image links at [base] with no relocation
-    (v1). [base] is ABI §8's BLOB_BASE 0x100000 everywhere that means the real machine —
-    including the tests, since the vendored emulator's himem widening (f52d904). *)
+    Sections, in file order: header (64 B) · code · data. The bss is reserved, not
+    emitted — the header carries its absolute start and length and the stub zeroes the
+    range. DB points at [data_base]; the image links at [base] with no relocation. *)
 
 type layout =
   { base : int (** BLOB_BASE: where the header lands *)
@@ -20,11 +18,10 @@ type layout =
     ([data_size] and [image length − data_size]); both are word multiples. *)
 val layout : base:int -> code_words:int -> data_size:int -> bss_size:int -> layout
 
-(** Render the blob file: header (magic, version 1, lengths, entry offsets, checksum —
-    additive u32 over the image words after the header, ABI §7) + encoded code + data.
-    [entries] are the Init/Tick/KeyIn offsets from [base] (0 = not present yet — the
-    crt0 thunks are the hello-blob slice). [data] must be exactly the data section
-    ([Globals.data_size] bytes, relocs already patched absolute). *)
+(** Render the blob file: header (magic, version, lengths, entry offsets, checksum —
+    additive u32 over the image words after the header) + encoded code + data.
+    [entries] are the Init/Tick/KeyIn offsets from [base] (0 = absent). [data] must be
+    exactly the data section ([Globals.data_size] bytes, relocs already patched). *)
 val emit
   :  layout:layout
   -> code:Emu.Risc5_isa.instr list

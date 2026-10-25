@@ -1,15 +1,16 @@
-(** The pre-codegen checks (ABI §4 + the §9 spike census), shared by {!Globals} and
-    {!Fundec}: the single refusal channel — raised instead of miscompiling. *)
+(** The pre-codegen checks shared by {!Globals} and {!Fundec}, and the two ways
+    compilation stops. *)
 
-(** Raised for any construct the current slices do not handle; the message names the
-    ABI rule violated or the slice responsible. doomcc histograms these messages. *)
+(** Raised for a construct the backend refuses rather than miscompile; the message
+    names the reason, usually an ABI rule. doomcc turns the function into a trap and
+    counts refusals by message. *)
 exception Unsupported of string
 
 (** [unsupported fmt ...] raises {!Unsupported} with a formatted message. *)
 val unsupported : ('a, unit, string, 'b) format4 -> 'a
 
 (** Raised when a backend invariant breaks — a bug in doomcc, never a property of the
-    input. Deliberately NOT a refusal: doomcc fails the build rather than trap the
+    input. Deliberately not a refusal: doomcc fails the build rather than trap the
     function, so a backend bug can't ship as a quiet self-loop. *)
 exception Internal of string
 

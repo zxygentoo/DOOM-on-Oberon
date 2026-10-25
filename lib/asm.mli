@@ -1,8 +1,6 @@
-(** The 1a eDSL prelude: thin builders over {!Linker.frag} / {!Emu.Risc5_isa.instr},
-    the shared vocabulary of every hand-instr module ({!Crt0}, {!Runtime},
-    {!Drawers}, bin/emit_rom). The bodies stay hand-scheduled per module; only the
-    constructors live here, so the encoding idioms — above all [load_const2]'s
-    fixed 2-word discipline — have a single definition. *)
+(** Builders for hand-written instruction streams, shared by {!Crt0}, {!Runtime},
+    {!Drawers} and bin/emit_rom: thin constructors over {!Linker.frag} and
+    {!Emu.Risc5_isa.instr}. *)
 
 val ins : Emu.Risc5_isa.instr -> Linker.frag
 
@@ -31,7 +29,7 @@ val bcc_not : Emu.Risc5_isa.cond -> int -> Linker.frag
 (** [B LNK] — the frame-less leaf return. *)
 val ret : Linker.frag
 
-(** The fixed 2-word absolute-constant load ({!Linker.load_const_pair} as frags):
-    ALWAYS two words, even for a zero high half — a hand stream's size must not
-    depend on values that exist only after layout. *)
+(** The 2-word absolute-constant load ({!Linker.load_const_pair} as frags): always two
+    words, even for a zero high half — a hand stream's size must not depend on values
+    that exist only after layout. *)
 val load_const2 : Emu.Risc5_isa.reg -> int -> Linker.frag list

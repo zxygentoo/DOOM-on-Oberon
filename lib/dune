@@ -1,28 +1,18 @@
-; doomcc_core — the compiler (AGENT.md 1b): preprocessed C -> risc5_isa instrs.
-;   Check    : the shared refusal channel (Unsupported) + ABI §4 banned-type checks
-;   Frontend : goblint-cil parse + the RISC5 machdep (ABI §4, ILP32/LE/char-unsigned)
-;   Globals  : static-storage placement + the data/bss image (3b data-layout embryo)
-;   Fundec   : per-function compilation (leaves: straight-line, control flow, scalar globals)
-; Depends on goblint-cil (the front end) and emu (Risc5_isa, the instr type we emit).
-; The jig that exercises all of this lives in test/ (runner + test_jig).
-
-; abi_constants — the ABI constants page (ABI.md §7/§8/§11) as code: himem layout,
-; SHARED field offsets, blob header offsets. Zero-dep on purpose so the emulator
-; harnesses (bin/run_blob, bin/run_dsk) share it without pulling the compiler in.
-; Consumers alias it `module AC = Abi_constants`.
+; abi_constants: the ABI.md constants, dependency-free so the emulator harnesses
+; use them without the compiler
 
 (library
  (name abi_constants)
  (modules abi_constants))
 
-; run_harness — plumbing shared by the run_* emulator harnesses (bin/run_blob,
-; bin/run_dsk): CLI fail, file reads, the write-only UART, and the PGM frame
-; dump (the single statement of the fb pixel encoding).
+; run_harness: plumbing shared by bin/run_blob and bin/run_dsk
 
 (library
  (name run_harness)
  (modules run_harness)
  (libraries emu))
+
+; doomcc_core: the compiler — CIL front end, codegen, linker, blob envelope
 
 (library
  (name doomcc_core)

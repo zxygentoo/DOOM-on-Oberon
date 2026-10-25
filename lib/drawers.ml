@@ -1,11 +1,9 @@
-(* The 1a hot-loop drawer. See drawers.mli; the dither algorithm spec is
-   libc/dither.c's __dg_dither, which stays the oracle on both flanks (gcc in the
-   jig, glibc-built host golden) — this is that C, register-scheduled by hand.
+(* __dg_dither: libc/dither.c's C, register-scheduled.
 
    void __dg_dither(const u8 *src, int w, int h, u32 *dst, int stride)
      args: R0=src  R1=w  R2=h  R3=dst  stride at [entry SP + 16] (ABI §3, arg 5)
 
-   Register plan (leaf; R6-R11 + LNK saved to the frame):
+   Register plan (R6-R11 + LNK saved to the frame):
      R0 src cursor (advances linearly through all w*h bytes)
      R1 the constant 0 (ADD' carry pickup) — w parks in a frame slot first
      R2 rows remaining          R3 dst row cursor (byte address)
@@ -13,22 +11,21 @@
      R5 DB+lum_off              R6 DB+bn_off
      R7 chunks remaining in row R8 out cursor   R9 out2 = out + stride4
      R10 bits                   R11 thr cursor
-     R12, R15 pixel temps (R12 blob-internal; LNK restored from frame at exit)
+     R12, R15 pixel temps (LNK restored from the frame at exit)
    Frame (SUB SP,44): +0 row_thr  +4 y63  +8 w  +12..36 R6..R11  +40 LNK
      (stride, arg 5, sits at [SP+60] = entry SP + 16.)
 
    The pixel step, k = 15 downto 0 (descending so LSL-by-2 composes the pairs in
-   bit order — pixel 0 lands at bits 1:0, the Oberon leftmost convention):
+   bit order — pixel 0 lands at bits 1:0, the leftmost):
      LDB R12,[R0+k]      source palette index
      ADD R12,R5,R12      &__dg_lum[s]
      LDB R12,[R12]       lum
      LDB R15,[R11+k]     thr
      SUB R15,R15,R12     C = (thr < lum) unsigned = lum > thr (strict, as C's >)
-     ADD' R15,R1,R1      R15 = 0+0+C (the s5.2 carry convention, materialized)
+     ADD' R15,R1,R1      R15 = 0+0+C: the carry, materialized
      LSL R12,R15,1 ; IOR R12,R12,R15     R12 = 3*C (the doubled pixel pair)
      LSL R10,R10,2 ; IOR R10,R10,R12
-   9 instrs/px; the SUB->ADD' pair is adjacent, so no intervening op disturbs C
-   (shifts/IOR set only N/Z; the ADD' itself re-sets C after the read). *)
+   The SUB->ADD' pair is adjacent, so nothing disturbs C between them. *)
 
 module R = Emu.Risc5_isa
 module L = Linker
@@ -127,17 +124,14 @@ let dither ~lum_off ~bn_off : L.obj =
   }
 ;;
 
-(* ---- R_DrawSpan / R_DrawColumn (drawers #2/#3) ----------------------------------
-   The r_draw.c bodies (RANGECHECK included — it is compiled into the shipped .i),
-   register-scheduled. Both share the shape: load the ds_*/dc_* state once into
-   registers (the C already hoists what it can; the remaining tax was pure naive
-   expression codegen), then a tight do-while. Logical >> is ROR+mask (s5.2b);
-   signed >> is ASR; the unsigned compares read C after SUB (s5.2). Loops run
-   count+1 iterations (C's post-decrement while (count--)).
+(* R_DrawSpan / R_DrawColumn: the r_draw.c bodies, RANGECHECK included (it is
+   compiled into the shipped .i). Both load the ds_*/dc_* state into registers once,
+   then run a tight do-while of count+1 iterations (C's while (count--)). Logical >>
+   is ROR+mask, signed >> is ASR, and the unsigned compares read C after SUB.
 
    Frame: SUB SP,36 — [0..15] the ABI §3 outgoing home area (live during the
-   RANGECHECK I_Error call), [16] R6, [20] R7, [24] LNK. I_Error never returns
-   (the port's setjmp-shaped exit), but the error block still parks after the BL. *)
+   RANGECHECK I_Error call), [16] R6, [20] R7, [24] LNK. I_Error never returns, but
+   the error block still parks after the BL. *)
 
 let bl_sym name = L.Call name
 let ldw_db a off = ldw a 13 off
@@ -322,14 +316,11 @@ let column ~off ~str : L.obj =
   }
 ;;
 
-(* ---- __dg_dither_fs (drawer #4, the legibility pass's out2 kernel) --------------
-   The C spec is dither.c's __dg_dither_fs: fullscreen 320x200 -> 1024x768, out2
-   decisions (two blue-noise rows per source line, alternating over the 3-4 output
-   rows), the sorted-cut rank trick per (bn row, word phase, slot). This is that C
-   register-scheduled: the compiled kernel pays ~120 instrs per slot re-deriving
-   multi-dim indices; here a slot is ~17-20 — the cut/mask slabs are base registers
-   and every slot's cut/mask/src offsets are IMMEDIATES in the unrolled pair body.
-   K-aware: 3-cut slots skip the padded 255 compare (it can never fire).
+(* __dg_dither_fs: dither.c's fullscreen kernel, register-scheduled — 320x200 ->
+   1024x768, two blue-noise rows per source line alternating over the 3-4 output rows,
+   the sorted-cut rank per (bn row, word phase, slot). The cut/mask slabs are base
+   registers and every slot's cut/mask/src offsets are immediates in the unrolled pair
+   body; 3-cut slots skip the padded 255 compare, which can never fire.
 
    void __dg_dither_fs(const u8 *src, u32 *dst, int stride)
      args: R0=src  R1=dst  R2=stride (words)
@@ -347,7 +338,7 @@ let column ~off ~str : L.obj =
      LDB R12,[R0+s]; ADD R12,R5,R12; LDB R9,[R12]     lum
      MOV R15,0                                         rank
      Kx: LDB R12,[R3,4s+c]; SUB R12,R12,R9; ADD' R15,R15,0
-         (C = cut < lum strict, the s5.2 convention; loads leave C alone)
+         (C = cut < lum strict; loads leave C alone)
      LSL R15,2; ADD R15,R4,R15; LDW R12,[R15,20s]; IOR R10,R10,R12
    A-pass rows land at dst and dst+2*stride4; B-pass at dst+stride4 and b2 —
    b2 = dst+3*stride4 when the line deals 4 rows, else = the B row again (a
@@ -488,17 +479,10 @@ let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
   }
 ;;
 
-(* ---- __dg_frame_copy (drawer #5, feat/halftone) --------------------------------
-   The C spec is dither.c's __dg_frame_copy: the hw-scanout path's per-frame block
-   copy, 16000 words, both ends word-aligned by contract. Compiled it pays ~20
-   instrs/word (naive fixed-home codegen); here 1000 iterations of a 16-pair body
-   with immediate offsets run 36 instrs per 16 words (~2.3/word).
+(* __dg_frame_copy: 1000 iterations of a 16-pair body with immediate offsets.
 
    void __dg_frame_copy(const u8 *src, u8 *dst)
-     args: R0=src  R1=dst
-
-   Leaf, no frame: clobbers R0-R3 only (all caller-saved). R2 = iterations left,
-   R3 = the word in flight. *)
+     args: R0=src  R1=dst; R2 = iterations left, R3 = the word in flight *)
 
 let frame_copy : L.obj =
   let l_loop = 0 in
@@ -517,8 +501,7 @@ let frame_copy : L.obj =
   }
 ;;
 
-(* Build every drawer whose data symbols resolve; each is independent — a sample
-   (or a tree) lacking a drawer's globals simply keeps its compiled version. *)
+(* a sample (or a tree) lacking a drawer's globals keeps its compiled version *)
 let build ~(off : string -> int option) ~(str : string -> int option) : L.obj list =
   let req f name =
     match f name with
@@ -543,4 +526,3 @@ let build ~(off : string -> int option) ~(str : string -> int option) : L.obj li
   @ try_build column
   @ [ frame_copy ]
 ;;
-(* consults no symbols — nothing to fail on *)

@@ -1,12 +1,6 @@
-(* WAD chunking for the stub loader (AGENT.md §3). See wad.mli. *)
-
-(* FileDir.Mod: SecTabSize=64 direct + ExTabSize=12 × IndexSize=256 indirect
-   1 KB sectors; HeaderSize=352 lives in the first data sector. *)
 let po_file_cap = (64 * 1024) - 352 + (12 * 256 * 1024)
 let default_chunk_size = 3 * 1024 * 1024
 let chunk_name base i = Printf.sprintf "%s.%d" base i
-
-(* DOOM.Mod: WHILE (i <= 9) & (len >= 0) — one decimal digit per chunk name *)
 let max_chunks = 10
 
 let check_chunk_size ~len chunk_size =

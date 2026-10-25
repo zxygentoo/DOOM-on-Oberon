@@ -1,32 +1,18 @@
-(* The pre-codegen checks (ABI §4 + the §9 spike census), shared by Globals and
-   Fundec: [Unsupported] is the single refusal channel — raise instead of miscompiling.
-   Each message names the ABI rule violated or the slice that will handle the construct;
-   doomcc histograms these messages into the slice worklist. *)
-
 module C = GoblintCil
 
 exception Unsupported of string
 
 let unsupported fmt = Printf.ksprintf (fun s -> raise (Unsupported s)) fmt
 
-(* the other channel: a broken backend invariant (a doomcc bug) — never a refusal *)
 exception Internal of string
 
 let internal fmt = Printf.ksprintf (fun s -> raise (Internal s)) fmt
 
-(* A byte-aligned :8 bitfield is degenerate — GCC's little-endian ABI allocates
-   bitfields LSB-first within the storage unit, so an 8-bit field at bit offset 8k
-   IS byte k of the struct: one addressable byte, served by LDB/STB (the s3.3
-   machinery) with no read-modify-write. DOOM's only live bitfields have exactly
-   this shape (struct color's b/g/r/a — the dither-LUT feed). Anything else —
-   other widths, or an :8 pushed off-byte by a preceding field — stays banned. *)
 let byte_bitfield (fi : C.fieldinfo) =
   fi.fbitfield = Some 8
   && fst (C.bitsOffset (C.TComp (fi.fcomp, [])) (C.Field (fi, C.NoOffset))) mod 8 = 0
 ;;
 
-(* Reject the ABI §4 banned types (float / 64-bit / non-degenerate bitfield)
-   wherever a type enters the pipeline: function signatures, locals, globals. *)
 let rec check_unsupported_types (t : C.typ) =
   match t with
   | C.TInt ((C.ILongLong | C.IULongLong), _) ->

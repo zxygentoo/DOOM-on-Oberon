@@ -1,43 +1,34 @@
-(* The runtime helpers (ABI §5), hand-rolled over risc5_isa — the 1a eDSL's first
-   drawer. The division family bridges the two DIV gaps (AGENT.md §4):
+(* The division family bridges two gaps between C and the hardware divider:
 
-   - Semantics: C99 mandates truncation toward zero (-7/2 = -3, remainder takes the
-     dividend's sign); RISC5 DIV is *floored* (-7/2 = -4, H = remainder in [0, divisor)).
-     The two agree unless the signs differ AND the division is inexact — then
-     trunc = floor + 1 and the C remainder is H - divisor.
-   - Envelope: the hardware divider sign-handles only the *dividend*; the divisor must
-     be in [1, 2^31-1] (divider.ml's own qcheck encodes it — outside it the RTL's
-     shift-subtract loop returns garbage, not floored results). So a negative divisor
-     is negated first and the quotient's sign fixed after; INT_MIN (un-negatable:
-     -INT_MIN wraps to itself) and 0 (C UB; we return 0 deterministically rather than
-     trust the divider) get their own branches. No helper ever issues an
-     out-of-envelope DIV.
-   - Unsigned: DIV' (the u-variant) divides *unsigned* exactly for any 32-bit dividend,
-     same divisor envelope — so __udiv/__umod need only the divisor-top-bit-set case
-     (quotient is 0 or 1 by one unsigned compare, ABI §5's "slow path") on top of a
-     single DIV'.
+   - Semantics: C truncates toward zero (-7/2 = -3, the remainder takes the dividend's
+     sign); RISC5 DIV floors (-7/2 = -4, H = remainder in [0, divisor)). They agree
+     unless the signs differ and the division is inexact — then trunc = floor + 1 and
+     the C remainder is H - divisor.
+   - Envelope: the divider sign-handles only the dividend; the divisor must be in
+     [1, 2^31-1], and outside it the result is garbage, not floored. So a negative
+     divisor is negated first and the quotient's sign fixed after; INT_MIN (which
+     can't be negated) and 0 (C UB; we return 0 rather than trust the divider) get
+     their own branches. No helper issues an out-of-envelope DIV.
+   - Unsigned: DIV' (u = 1) divides unsigned exactly for any dividend, same divisor
+     envelope, so __udiv/__umod add only the top-bit-set divisor case.
 
-   Contract (ABI §5): standard calls — a = R0, b = R1, result R0; caller-saved
-   (R0-R5 + H + flags) clobbered (these bodies touch only R0-R3 + H); callee-saved,
-   SP, LNK-discipline all standard; frame-less leaves, return via B LNK. Every
-   register-writing ALU op sets N/Z from its result (Mov included), which is what the
-   Bcc's after each Mov read. *)
+   Every register-writing ALU op sets N/Z from its result, MOV included — that is what
+   the Bcc after each "flags <-" MOV reads. *)
 
 module R = Emu.Risc5_isa
 module L = Linker
 open Asm
 
-(* R[d] <- H (Mov u, register form, v=0) — the divider's remainder / MUL's high word. *)
+(* R[d] <- H: MOV' register form — the divider's remainder, MUL's high word *)
 let mov_h d = alu ~u:true R.Mov d 0 (R.Reg 0)
 
-(* R[d] <- 0x80000000 = INT_MIN (Mov u, immediate form: the 16-bit field lands high). *)
+(* R[d] <- INT_MIN: MOV' immediate form, the 16-bit field lands high *)
 let mov_int_min d = alu ~u:true R.Mov d 0 (R.Imm 0x8000)
 
-(* __div: R0 = trunc(R0 / R1). Branch on the divisor's sign, then the dividend's; the
-   b > 0 paths use the hardware's own floored handling of a negative dividend and fix
-   floor -> trunc by +1 when the remainder is nonzero; the b < 0 paths divide by -b and
-   negate the quotient (trunc is sign-symmetric; floor is not — which is why the fix
-   happens before the negate). *)
+(* __div: the b > 0 paths use the hardware's floored handling of a negative dividend
+   and fix floor -> trunc by +1 when the remainder is nonzero; the b < 0 paths divide
+   by -b and negate (trunc is sign-symmetric, floor is not — so the fix comes before
+   the negate). *)
 let div_obj : L.obj =
   let l_bneg = 0
   and l_aneg = 1
@@ -100,11 +91,9 @@ let div_obj : L.obj =
   }
 ;;
 
-(* __mod: R0 = R0 % R1, C semantics — the remainder takes the *dividend's* sign and
-   pairs with __div so (a/b)*b + a%b = a. Key identity: a % b = a % |b| for any b sign
-   (substitute b = -|b| into a - trunc(a/b)*b and the two negations cancel), so one
-   |b| staging serves both divisor signs; then H is the answer for a >= 0, and
-   H - |b| (when H <> 0) for a < 0. *)
+(* __mod: a % b = a % |b| for either sign of b (substitute b = -|b| into
+   a - trunc(a/b)*b and the negations cancel), so one |b| serves both; then H is the
+   answer for a >= 0, and H - |b| (when H <> 0) for a < 0. *)
 let mod_obj : L.obj =
   let l_go = 0
   and l_aneg = 1
@@ -146,10 +135,8 @@ let mod_obj : L.obj =
   }
 ;;
 
-(* __udiv: R0 = R0 /u R1. DIV' (u = 1) divides unsigned exactly for ANY 32-bit dividend
-   as long as the divisor is in [1, 2^31-1] — one instruction covers everything except
-   a top-bit-set divisor, where the quotient can only be 0 or 1 (a < 2*b always), decided
-   by one unsigned compare (after SUB, C is set iff a <u b — the s5.2 carry convention). *)
+(* __udiv: one DIV' unless the divisor's top bit is set — then the quotient is 0 or 1
+   (a < 2b always), decided by one compare: after SUB, C is set iff a <u b. *)
 let udiv_obj : L.obj =
   let l_bbig = 0
   and l_zero = 1 in
@@ -172,9 +159,8 @@ let udiv_obj : L.obj =
   }
 ;;
 
-(* __umod: R0 = R0 %u R1 — same split as __udiv: DIV' then read H, or for a
-   top-bit-set divisor r = a - b when a >=u b (that difference is already in the
-   compare's destination), else a itself. *)
+(* __umod: DIV' then H; for a top-bit-set divisor, r = a - b when a >=u b (already in
+   the compare's destination), else a. *)
 let umod_obj : L.obj =
   let l_bbig = 0
   and l_ret = 1
@@ -200,17 +186,13 @@ let umod_obj : L.obj =
   }
 ;;
 
-(* __setjmp / __longjmp — the exit escape (ABI §7: exit/I_Error return through
-   the thunk, never halt). A jmp_buf on this ABI is exactly the callee-saved
-   state: R6-R11 (the homes), R12 (FP), R14 (SP), R15 (LNK) — nine words at the
-   buffer in R0. DB (R13) has no slot: crt0 sets it once and nothing ever writes
-   it. __longjmp's "second return" is just the reload: the restored LNK IS the
-   __setjmp call site, so B LNK lands there with R0 = val — and the entry
-   function's own epilogue then unwinds normally from its untouched frame (SP
-   came back with the buffer). The caller guarantees val <> 0 (exit passes 1).
-   Under naive allocation this is C-clean, not just classically clean: every
-   live-across-call local sits in a home register, so a longjmp restores locals
-   to their setjmp-time values — the shape C's semantics permit. *)
+(* exit/I_Error unwind to the entry thunk through these (ABI §7). A jmp_buf is the
+   callee-saved state; DB has no slot (crt0 sets it once). __longjmp's "second return"
+   is just the reload: the restored LNK is the __setjmp call site, and SP comes back
+   with it. The caller guarantees val <> 0.
+   Correct for C locals only because the allocator keeps every value live across a
+   call in a callee-saved home, so a longjmp restores locals to their setjmp-time
+   values — an allocator that caches values elsewhere would break this. *)
 let jmp_buf_regs = [ 6; 7; 8; 9; 10; 11; 12; 14; 15 ]
 
 let setjmp_obj : L.obj =
@@ -225,16 +207,13 @@ let longjmp_obj : L.obj =
   { L.name = "__longjmp"
   ; frags =
       List.mapi (fun i r -> ldw r 0 (4 * i)) jmp_buf_regs
-      @ [ alu R.Mov 0 0 (R.Reg 1); ret (* ret = B LNK: the restored R15 *) ]
+      @ [ alu R.Mov 0 0 (R.Reg 1); ret (* B LNK: the restored R15 *) ]
   }
 ;;
 
-(* __lsr: R0 = R0 >>u R1 — the variable-count logical shift (s5.2b inlines the
-   constant-count case). RISC5 has no LSR, so: ROR right by n (the n high bits
-   wrap around to the top), then mask them off with (1 << (32-n)) - 1. n = 0 is
-   the corner — the mask expression would shift by 32 — so it returns identity
-   over one branch. Counts >= 32 are C UB; ROR/LSL read the low 5 bits of a
-   register count, so they alias mod 32. *)
+(* __lsr: ROR by n (the n low bits wrap to the top), then mask them off with
+   (1 << (32 - n)) - 1. n = 0 would shift the mask by 32, so it returns early. Counts
+   >= 32 are C UB; register-count shifts alias mod 32. *)
 let lsr_obj : L.obj =
   let l_ret = 0 in
   { L.name = "__lsr"

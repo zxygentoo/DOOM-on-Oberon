@@ -1,7 +1,4 @@
-(* Shared plumbing for the emulator harnesses (run_blob / run_dsk): CLI failure,
-   whole-file reads, the write-only UART shape, and the PGM frame dump — the
-   pixel-format-critical encoding (fb bottom-up, bit 0 leftmost) stated once, so
-   the harness legs cannot diverge on it. *)
+(* Shared by bin/run_blob and bin/run_dsk. *)
 
 module M = Emu.Risc
 
@@ -13,8 +10,8 @@ let fail fmt =
     fmt
 ;;
 
-(* a 32-bit machine word as the signed C int it holds — the SHARED status and the
-   entry results are ints (exit(-1) must print as -1, not 4294967295) *)
+(** A 32-bit machine word as the signed int it holds: the SHARED status and the entry
+    results are C ints, so exit(-1) prints as -1. *)
 let signed32 w =
   let w = w land 0xFFFF_FFFF in
   if w land 0x8000_0000 <> 0 then w - 0x1_0000_0000 else w
@@ -25,7 +22,7 @@ let read_file path =
   | Sys_error e -> fail "%s" e
 ;;
 
-(* a write-only UART: tx always ready (status bit 1), rx never *)
+(** A write-only UART: tx always ready (status bit 1), rx never. *)
 let tx_serial write_byte =
   { Emu.Io.serial_read_status = (fun () -> 2)
   ; serial_read_data = (fun () -> 0)
@@ -33,9 +30,9 @@ let tx_serial write_byte =
   }
 ;;
 
-(* PGM P5: fb bottom-up flipped so the file reads top-down, bit 0 leftmost;
-   geometry comes from the machine itself (Risc.fb_width/fb_height). Rows are
-   staged in one buffer — a per-pixel output_char costs real time at 786k px. *)
+(** The framebuffer as a PGM (P5), flipped to read top-down — the one statement of the
+    machine's pixel encoding: lines stored bottom-up, bit 0 the leftmost pixel, 1 white.
+    Rows are staged in one buffer: a per-pixel output_char costs real time at 786k px. *)
 let dump_frame m path =
   let words = M.fb_width m
   and lines = M.fb_height m in

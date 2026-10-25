@@ -1,44 +1,6 @@
-(* Per-function compilation (AGENT.md 1b): one CIL fundec -> its unresolved {!Linker.obj},
-   for integer functions — straight-line code, if/while/for control flow
-   (comparisons lower to SUB + a conditional branch; {!Linker.link} lays the branches out to
-   PC-relative offsets), and word-sized memory through the s3.2 address calculus
-   ([gen_addr]): globals/statics off DB (ABI §2/§6), array indexing, struct fields,
-   deref chains, &global and array decay, and pointer arithmetic ([gen_ptr_arith] —
-   ptr±int scaled by the pointee size, pow-2 ptr−ptr), plus sub-word access (s3.3:
-   char/short via LDB/STB — halfwords composed from two bytes, no halfword op exists —
-   with sign/zero extension on loads, casts, and param entry). The minimal vertical the
-   differential jig exercises. Naive register allocation (ABI §2: a leaf may use R0-R11
-   freely; args and return in R0..) — every variable keeps a fixed home register, so
-   control-flow merge points need no reconciliation. Each function is a well-formed ABI
-   callee (s4.1a): a prologue/epilogue saves and restores the callee-saved regs (R6-R11) it
-   writes and returns through [B LNK] (ABI §3). Calls (s4.1b): a caller marshals args through
-   the home area into R0-R3 and BLs the named callee; a *non-leaf* keeps its homes in
-   callee-saved R6-R11 (they survive the call) and scratch in R0-R5, while a leaf keeps homes
-   R0.. (a zero-cost frame when it touches only R0-R5). Stack args (s4.2): a callee with >4
-   params sets FP = entry SP and loads args 5+ from FP+16.. into their homes; a caller with >4
-   args stages them past the home area (SP+16..) and sizes its outgoing area to the widest call
-   it makes (ABI §3). Variables that can't be a register (s4.3) — aggregate locals and
-   address-taken scalars, local or parameter (CIL's [vaddrof]) — get an SP-relative frame slot
-   (the locals region, between the outgoing area and the saves) and route through the same
-   memory calculus a global does, based at the slot instead of DB; an address-taken param keeps
-   its register home and the prologue spills it into the slot. A whole-struct assignment (s4.4) is a
-   byte-wise memory copy — alignment-agnostic, since these structs are often sub-word-aligned; by-value
-   struct args and returns never occur in DOOM (census) and stay refused. A comparison or [!] used
-   as a value (s5.1) materializes 0/1 by branching over two immediate loads — RISC5 has no
-   set-on-condition; signed compares read the overflow-aware N≠V, unsigned and pointer compares
-   the carry (s5.2). Unsigned [>>] (s5.2b) is ROR + mask — RISC5 has no logical shift right, so a
-   rotate then a mask of the low 32−n bits. switch / goto / break / continue (s5.3/s5.4) route
-   through per-statement backend labels: a switch is a compare-and-branch dispatch chain, goto and
-   continue a jump to a labeled statement. [/] and [%] (and non-pow-2 ptr−ptr) lower to Runtime
-   helper calls (ABI §5) through the div-area protocol ([gen_helper_call2]): a backend-generated
-   BL lands mid-expression, outside CIL's no-source-calls-in-expressions guarantee, so live
-   scratches are saved around it by hand. Anything outside the supported subset raises
-   [Check.Unsupported] — refuse to miscompile rather than guess. Each message names the later
-   slice that will handle it. *)
-
-module C = GoblintCil (* the CIL front-end AST *)
-module R = Emu.Risc5_isa (* the RISC5 instruction encoding we emit *)
-module L = Linker (* the unresolved frag stream + instr-level linker (ABI §6) *)
+module C = GoblintCil
+module R = Emu.Risc5_isa
+module L = Linker
 
 let unsupported = Check.unsupported
 let internal = Check.internal
@@ -49,64 +11,45 @@ let is_unsigned_int (t : C.typ) =
   | _ -> false
 ;;
 
-(* ---- registers (ABI §2). Leaf ⇒ R0..R11 usable; R12-R15 = FP/DB/SP/LNK. ---- *)
 type reg = int
 
 let return_reg = 0
 let max_reg = 11
+let first_callee_saved = 6
+let fp_reg = 12 (* FP = entry SP: incoming stack args at FP+16.. *)
+let db_reg = 13 (* DB: set once by crt0, never written *)
+let sp_reg = 14
+let lnk_reg = 15
 
-let first_callee_saved =
-  6 (* R6-R11 are callee-saved (ABI §2): save exactly what we write *)
-;;
-
-let fp_reg =
-  12 (* FP = entry SP; anchors incoming stack args at FP+16.. (ABI §2/§3, s4.2) *)
-;;
-
-let db_reg = 13 (* DB, the data base: set by crt0 (runner, in the jig), never written *)
-let sp_reg = 14 (* SP, full-descending, 4-aligned (ABI §2/§3) *)
-let lnk_reg = 15 (* LNK: BL writes it; a callee returns via [B LNK] (To_reg) *)
-
-(* Emission builds an unresolved {!Linker.frag} stream, not raw instrs — a branch's target
-   only gets a word address once the whole *program* is laid out, so [compile] hands the frags
-   to {!Linker.link} (labels/branches resolve there, alongside cross-function calls). *)
 type ctx =
-  { mutable rev_frags : L.frag list (* emitted frags, reversed *)
-  ; homes : (int, reg) Hashtbl.t (* varinfo.vid -> home register (register locals) *)
+  { mutable rev_frags : L.frag list
+  ; homes : (int, reg) Hashtbl.t (* vid -> home register *)
   ; slots : (int, int) Hashtbl.t
-    (* vid -> byte offset within the locals region, for a local that can't be a register:
-       an aggregate or an address-taken scalar (s4.3). Addressed SP-relative, [slots_base]+off *)
-  ; slots_base : int
-    (* SP-offset where the locals region starts (above the outgoing and div areas) *)
+    (* vid -> offset in the locals region: aggregates, address-taken scalars, spilled
+       locals and params *)
+  ; slots_base : int (* SP-offset of the locals region *)
   ; div_base : int
-    (* SP-offset of the div area (ABI §5 helper-call staging: 2 operand words + up to 6
-       scratch saves), between the outgoing area and the locals region; -1 when the
-       pre-scan found no helper-lowered construct, so a stray helper call fails loud *)
-  ; globals : Globals.t (* globals: vid -> DB-relative offset (+ skip reasons) *)
-  ; scratch_lo : reg (* low end of the scratch pool: above the homes (leaf), or the *)
-  ; scratch_hi : reg (* caller-saved R0-R5 for a non-leaf (homes then sit in R6-R11) *)
-  ; scratch_free : bool array (* is scratch register r free? (indexed by reg) *)
+    (* SP-offset of the div area (helper-call staging: 2 operand words + up to 6
+       scratch saves); -1 when the pre-scan found no helper, so a stray one fails loud *)
+  ; globals : Globals.t
+  ; scratch_lo : reg (* the pool is R[scratch_lo..scratch_hi], minus [home_regs] *)
+  ; scratch_hi : reg
+  ; scratch_free : bool array
   ; home_regs : bool array
-    (* which registers are homes (split shape): inside the widened scratch range but
-       permanently reserved — is_scratch/free_scratch must never treat them as pool *)
-  ; mutable next_label : int (* fresh-label counter (label 0 is [func_end]) *)
+    (* homes inside the scratch range (split shape): never pool registers *)
+  ; mutable next_label : int
   ; mutable loops : (int option * int) list
-    (* enclosing loops/switches, innermost first: (continue target, break target). A loop has
-       both; a switch has only a break (its [None] continue passes through to the loop above).
-       [break] takes the nearest entry's break; [continue] the nearest with a continue. *)
+    (* enclosing loops/switches, innermost first: (continue, break) targets. A switch
+       has no continue ([None]), so a continue passes through to the loop above. *)
   ; stmt_labels : (int, int) Hashtbl.t
-    (* CIL stmt [sid] -> backend label, for statements that are jump targets (case/default in a
-       switch, or a goto/label). Find-or-create, so a forward jump and its target agree. *)
-  ; func_end : int (* shared epilogue label every [return] branches to *)
-  ; is_vararg : bool (* the function's own type is variadic (va_start legality) *)
+    (* sid -> label, for jump-target statements (case/default, goto targets) *)
+  ; func_end : int
+  ; is_vararg : bool
   ; n_formals : int
-    (* named-parameter count: va_start anchors at FP + 4*n_formals — the slot after the
-       last named arg in the caller's home area, where the s4.1b marshaller left EVERY
-       argument in memory (the decoupled store-then-load), so the whole argument list
-       is contiguous at FP+0.. (ABI §3's "varargs for free") *)
+    (* va_start anchors at FP + 4*n_formals: callers store every argument to memory,
+       so the variadic ones follow the named ones there (ABI §3) *)
   ; mutable max_used : reg
-    (* highest register written (homes + scratch); the callee-saved
-                              save set is R[first_callee_saved..max_used] (ABI §2/§3) *)
+    (* highest register written: the save set is R[first_callee_saved..max_used] *)
   }
 
 let emit ctx i = ctx.rev_frags <- L.Ins i :: ctx.rev_frags
@@ -119,8 +62,7 @@ let new_label ctx =
 
 let place ctx l = ctx.rev_frags <- L.Label l :: ctx.rev_frags
 
-(* The backend label for a CIL jump-target statement (case/default/goto target), keyed by its
-   stable [sid] so a forward jump and its later-placed target resolve to the same label. *)
+(* keyed by [sid], so a forward jump and its later-placed target agree *)
 let label_of_stmt ctx (s : C.stmt) =
   match Hashtbl.find_opt ctx.stmt_labels s.sid with
   | Some l -> l
@@ -134,10 +76,8 @@ let bcc ctx cond neg l = ctx.rev_frags <- L.Bcc (cond, neg, l) :: ctx.rev_frags
 let jmp ctx l = ctx.rev_frags <- L.Jmp l :: ctx.rev_frags
 let call ctx name = ctx.rev_frags <- L.Call name :: ctx.rev_frags
 
-(* Raised (not [Unsupported]) when an expression needs more simultaneous scratch
-   registers than the pool holds: [compile] catches it, rewrites the function to
-   three-address form ([flatten_fundec]) and retries — the temporaries become
-   ordinary locals, which the landed spilling rungs park in frame slots. *)
+(* Not a refusal: [compile] catches it and retries over a three-address rewrite of
+   the function ([flatten_fundec]). *)
 exception Scratch_exhausted
 
 let alloc_scratch ctx =
@@ -155,9 +95,8 @@ let alloc_scratch ctx =
   r
 ;;
 
-(* Only R[scratch_lo..scratch_hi] are scratches — the homes and DB (R13) must never be
-   freed; DB would even index past scratch_free. The bounds let every consumer of an
-   address uniformly "free the base" (a no-op for DB and homes). *)
+(* homes and DB are never freed, so every address consumer can "free the base"
+   unconditionally *)
 let is_scratch ctx r = r >= ctx.scratch_lo && r <= ctx.scratch_hi && not ctx.home_regs.(r)
 let free_scratch ctx r = if is_scratch ctx r then ctx.scratch_free.(r) <- true
 
@@ -167,39 +106,29 @@ let home ctx (v : C.varinfo) =
   | None -> internal "unmapped local %s" v.vname
 ;;
 
-(* The single definition of "this variable lives in a register": a local (not a
-   global) that was never slotted (s4.3 aggregates/address-taken, spill rungs).
-   The seam a future allocator rung reimplements. *)
 let is_reg_local ctx (v : C.varinfo) = (not v.vglob) && not (Hashtbl.mem ctx.slots v.vid)
 
-(* A global's DB-relative offset. A [Globals]-skipped global re-raises its skip reason
-   here, attributing the refusal to each function that touches it; a vid the layout
-   never saw is a declaration with no definition anywhere — the linker/libc's problem. *)
+(* a skipped global refuses with its skip reason, landing on each function that
+   touches it *)
 let global_offset ctx (v : C.varinfo) =
   match Hashtbl.find_opt ctx.globals.Globals.offsets v.vid with
   | Some off -> off
   | None ->
     (match Hashtbl.find_opt ctx.globals.Globals.skipped v.vid with
      | Some why -> unsupported "%s" why
-     | None -> unsupported "extern global without a definition — 3b linker / mini-libc")
+     | None -> unsupported "extern global without a definition")
 ;;
 
-(* How a scalar memory access maps to RISC5 ops. There is no halfword op (LDW/LDB/STW/STB
-   only, ABI §1), so a 16-bit access is *composed* from two byte ops — that is why Half is
-   its own case, not a size. The bool is signedness, which drives the widening on a read:
-   - Word: LDW / STW.
-   - Byte s: LDB (zero-extends; sign-extend from bit 7 if [s]) / STB (truncates for free).
-   - Half s: two LDB, little-endian (hi<<8 | lo), +sign-extend if [s] / two STB.
-   Aggregates/float never reach a scalar load/store. *)
+(* There is no halfword op, so a 16-bit access is composed from two byte ops — Half
+   is its own case, not a size. The bool is signedness, for widening on a read. *)
 type access =
   | Word
   | Byte of bool
   | Half of bool
 
-(* The final Field of an lval, if it is a bitfield. The access width is a property
-   of the ACCESS, not the value type: a bitfield lval's type is the declared
-   uint32_t, which classify_access would read as Word — an LDW that reads the
-   neighboring fields, and worse, an STW that clobbers all three on every write. *)
+(* The access width belongs to the access, not the value type: a bitfield lval's type
+   is the declared uint32, which classify_scalar would make a Word — an STW that
+   clobbers the neighboring fields on every write. *)
 let rec final_bitfield : C.offset -> C.fieldinfo option = function
   | C.Field (fi, C.NoOffset) when fi.fbitfield <> None -> Some fi
   | C.Field (_, rest) | C.Index (_, rest) -> final_bitfield rest
@@ -214,9 +143,8 @@ let classify_scalar (lv : C.lval) : access =
   | C.TInt (ik, _) when C.bitsSizeOf t = 8 -> Byte (C.isSigned ik)
   | C.TInt (ik, _) when C.bitsSizeOf t = 16 -> Half (C.isSigned ik)
   | C.TComp _ | C.TArray _ ->
-    (* a whole aggregate never loads/stores as a scalar: a struct copy is intercepted in
-       gen_instr (s4.4), by-value struct args/returns are refused at the call boundary. So
-       reaching here is an aggregate used as a value in some other shape — unexpected. *)
+    (* struct copies are intercepted in gen_instr, by-value struct args and returns
+       refused at the call boundary *)
     unsupported "aggregate used as a scalar value — unexpected CIL shape"
   | C.TFloat _ -> unsupported "float (ABI §4: banned in blob v1)"
   | _ -> unsupported "memory access of unsupported type"
@@ -225,8 +153,8 @@ let classify_scalar (lv : C.lval) : access =
 let classify_access (lv : C.lval) : access =
   match final_bitfield (snd lv) with
   | Some fi when Check.byte_bitfield fi ->
-    (* one byte at bitsOffset/8 (gen_addr's fold): LDB zero-extends an unsigned
-       :8 for free; a signed :8 sign-extends like a signed char (s3.3b) *)
+    (* one byte at bitsOffset/8: LDB zero-extends an unsigned :8 for free; a signed
+       :8 sign-extends like a signed char *)
     (match C.unrollType fi.ftype with
      | C.TInt (ik, _) -> Byte (C.isSigned ik)
      | _ -> unsupported "bitfield of a non-integer type — unexpected CIL shape")
@@ -250,15 +178,14 @@ let check_word_offset off =
       off
 ;;
 
-(* ---- instruction builders ---- *)
 let alu ?(u = false) ?(v = false) op a b operand : R.instr =
   R.Alu { op; u; v; a; b; operand }
 ;;
 
-let mov_reg d s = alu R.Mov d 0 (R.Reg s) (* R[d] <- R[s] *)
+let mov_reg d s = alu R.Mov d 0 (R.Reg s)
 
-(* R[d] <- 32-bit constant n: one MOV if it fits a zero-extended 16-bit immediate,
-   else the canonical 2-word build ({!Linker.load_const_pair}). *)
+(* MOV's immediate zero-extends: anything past 0xFFFF, negatives included, takes the
+   2-word build *)
 let load_const ctx d n =
   let n = n land 0xFFFF_FFFF in
   if n <= 0xFFFF
@@ -266,9 +193,9 @@ let load_const ctx d n =
   else List.iter (emit ctx) (L.load_const_pair d n)
 ;;
 
-(* RISC5 has no compare instruction — flags come from a real ALU write into a dead
-   scratch, allocated and freed on the spot so it never widens a live range: SUB a,b
-   sets the relational flags [rel_cond] reads; a MOV sets N/Z (the truthiness test). *)
+(* RISC5 has no compare: flags come from an ALU write into a dead scratch, allocated
+   and freed on the spot so it never widens a live range. SUB sets the relational
+   flags; MOV sets N/Z, the truthiness test. *)
 let flags_of_sub ctx a b =
   let s = alloc_scratch ctx in
   emit ctx (alu R.Sub s a (R.Reg b));
@@ -281,7 +208,6 @@ let flags_of_reg ctx r =
   free_scratch ctx s
 ;;
 
-(* [pow2_log n] is [Some k] iff n = 2^k — the strength-reduction test. *)
 let pow2_log n =
   if n > 0 && n land (n - 1) = 0
   then (
@@ -293,9 +219,7 @@ let pow2_log n =
   else None
 ;;
 
-(* Scale the index in [r] by the element size: pow-2 sizes strength-reduce to LSL,
-   the rest MUL by immediate (built via load_const past 16 bits). Size 1 is free.
-   Frees [r] when a new register is produced. *)
+(* frees [r] when a new register is produced *)
 let scale_index ctx r size =
   if size = 1
   then r
@@ -315,20 +239,15 @@ let scale_index ctx r size =
     d)
 ;;
 
-(* Element size behind a pointer-typed expression (for ptr±int scaling / ptr−ptr). *)
 let pointee_size (t : C.typ) =
   match C.unrollType t with
   | C.TPtr (elem, _) -> C.bitsSizeOf elem / 8
   | _ -> unsupported "pointer arithmetic on a non-pointer — unexpected CIL shape"
 ;;
 
-(* The single routing authority for backend-generated Runtime helper calls (ABI §5):
-   does [e]'s top node lower to a helper BL, and to which? Consulted by codegen
-   (gen_expr's Div/Mod arm takes the helper NAME from it) and by the
-   [calls_runtime_helper] pre-scan that sizes the div area — one definition, so the
-   two cannot drift. Div/Mod always call (signedness picks the pair); unsigned [>>]
-   only for a variable count (constant counts inline as ROR+mask, s5.2b); ptr−ptr
-   only for a non-pow-2 element size (pow-2 strength-reduces to ASR). *)
+(* Which runtime helper [e]'s top node lowers to, if any — the one authority shared by
+   codegen and the [calls_runtime_helper] pre-scan that sizes the div area. Unsigned >>
+   calls only for a variable count; ptr - ptr only for a non-pow-2 element size. *)
 let runtime_helper_of (e : C.exp) : string option =
   match e with
   | C.BinOp (((C.Div | C.Mod) as op), _, _, t) ->
@@ -348,9 +267,7 @@ let runtime_helper_of (e : C.exp) : string option =
   | _ -> None
 ;;
 
-(* Fresh register <- [p] + [delta] (signed): one immediate ADD/SUB when [delta] fits the
-   16-bit field (the folded p[±k] / q = q+1 idiom — scale collapsed into the constant),
-   else build the constant and ADD. Frees [p] if it is a scratch. *)
+(* fresh register <- [p] + [delta]; frees [p] *)
 let add_const ctx p delta =
   let rd = alloc_scratch ctx in
   if delta = 0
@@ -380,29 +297,20 @@ let binop_instr op rd b c : R.instr =
   | C.Shiftlt -> rr R.Lsl
   | C.Shiftrt -> rr R.Asr (* arithmetic; the unsigned case is guarded in gen_expr *)
   | C.Div | C.Mod ->
-    (* / and % never reach the two-register builder: gen_expr intercepts them into
-       Runtime helper calls (ABI §5) *)
     internal "division reached the two-register builder (gen_expr intercepts it)"
   | C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne ->
-    (* a comparison never reaches the two-register builder: as a value gen_expr intercepts it
-       (bool_from_flags, s5.1), as a condition gen_cond does *)
     internal "comparison reached the two-register builder (gen_expr intercepts it)"
   | C.LAnd | C.LOr ->
-    (* CIL lowers && / || in both value and condition contexts to control flow (a temp + if),
-       so these two rarely survive as a BinOp; if one does, it's a later slice *)
-    unsupported "short-circuit && / || as a value — later slice"
+    (* CIL lowers && and || to control flow; one that survives as a BinOp is refused *)
+    unsupported "short-circuit && / || as a value"
   | C.PlusPI | C.IndexPI | C.MinusPI | C.MinusPP ->
-    (* pointer arithmetic needs the pointee size to scale — gen_expr intercepts it
-       (gen_ptr_arith) before this two-register builder is ever reached *)
     internal
       "pointer arithmetic reached the two-register builder (gen_expr intercepts it)"
 ;;
 
-(* Narrow a value to a [bits]-wide sub-word (the one primitive behind cast narrowing,
-   loaded-sub-word widening, and param entry narrowing). Signed → sign-extend by a
-   LSL/ASR pair that lands the sign bit at bit 31; unsigned → mask (0xFF / 0xFFFF, both
-   fit a 16-bit immediate). [narrow_to] produces a FRESH register and frees [r] — use it
-   where [r] may be a home (a cast operand); [narrow_home] rewrites a home in place. *)
+(* [narrow_to] returns a fresh register and frees [r] — for operands that may be a
+   home; [narrow_home] rewrites a home in place. Unsigned masks; signed shifts the
+   sign bit to bit 31 and back. *)
 let narrow_to ctx r ~bits ~signed =
   let rd = alloc_scratch ctx in
   if signed
@@ -424,11 +332,8 @@ let narrow_home ctx h ~bits ~signed =
   else emit ctx (alu R.And h h (R.Imm ((1 lsl bits) - 1)))
 ;;
 
-(* Signedness of a comparison (s5.2): unsigned if an operand is an unsigned integer or a
-   pointer. CIL lowers pointer </> to unsigned compares — and since our addresses are 24-bit the
-   sign bit is never set, so the unsigned condition is exact (this is what unblocks pointer-walk
-   [while (q < end)]). CIL's usual arithmetic conversions already unified the operand types, so
-   one side decides. *)
+(* CIL lowers pointer </> to unsigned compares; with 24-bit addresses the sign bit is
+   never set, so the unsigned condition is exact. *)
 let compare_unsigned (e : C.exp) : bool =
   match C.unrollType (C.typeOf e) with
   | C.TInt (ik, _) -> not (C.isSigned ik)
@@ -436,12 +341,9 @@ let compare_unsigned (e : C.exp) : bool =
   | _ -> false
 ;;
 
-(* A C relational op -> the RISC5 (cond, neg) that HOLDS iff [a op b] is true, given the flags
-   from SUB a,b (a = first operand = minuend). ==/!= are sign-agnostic. Ordered ops split by
-   signedness: signed uses the overflow-aware N≠V (Lt) / (N≠V)|Z (Le); unsigned uses the carry
-   conditions — after SUB, RISC5 sets C on borrow, i.e. C iff a<b unsigned (verified in the
-   emulator: flag_c = result > minuend), so below = Cs, below-or-same = Ls (C|Z). Shared by the
-   value form (bool_from_flags, below) and the branch form (gen_cond). *)
+(* The (cond, neg) that holds iff [a op b], given the flags of SUB a,b. Signed reads
+   the overflow-aware N≠V (Lt) and (N≠V)|Z (Le); unsigned reads the carry: after SUB,
+   C is set on borrow, i.e. iff a <u b — so below = Cs, below-or-same = Ls. *)
 let rel_cond ~(signed : bool) (op : C.binop) : (R.cond * bool) option =
   match op with
   | C.Eq -> Some (R.Eq, false)
@@ -453,11 +355,8 @@ let rel_cond ~(signed : bool) (op : C.binop) : (R.cond * bool) option =
   | _ -> None
 ;;
 
-(* Materialize a comparison's truth as a 0/1 value (s5.1). RISC5 has no set-on-condition, so
-   branch over two immediate loads; [tcond]/[tneg] (from [rel_cond]) is the condition that HOLDS
-   iff the comparison is true, with the flags already set by the caller's SUB. [d] is allocated
-   only after the operands are freed, so it never widens the operands' live range — register
-   pressure is the top naive-alloc blocker. *)
+(* RISC5 has no set-on-condition: branch over two immediate loads. [d] is allocated
+   only after the operands are freed, so it never widens their live range. *)
 let bool_from_flags ctx (tcond : R.cond) (tneg : bool) : reg =
   let d = alloc_scratch ctx in
   let l_true = new_label ctx in
@@ -471,7 +370,6 @@ let bool_from_flags ctx (tcond : R.cond) (tneg : bool) : reg =
   d
 ;;
 
-(* ---- expressions: emit code computing [e], return the register holding its value ---- *)
 let rec gen_expr ctx (e : C.exp) : reg =
   match e with
   | C.Const (C.CInt (ci, _, _)) ->
@@ -488,39 +386,27 @@ let rec gen_expr ctx (e : C.exp) : reg =
        one deliberately doesn't (Globals.float_const) *)
     unsupported "float (ABI §4: banned in blob v1)"
   | C.Const (C.CStr (s, _)) ->
-    (* a string literal is a char* to anonymous static bytes interned in the data image
-       (Globals); materialize its address DB + offset, exactly as &global does (add_const frees
-       the base — a no-op for DB). *)
+    (* DB + the literal's interned offset, the same address form as &global *)
     (match Hashtbl.find_opt ctx.globals.Globals.strings s with
      | Some off -> add_const ctx db_reg off
      | None ->
-       unsupported
-         "string literal not interned (data image past DB's +512 KB reach) — 3b linker")
+       unsupported "string literal not interned (data image past DB's +512 KB reach)")
   | C.Lval (C.Var v, C.NoOffset) when is_reg_local ctx v ->
-    home
-      ctx
-      v (* a register local; a slotted one falls through to the memory load below *)
+    home ctx v (* a slotted local falls through to the load below *)
   | (C.AddrOf (C.Var f, C.NoOffset) | C.Lval (C.Var f, C.NoOffset))
     when C.isFunctionType (C.unrollType f.vtype) ->
-    (* a function used as a value (callback arg, fn-ptr assignment): its address exists
-       only once Linker.link fixes the layout, so it stays *symbolic* here — an Addr
-       frag, expanded at link to the load_const pair (3b.1, ABI §6) *)
+    (* a function's address exists only after layout: an Addr frag *)
     let r = alloc_scratch ctx in
     ctx.rev_frags <- L.Addr (r, f.vname) :: ctx.rev_frags;
     r
   | C.Lval lv -> gen_load ctx lv
   | C.AddrOf lv | C.StartOf lv ->
-    (* &lv, and array decay — the same address, materialized as a value. A slotted local or
-       param resolves to its frame slot (s4.3); a register var can't be address-taken (that
-       would have slotted it), so a non-slotted local reaching gen_addr is an internal error. *)
+    (* an address-taken variable is slotted, so a register local never gets here *)
     materialize_addr ctx lv
   | C.CastE (_, t, e') as whole ->
     Check.check_unsupported_types t;
-    (* Fold a compile-time constant cast — crucially including a constant *double*
-       expression under an int cast, the automap zoom idiom (int)(1.02*FRACUNIT): the
-       value is computed HERE, truncating toward zero, and no float ever reaches
-       runtime — the ABI §4 float ban stays airtight for everything live. Non-constant
-       operands fall through, and a float one still refuses in the recursion. *)
+    (* constant casts fold here — including a double expression under an int cast,
+       (int)(1.02*FRACUNIT), so no float reaches run time *)
     (match Globals.int_core (C.constFold true whole) with
      | Some n ->
        let r = alloc_scratch ctx in
@@ -534,17 +420,14 @@ let rec gen_expr ctx (e : C.exp) : reg =
     Check.check_unsupported_types t;
     gen_unop ctx op e'
   | C.BinOp (C.Shiftrt, e1, e2, t) when is_unsigned_int t ->
-    (* logical >> (s5.2b): RISC5 has no LSR (ABI §1), only ASR (sign-fill) and ROR. So rotate
-       right by n, then mask off the n low bits ROR wrapped into the top — leaving x's bits
-       [n..31] in [0..31-n], zeros above = the logical shift. Constant count is the common case
-       (FRACBITS, byte/colour extracts); a variable count needs a runtime mask (1<<(32-n))-1
-       with an n=0 corner, deferred. The mask often exceeds a 16-bit immediate (n=1 → 0x7FFFFFFF)
-       so it rides a register via load_const. *)
+    (* logical >>: RISC5 has only ASR and ROR, so ROR by n, then mask off the n bits
+       that wrapped to the top. The mask can exceed a 16-bit immediate (n = 1:
+       0x7FFFFFFF); a variable count goes to the __lsr helper. *)
     (match C.getInteger (C.constFold true e2) with
      | Some c ->
        let n = C.Cilint.int_of_cilint c in
        if n = 0
-       then gen_expr ctx e1 (* x >> 0 = x *)
+       then gen_expr ctx e1
        else if n >= 1 && n <= 31
        then (
          let r = gen_expr ctx e1 in
@@ -558,9 +441,6 @@ let rec gen_expr ctx (e : C.exp) : reg =
          d)
        else unsupported "unsigned >> by %d — shift count outside 0..31 (undefined in C)" n
      | None ->
-       (* variable count: the __lsr Runtime helper (ROR + the (1<<(32-n))-1 mask
-          with its n=0 corner) through the s7 div-area protocol — a
-          backend-generated mid-expression call, exactly like a division *)
        gen_helper_call2
          ctx
          "__lsr"
@@ -570,11 +450,8 @@ let rec gen_expr ctx (e : C.exp) : reg =
     Check.check_unsupported_types t;
     gen_ptr_arith ctx op e1 e2
   | C.BinOp ((C.Div | C.Mod), e1, e2, t) as whole ->
-    (* / and % are calls, not instructions (ABI §5: "the backend never emits a bare DIV") —
-       the hardware DIV floors where C truncates and takes only divisors in [1, 2^31-1], so
-       the sign/envelope wrapping lives once, in the Runtime helpers. Usual arithmetic
-       conversions are already applied (CIL), so the result type's signedness picks the
-       helper pair — via [runtime_helper_of], the shared routing authority. *)
+    (* always a helper call (ABI §5): DIV floors where C truncates and takes only
+       divisors in [1, 2^31-1]. The (already converted) result type picks the pair. *)
     Check.check_unsupported_types t;
     let name =
       match runtime_helper_of whole with
@@ -583,9 +460,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     in
     gen_helper_call2 ctx name (fun () -> gen_expr ctx e1) (fun () -> gen_expr ctx e2)
   | C.BinOp (((C.Lt | C.Gt | C.Le | C.Ge | C.Eq | C.Ne) as op), e1, e2, t) ->
-    (* a comparison as a *value* (s5.1; unsigned/pointer s5.2): x = a < b, return a == b, p < q
-       (CIL: unsigned), … — SUB for the flags, then materialize 0/1. As an if/loop condition it
-       goes through gen_cond instead. *)
+    (* a comparison as a value; as a condition it goes through gen_cond *)
     Check.check_unsupported_types t;
     let tcond, tneg =
       match rel_cond ~signed:(not (compare_unsigned e1)) op with
@@ -594,7 +469,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     in
     let r1 = gen_expr ctx e1 in
     let r2 = gen_expr ctx e2 in
-    flags_of_sub ctx r1 r2 (* flags = e1 - e2 *);
+    flags_of_sub ctx r1 r2;
     free_scratch ctx r1;
     free_scratch ctx r2;
     bool_from_flags ctx tcond tneg
@@ -608,11 +483,9 @@ let rec gen_expr ctx (e : C.exp) : reg =
     free_scratch ctx r2;
     rd
   | (C.SizeOf _ | C.SizeOfE _ | C.SizeOfStr _) as e ->
-    (* sizeof folds to a compile-time constant of type size_t (unsigned int, ABI §1). CIL leaves
-       it unfolded on purpose (a later type-changing pass might rewrite the type), so the backend
-       folds it — bitsSizeOf is exact since every C type is a whole number of bytes. sizeof's
-       operand is unevaluated (no VLAs in DOOM — census), so SizeOfE takes only the *type*, never
-       codegen'd. No type check: sizeof of a banned type is still a valid number, not a use. *)
+    (* CIL leaves sizeof unfolded on purpose, so it folds here. The operand is never
+       evaluated (only its type is taken), and there is no type check: sizeof of a
+       banned type is still a valid number. *)
     let n =
       match e with
       | C.SizeOf t -> C.bitsSizeOf t / 8
@@ -623,7 +496,7 @@ let rec gen_expr ctx (e : C.exp) : reg =
     let r = alloc_scratch ctx in
     load_const ctx r n;
     r
-  | _ -> unsupported "expression form not supported yet — later slice"
+  | _ -> unsupported "expression form not supported"
 
 and gen_unop ctx op e' =
   match op with
@@ -638,7 +511,6 @@ and gen_unop ctx op e' =
     free_scratch ctx r;
     rd
   | C.BNot ->
-    (* x XOR 0xFFFFFFFF *)
     let r = gen_expr ctx e' in
     let m = alloc_scratch ctx in
     load_const ctx m 0xFFFF_FFFF;
@@ -648,18 +520,14 @@ and gen_unop ctx op e' =
     free_scratch ctx r;
     rd
   | C.LNot ->
-    (* !x is (x == 0) as a 0/1 value (s5.1): set flags from x (MOV sets N/Z), then materialize
-       the Eq condition. Works for any scalar — int, char, pointer — since all test against 0. *)
+    (* !x is (x == 0): MOV sets Z *)
     let r = gen_expr ctx e' in
-    flags_of_reg ctx r (* flags: Z = (x == 0) *);
+    flags_of_reg ctx r;
     free_scratch ctx r;
     bool_from_flags ctx R.Eq false
 
-(* Narrowing cast to a sub-word type, used as a *value*: e.g. (char)x, (short)x, or the
-   coercion CIL inserts on a sub-word assignment / return. Unsigned masks to the low
-   byte/halfword, signed sign-extends — [narrow_to] does both and keeps [e']'s home
-   intact by returning a fresh register. (A *store* into a sub-word lval doesn't route
-   here: STB truncates for free, and gen_store composes the halfword itself.) *)
+(* A sub-word cast as a value. A store into a sub-word lval doesn't come here: STB
+   truncates for free, and gen_store composes the halfword itself. *)
 and gen_narrow ctx (t : C.typ) (e' : C.exp) : reg =
   match C.unrollType t with
   | C.TInt (C.IBool, _) ->
@@ -668,14 +536,11 @@ and gen_narrow ctx (t : C.typ) (e' : C.exp) : reg =
     unsupported "conversion to _Bool (nonzero becomes 1, not a byte mask) — none in DOOM"
   | C.TInt (ik, _) when C.bitsSizeOf t = 8 || C.bitsSizeOf t = 16 ->
     narrow_to ctx (gen_expr ctx e') ~bits:(C.bitsSizeOf t) ~signed:(C.isSigned ik)
-  | _ -> unsupported "narrowing cast to a non-integer sub-word type — later slice"
+  | _ -> unsupported "narrowing cast to a non-integer sub-word type"
 
-(* ---- pointer arithmetic (s3.2b). ptr±int scales the integer by the pointee size
-   (LSL for pow-2, MUL otherwise) then ADD/SUB; a constant offset folds scale-and-add
-   into one immediate (add_const). ptr−ptr subtracts to a byte gap, then divides by the
-   pointee size — exact via ASR: C guarantees both pointers index one array, so the gap
-   is an exact multiple of the size, and ASR of an exact multiple floors to the true
-   quotient (negatives included). Non-pow-2 element sizes need __div (call slice). ---- *)
+(* ptr - ptr divides the byte gap by the element size: C guarantees both pointers
+   index one array, so the gap is an exact multiple, and ASR of an exact multiple is
+   the true quotient, negatives included. *)
 and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
   let size = pointee_size (C.typeOf e1) in
   match op with
@@ -698,7 +563,6 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
     let p2 = gen_expr ctx e2 in
     let d = alloc_scratch ctx in
     emit ctx (alu R.Sub d p1 (R.Reg p2));
-    (* byte gap *)
     free_scratch ctx p1;
     free_scratch ctx p2;
     (match pow2_log size with
@@ -707,10 +571,8 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
        emit ctx (alu R.Asr d d (R.Imm k));
        d
      | None ->
-       (* non-pow-2 element (a 12-byte struct, say): C guarantees both pointers index one
-          array, so the gap is an *exact* multiple — and exact division is sign-safe through
-          __div (floored = truncated when the remainder is 0). Gap already in [d]; the
-          divisor is the compile-time size. *)
+       (* exact division is sign-safe through __div: floored = truncated when the
+          remainder is 0 *)
        gen_helper_call2
          ctx
          "__div"
@@ -721,16 +583,13 @@ and gen_ptr_arith ctx (op : C.binop) (e1 : C.exp) (e2 : C.exp) : reg =
             c))
   | _ -> internal "gen_ptr_arith: non-pointer op"
 
-(* Call a 2-arg Runtime helper (ABI §5) from *inside* an expression. CIL's guarantee that
-   expressions contain no calls covers only source calls — this BL is backend-generated, so
-   any live temporaries sitting in caller-saved scratch (R0-R5, which a standard-ABI helper
-   may clobber) must survive it by hand. The div area (ctx.div_base, sized in [compile] when
-   the pre-scan finds a helper-lowered construct) holds 2 operand words + up to 6 scratch
-   saves. Protocol: evaluate BOTH operands first (a nested division inside either one uses
-   this same area and *completes* before we touch it), store both and free them (the same
-   store/load decoupling as the arg marshaller — no swap puzzle when they sit in R1,R0),
-   save every still-busy scratch, load R0/R1, BL, park the result in a fresh register
-   (alloc excludes the saved set by construction), restore. *)
+(* A 2-arg runtime helper called from inside an expression. CIL's "no calls in
+   expressions" covers only source calls; this BL is the backend's, so live temporaries
+   in caller-saved scratch must survive it by hand, through the div area. Both operands
+   are evaluated first (a nested helper call completes its own use of the area before
+   ours begins), stored and freed — no swap puzzle when they sit in R1/R0 — then every
+   still-busy scratch is saved, R0/R1 loaded, the BL made, the result parked in a fresh
+   register, and the saves restored. *)
 and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg =
   if ctx.div_base < 0 then internal "helper call without a div area (pre-scan mismatch)";
   let ra = gen_a () in
@@ -739,11 +598,9 @@ and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg 
   emit ctx (R.Store { size = R.W; a = rb; base = sp_reg; off = ctx.div_base + 4 });
   free_scratch ctx ra;
   free_scratch ctx rb;
-  (* Save set = busy CALLER-SAVED scratches only (R0-R5). Homes and widened-pool
-     scratches live in callee-saved R6-R11, which the helpers preserve by the ABI §5
-     contract (their bodies touch R0-R3 + H) — saving them would also overflow the
-     6-slot div area. Compact homes in R0-R5 can't occur here: has_div forces the
-     split shape (s7), so anything busy below R6 is a true scratch. *)
+  (* only busy caller-saved scratches (R0-R5) need saving: anything in R6-R11
+     survives by the helpers' ABI §5 contract. has_div forces the split shape, so no
+     compact home sits below R6. *)
   let busy =
     List.filter
       (fun r -> r < first_callee_saved && not ctx.scratch_free.(r))
@@ -768,22 +625,17 @@ and gen_helper_call2 ctx name (gen_a : unit -> reg) (gen_b : unit -> reg) : reg 
     busy;
   rd
 
-(* ---- the s3.2 address calculus: fold an lval into (base register, residual const).
-   Constant hops — fields, constant indexes — accumulate in the residual, which rides
-   free in the mem-op's 20-bit offset field, so p->f and a[3] stay one instruction;
-   a dynamic index emits scale (LSL for pow-2 element sizes) + ADD. The caller does
-   the final Load/Store/address-ADD and then frees the returned base (free_scratch
-   no-ops on DB and homes). CIL guarantees every expression here is side-effect-free,
-   so evaluation order is unconstrained. ---- *)
+(* Fold an lval into (base register, residual constant). Fields and constant indexes
+   accumulate in the residual, which rides free in the mem-op's 20-bit offset, so p->f
+   and a[3] stay one instruction. The caller does the access and frees the base
+   (a no-op for DB and homes). *)
 and gen_addr ctx ((host, off) : C.lval) : reg * int =
   let rec fold base residual (t : C.typ) (o : C.offset) =
     match o with
     | C.NoOffset -> base, residual
     | C.Field (fi, rest) ->
-      (* a byte-aligned :8 bitfield IS its byte: bitsOffset/8 below lands on it
-         exactly, and classify_access serves the access as a Byte. Guarded here
-         too (not just the declaration gate): a cast pointer can reach a struct
-         no local/global/signature check ever saw. *)
+      (* guarded here too, not just at declarations: a cast pointer can reach a struct
+         no declaration check saw *)
       if fi.fbitfield <> None && not (Check.byte_bitfield fi)
       then unsupported "bitfield other than byte-aligned :8 (ABI §4)";
       let byte_off =
@@ -812,8 +664,7 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
     match host with
     | C.Var v when v.vglob -> db_reg, global_offset ctx v, v.vtype
     | C.Var v ->
-      (* a slotted local (s4.3): its frame slot, SP-relative — the mirror of a global's
-         DB-relative base, so the fold below layers fields/indexes on top identically *)
+      (* a slotted local: SP-relative, the mirror of a global's DB-relative base *)
       (match Hashtbl.find_opt ctx.slots v.vid with
        | Some off -> sp_reg, ctx.slots_base + off, v.vtype
        | None -> internal "local %s used as memory but has no slot" v.vname)
@@ -842,9 +693,8 @@ and gen_addr ctx ((host, off) : C.lval) : reg * int =
     free_scratch ctx base;
     nb, 0)
 
-(* &lv / array decay: the address as a *value*. The 16-bit ALU-immediate limit shows
-   the ISA asymmetry — *access* reaches ±512 KB through the 20-bit mem-op offset, but
-   *address formation* past 64 K must build the constant first. *)
+(* The address as a value. Access reaches ±512 KB through the 20-bit mem-op offset,
+   but forming an address past 64 K needs the constant built first. *)
 and materialize_addr ctx (lv : C.lval) : reg =
   let base, off = gen_addr ctx lv in
   if off = 0 && is_scratch ctx base
@@ -857,11 +707,10 @@ and materialize_addr ctx (lv : C.lval) : reg =
     if off = 0 then emit ctx (mov_reg d base) else emit ctx (alu R.Add d base (R.Imm off));
     d)
   else (
-    (* past the 16-bit immediate the constant builds in TWO instructions, so it
-       needs a register distinct from base — base stays live until the constant
-       stands. (Freeing base first let load_const land ON it and the ADD doubled
-       the offset: fopen's &__handles[h], the first 1d bring-up bug — biga is
-       the jig gate.) d may then reuse either: the ADD is one instruction. *)
+    (* the constant takes two instructions, so it needs a register distinct from
+       base, and base stays live until it stands (freeing base first let load_const
+       land on it and the ADD doubled the offset — jig sample biga). d may reuse
+       either: the ADD is one instruction. *)
     let c = alloc_scratch ctx in
     load_const ctx c off;
     free_scratch ctx c;
@@ -887,8 +736,7 @@ and gen_load ctx (lv : C.lval) : reg =
     emit ctx (R.Load { size = R.B; a = r; base; off });
     if signed then narrow_to ctx r ~bits:8 ~signed:true else r
   | Half signed ->
-    (* no halfword op: compose (hi<<8) | lo from two LDBs (base held across both), then
-       sign-extend if signed. off is the low byte, off+1 the high (little-endian). *)
+    (* (hi<<8) | lo from two LDBs, little-endian; base held across both *)
     let hi = alloc_scratch ctx in
     emit ctx (R.Load { size = R.B; a = hi; base; off = off + 1 });
     emit ctx (alu R.Lsl hi hi (R.Imm 8));
@@ -902,9 +750,8 @@ and gen_load ctx (lv : C.lval) : reg =
     if signed then narrow_to ctx r ~bits:16 ~signed:true else r
 ;;
 
-(* Store [r] into the scalar lval [lv]. STW/STB write directly; a halfword decomposes into
-   two STB — the low byte, then the next byte via ASR 8 (STB takes only the low 8 bits, so
-   the sign the ASR smears above bit 7 is harmless). *)
+(* A halfword stores as two STB: the low byte, then ASR 8 — STB keeps only the low 8
+   bits, so the sign the ASR smears in is harmless. *)
 let gen_store ctx (lv : C.lval) (r : reg) : unit =
   let acc = classify_access lv in
   let base, off = gen_addr ctx lv in
@@ -922,11 +769,9 @@ let gen_store ctx (lv : C.lval) (r : reg) : unit =
   free_scratch ctx base
 ;;
 
-(* Write scratch [r] into any scalar lval: a register-homed local takes a MOV into
-   its home (the general gen_store path errors on those — a homed variable has no
-   address); everything else routes through the normal memory calculus. The one
-   dispatch behind scalar assignment and the va builtins (CIL special-cases
-   va_arg's &dst — no vaddrof — so the destination keeps its register home). *)
+(* A register local takes a MOV into its home (it has no address); everything else
+   goes through memory. va_arg's destination lands here too: CIL leaves it
+   register-homed. *)
 let store_lval ctx (lv : C.lval) (r : reg) =
   match lv with
   | C.Var v, C.NoOffset when is_reg_local ctx v ->
@@ -935,12 +780,11 @@ let store_lval ctx (lv : C.lval) (r : reg) =
   | _ -> gen_store ctx lv r
 ;;
 
-(* The stdarg builtins (ABI §3: varargs for free). CIL hands va_start with the ap lval
-   only (the "last named argument" is implicit — we anchor on the callee's own formal
-   count); va_arg arrives pre-lowered to (ap, sizeof t, &dst); va_end vanishes.
-   va_list is ONE POINTER into the caller's home area: va_start = FP + 4*n_formals,
-   va_arg = load a word and advance — default promotions make every legal variadic
-   argument exactly one word (char/short widen to int, float would be double = banned). *)
+(* The stdarg builtins. va_start arrives with only the ap lval — we anchor on the
+   callee's own formal count; va_arg arrives lowered to (ap, sizeof t, &dst); va_end
+   vanishes. A va_list is one pointer into the caller's home area: va_start =
+   FP + 4*n_formals, va_arg loads a word and advances — default promotions make every
+   legal variadic argument one word. *)
 let is_va_builtin (f : C.varinfo) = String.starts_with ~prefix:"__builtin_va_" f.vname
 
 let gen_va_builtin ctx name (args : C.exp list) =
@@ -981,7 +825,6 @@ let gen_va_builtin ctx name (args : C.exp list) =
       | _ -> unsupported "va_arg: destination is not &lval — unexpected shape"
     in
     let ap_lv = as_ap ap in
-    (* v = the word ap points at *)
     let p = gen_expr ctx (C.Lval ap_lv) in
     let v = alloc_scratch ctx in
     emit ctx (R.Load { size = R.W; a = v; base = p; off = 0 });
@@ -996,14 +839,9 @@ let gen_va_builtin ctx name (args : C.exp list) =
   | _ -> unsupported "stdarg builtin %s — unexpected shape" name
 ;;
 
-(* Whole-aggregate copy (s4.4): [dst = src] for struct-typed lvals — CIL keeps [a = b] a single
-   struct-typed Set with an lval RHS. Byte-wise memory copy, unrolled over the compile-time
-   size: alignment-agnostic on purpose, because these structs are often sub-word-aligned
-   (mapthing_t is 5 shorts → align 2 and a 10-byte size; struct color is 4 chars → align 1) and
-   LDW/STW would mask a non-4-aligned address. Cold in DOOM (census: 16 sites, none in the
-   render path), so the naive 2-ops-per-byte is fine; word-copy when provably ≥4-aligned is a
-   later optimization. Both ends go through materialize_addr, so [a=b], [*dp=*sp] and [arr[i]=s]
-   all reduce to two base addresses + a byte shuttle — and every offset stays in [0, size). *)
+(* [dst = src] for struct-typed lvals, byte by byte: these structs are often
+   sub-word-aligned (mapthing_t is align 2, struct color align 1), and LDW/STW would
+   mask the address. Cold in DOOM, so two ops per byte is fine. *)
 let gen_struct_copy ctx (dst : C.lval) (src : C.lval) (size : int) : unit =
   if size > 0x80000
   then unsupported "struct copy of %d B (past the 20-bit mem-op offset)" size;
@@ -1019,16 +857,13 @@ let gen_struct_copy ctx (dst : C.lval) (src : C.lval) (size : int) : unit =
   free_scratch ctx dptr
 ;;
 
-(* ---- statements ---- *)
 let gen_instr ctx (i : C.instr) =
   match i with
   | C.Set (dst, e, _, _)
     when match C.unrollType (C.typeOfLval dst) with
          | C.TComp _ | C.TArray _ -> true
          | _ -> false ->
-    (* whole-aggregate copy (s4.4): dst is struct-typed, so this is [dst = src] by value. CIL's
-       RHS is the source lval (a=b, *dp=*sp, arr[i]=s); any other struct-typed RHS would be a
-       by-value call return, which the call boundary already refuses (census: none in DOOM). *)
+    (* a struct-typed Set is a by-value copy; its RHS is the source lval *)
     let src =
       match e with
       | C.Lval src -> src
@@ -1036,9 +871,6 @@ let gen_instr ctx (i : C.instr) =
     in
     gen_struct_copy ctx dst src (C.bitsSizeOf (C.typeOfLval dst) / 8)
   | C.Set (lv, e, _, _) ->
-    (* scalar assignment: value first (CIL: both sides side-effect-free, so the order
-       is free), then store_lval routes it — a MOV into a register local's home, or
-       the memory calculus (STW/STB, the composed halfword) for everything else. *)
     let r = gen_expr ctx e in
     store_lval ctx lv r;
     free_scratch ctx r
@@ -1047,20 +879,17 @@ let gen_instr ctx (i : C.instr) =
        would clobber the very registers and stack shape it is asking about) *)
     gen_va_builtin ctx f.vname args
   | C.Call (lvopt, fexp, args, _, _) ->
-    (* Call, direct or indirect; args 1-4 in R0-R3, args 5+ on the stack, scalar/void
-       return in R0 (ABI §3). Marshal through the outgoing area: evaluate each arg with the
-       full scratch pool and STW it to SP+4i, then LDW R0-R3 from the first four slots.
-       Evaluation and register placement decouple, so no half-loaded arg register is clobbered
-       mid-setup; args 5+ stay where the stores left them (SP+16.., the callee's FP+16..), and
-       the home area is left populated — what a ≤4-arg varargs callee expects. This function
-       makes a call, so it is non-leaf: homes R6-R11, scratch R0-R5; [compile] sizes the
-       outgoing area to the widest call it makes. *)
+    (* Args go through the outgoing area: each is evaluated with the full scratch pool and
+       stored to SP+4i, then R0-R3 load from the first four slots. Evaluation and
+       register placement decouple, so no half-loaded arg register is clobbered; args
+       5+ stay where they were stored (the callee's FP+16..), and the home area stays
+       populated — what a varargs callee reads. *)
     (match C.unrollType (C.typeOf fexp) with
      | C.TFun (rt, _, _, _) ->
        (match C.unrollType rt with
         | C.TComp _ | C.TArray _ ->
           unsupported
-            "aggregate return (hidden pointer, ABI §3) — none in DOOM (census); deferred"
+            "aggregate return by value (ABI §3's hidden pointer is unimplemented)"
         | C.TFloat _ -> unsupported "float return (ABI §4: banned)"
         | _ -> ())
      | _ -> ());
@@ -1069,7 +898,7 @@ let gen_instr ctx (i : C.instr) =
          match C.unrollType (C.typeOf a) with
          | C.TComp _ | C.TArray _ ->
            unsupported
-             "aggregate call arg (stack copy, ABI §3) — none in DOOM (census); deferred"
+             "aggregate call argument by value (ABI §3's stack copy is unimplemented)"
          | C.TFloat _ -> unsupported "float arg (ABI §4: banned)"
          | _ -> ())
       args;
@@ -1079,12 +908,9 @@ let gen_instr ctx (i : C.instr) =
          emit ctx (R.Store { size = R.W; a = r; base = sp_reg; off = 4 * i });
          free_scratch ctx r)
       args;
-    (* The target. Direct: a named function — a PC-relative BL the Linker resolves.
-       Indirect (3b.1): the *pointer value* (fexp is Lval(Mem e) — the function lvalue;
-       its value IS the address), evaluated HERE, after the arg stores but before the
-       R0-R3 loads, with R0-R3 claimed (the s9 trick, four wide) so the target register
-       sits above them and survives the loads. A division inside e saves/restores the
-       claimed registers harmlessly — the args live in memory until the loads. *)
+    (* an indirect target is evaluated after the arg stores but before the R0-R3
+       loads, with R0-R3 claimed so it lands above them; a helper call inside it saves
+       and restores the claimed registers harmlessly — the args are still in memory *)
     let do_call =
       match fexp with
       | C.Lval (C.Var f, C.NoOffset)
@@ -1103,32 +929,26 @@ let gen_instr ctx (i : C.instr) =
       | _ ->
         unsupported "call through a non-lval function expression — unexpected CIL shape"
     in
-    (* the first four slots become the register args; args 5+ stay on the stack at SP+16.. *)
     List.iteri
       (fun i _ ->
          if i < 4 then emit ctx (R.Load { size = R.W; a = i; base = sp_reg; off = 4 * i }))
       args;
     do_call ();
     (match lvopt with
-     | None -> () (* void call / result discarded *)
+     | None -> ()
      | Some (C.Var v, C.NoOffset) when is_reg_local ctx v ->
        let h = home ctx v in
        if h <> return_reg then emit ctx (mov_reg h return_reg)
      | Some lv ->
-       (* Any memory destination — a slotted local, a global, *p, s.f, arr[i]. The result
-          sits in R0: the lowest-numbered scratch, exactly what the destination's address
-          calculus would allocate first (or what a division inside an index expression
-          would clobber). Claim it as a busy scratch for the store's duration — gen_addr
-          then allocates from R1 up, and a helper call inside the lval (arr[x % 4] = f(..))
-          saves and restores R0 through the div-area protocol like any live value. *)
+       (* the result sits in R0, the first scratch the destination's address would take
+          (or a helper call inside it would clobber): claim it for the store, so gen_addr
+          allocates from R1 *)
        ctx.scratch_free.(return_reg) <- false;
        gen_store ctx lv return_reg;
        free_scratch ctx return_reg)
   | C.VarDecl _ -> ()
-  | C.Asm _ -> unsupported "inline asm — n/a"
+  | C.Asm _ -> unsupported "inline asm"
 ;;
-
-(* ---- conditions: branch to [false_label] when [cond] is false, else fall through ---- *)
 
 let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   (* fallback: treat [cond] as a value, false iff zero (the register write sets Z) *)
@@ -1145,7 +965,7 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
      | Some (tcond, tneg) ->
        let r1 = gen_expr ctx e1 in
        let r2 = gen_expr ctx e2 in
-       flags_of_sub ctx r1 r2 (* flags = e1 - e2 *);
+       flags_of_sub ctx r1 r2;
        free_scratch ctx r1;
        free_scratch ctx r2;
        (* jump when the comparison is FALSE: {tcond, not tneg} *)
@@ -1153,11 +973,8 @@ let gen_cond ctx (cond : C.exp) ~(false_label : int) =
   | _ -> truthy ()
 ;;
 
-(* ---- statements ---- *)
 let rec gen_stmt ctx (s : C.stmt) =
-  (* a jump-target statement (a case/default in a switch, or a goto/label target) gets its
-     backend label placed here — once, ahead of its body. Dispatch and gotos reach it through
-     [label_of_stmt] on the same [sid], so forward references resolve (s5.3/s5.4). *)
+  (* a jump target's label goes here, ahead of its body *)
   if s.labels <> [] then place ctx (label_of_stmt ctx s);
   match s.skind with
   | C.Instr instrs -> List.iter (gen_instr ctx) instrs
@@ -1196,11 +1013,8 @@ let rec gen_stmt ctx (s : C.stmt) =
     jmp ctx l_top;
     place ctx l_break
   | C.Switch (e, body, cases, _, _) ->
-    (* dispatch chain (a jump table is a later optimization): compare the switch value against
-       each case constant and branch to that case's statement label; then fall through to the
-       default (or past the switch). The case/default labels ride on the body statements and are
-       placed when the body is emitted, so fall-through is the natural statement order. break
-       exits to l_break; a switch offers no continue target — hence [None] on the stack. *)
+    (* a compare-and-branch chain; the case labels ride on the body statements, so
+       fall-through is plain statement order. No continue target ([None]). *)
     let r = gen_expr ctx e in
     let l_break = new_label ctx in
     let default = ref None in
@@ -1218,11 +1032,11 @@ let rec gen_stmt ctx (s : C.stmt) =
                 in
                 let vr = alloc_scratch ctx in
                 load_const ctx vr v;
-                flags_of_sub ctx r vr (* flags = switch - case *);
+                flags_of_sub ctx r vr;
                 free_scratch ctx vr;
-                bcc ctx R.Eq false l (* switch == case -> that case *)
+                bcc ctx R.Eq false l
               | C.Default _ -> default := Some l
-              | C.CaseRange _ -> unsupported "case ranges (GCC extension) — later slice"
+              | C.CaseRange _ -> unsupported "case ranges (GCC extension)"
               | C.Label _ -> ())
            cs.labels)
       cases;
@@ -1239,28 +1053,20 @@ let rec gen_stmt ctx (s : C.stmt) =
      | (_, l_break) :: _ -> jmp ctx l_break
      | [] -> unsupported "break outside a loop/switch — unexpected CIL shape")
   | C.Continue _ ->
-    (* continue targets the nearest enclosing *loop* (a switch's [None] passes through). For a
-       CIL while/do loop that point is the loop top (re-test); a for-loop's continue was lowered
-       by CIL to a goto before the increment, so it arrives as Goto below, not here. *)
+    (* the nearest enclosing loop's top. CIL lowers a for-loop's continue to a goto
+       before the increment, so that one arrives as a Goto *)
     let rec loop_cont = function
       | (Some c, _) :: _ -> jmp ctx c
       | (None, _) :: rest -> loop_cont rest
       | [] -> unsupported "continue outside a loop — unexpected CIL shape"
     in
     loop_cont ctx.loops
-  | C.Goto (target, _) ->
-    (* CIL Goto references its target statement; that statement's label is placed when it is
-       emitted (gen_stmt entry), so goto and target agree via [label_of_stmt] on the same sid —
-       forward or backward. This also carries CIL's lowered for-loop continue (goto the increment). *)
-    jmp ctx (label_of_stmt ctx !target)
-  | C.ComputedGoto _ -> unsupported "computed goto (GCC &&label) — later slice"
+  | C.Goto (target, _) -> jmp ctx (label_of_stmt ctx !target)
+  | C.ComputedGoto _ -> unsupported "computed goto (GCC &&label)"
 ;;
 
-(* The call profile: [None] if the function is a leaf (makes no call), else [Some n] with n the
-   widest argument count across its calls. A non-leaf clobbers LNK (BL writes it) and needs its
-   live values to survive calls, so its homes move to callee-saved R6-R11 (ABI §2), it saves
-   LNK, and it reserves a 4·max(4,n)-byte outgoing area — the 16-byte home area for R0-R3, plus
-   a slot per stack arg 5+ (ABI §3). CIL statements nest only through these skinds. *)
+(* [None] for a leaf, else [Some n], the widest call's argument count — it sizes the
+   4*max(4,n)-byte outgoing area. *)
 let call_arity (fd : C.fundec) : int option =
   let widest = ref None in
   let note n =
@@ -1290,12 +1096,8 @@ let call_arity (fd : C.fundec) : int option =
   !widest
 ;;
 
-(* Does the body contain a construct that lowers to a Runtime helper call (ABI §5)?
-   A yes sizes the div area into the frame and forces the non-leaf shape (the BL
-   clobbers LNK and the caller-saved scratch pool). Division hides in any expression
-   position (an index, a condition, a call argument), so this is a visitor, not a
-   statement walk like [call_arity]'s; the routing itself is [runtime_helper_of]'s —
-   the same authority codegen dispatches on, so the two cannot disagree. *)
+(* A helper call makes a function non-leaf and gives it a div area. Division hides in
+   any expression position, so this is a visitor, not a statement walk. *)
 let calls_runtime_helper (fd : C.fundec) : bool =
   let found = ref false in
   let scan =
@@ -1311,27 +1113,14 @@ let calls_runtime_helper (fd : C.fundec) : bool =
   !found
 ;;
 
-(* ---- three-address flattening: the scratch-exhaustion fallback ----
-
-   A statement whose expression tree needs more simultaneous temporaries than the
-   scratch pool holds (a deep arithmetic chain, spilled-local loads + ROR masks +
-   the div-area protocol all live at once) cannot compile under naive allocation.
-   The fix is not smarter scratch juggling but a smaller problem: rewrite the
-   BODY so every statement is [tmp = atom op atom] — each fresh temporary is an
-   ordinary CIL local, so the first six take home registers and the rest ride the
-   rung-1 spill slots (machinery landed at perf 1). Worst-case scratch need per
-   flattened statement is a handful — deterministically inside the pool.
-
-   Applied only as [compile]'s retry after [Scratch_exhausted] (3 functions in
-   the DOOM tree), so the other ~1200 keep their tighter unflattened code.
-   Statement identity is preserved — skinds are mutated in place — so goto
-   targets and switch cases (which reference statements physically) stay valid;
-   a hoisted prelude lands UNDER the original statement's label, which is
-   correct: jumping there must re-evaluate the condition's operands. *)
+(* The scratch-exhaustion retry: rewrite the body so every statement is
+   tmp = atom op atom. The temporaries are ordinary locals — homes or spill slots — so
+   no flattened statement needs more than a few scratches. Only functions that exhaust
+   the pool pay for it. Statements are mutated in place, so goto targets and switch
+   cases stay valid, and a hoisted prelude lands under the original statement's label —
+   correct: jumping there must re-evaluate the operands. *)
 let flatten_fundec (fd : C.fundec) : unit =
-  (* compiles while holding at most a scratch or two: constants (incl. interned
-     strings), sizeof (a folded constant), a register-eligible variable, or a
-     cast of one *)
+  (* compiles holding at most a scratch or two *)
   let is_atom (e : C.exp) : bool =
     match e with
     | C.Const _ | C.SizeOf _ | C.SizeOfE _ | C.SizeOfStr _ -> true
@@ -1374,7 +1163,6 @@ let flatten_fundec (fd : C.fundec) : unit =
     | C.Field (f, rest) -> C.Field (f, flat_off loc rest)
     | C.Index (e, rest) -> C.Index (flat loc e, flat_off loc rest)
   in
-  (* per instr: atomize into a cleared prelude, emit prelude ++ shallow instr *)
   let do_instr (i : C.instr) : C.instr list =
     prelude := [];
     let i' =
@@ -1391,7 +1179,7 @@ let flatten_fundec (fd : C.fundec) : unit =
            indirect target) are claimed, so no arg may need deep evaluation *)
         let f' =
           match f with
-          | C.Lval (C.Var _, C.NoOffset) -> f (* direct call *)
+          | C.Lval (C.Var _, C.NoOffset) -> f
           | C.Lval lv -> C.Lval (flat_lval loc lv)
           | e -> e
         in
@@ -1400,15 +1188,12 @@ let flatten_fundec (fd : C.fundec) : unit =
     in
     List.rev !prelude @ [ i' ]
   in
-  (* a statement expression's prelude wraps in a Block via skind mutation: the
-     stmt object (and its labels / case markers) is untouched *)
   let flat_top loc (e : C.exp) : C.instr list * C.exp =
     prelude := [];
     let e' = shallow loc e in
     List.rev !prelude, e'
   in
-  (* a statement keeps its skind shape, with the prelude (if any) wrapped in front
-     via a Block — mutated in place so labels / case markers stay on [s] *)
+  (* mutated in place, so labels and case markers stay on the statement *)
   let rewrap pre k =
     if pre = [] then k else C.Block (C.mkBlock [ C.mkStmt (C.Instr pre); C.mkStmt k ])
   in
@@ -1433,8 +1218,6 @@ let flatten_fundec (fd : C.fundec) : unit =
   do_block fd.sbody
 ;;
 
-(* ---- entry: a CIL fundec -> its unresolved {!Linker.obj} (args in R0.., return R0).
-   [Linker.link] lays this out with any callees and resolves branches and calls. ---- *)
 let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   let return_type =
     match fd.svar.vtype with
@@ -1445,11 +1228,9 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   List.iter
     (fun (v : C.varinfo) -> Check.check_unsupported_types v.vtype)
     (fd.sformals @ fd.slocals);
-  (* CIL leaves every stmt's [sid] at -1 until a CFG pass runs; we key jump-target labels
-     (case/default in a switch, goto targets) by sid, so number the statements ourselves. A
-     local numbering suffices — we don't need CIL's succs/preds. The switch [cases] list and
-     goto targets are the *same physical* statements as in the body, so numbering the body's
-     tree covers them, and a dispatch/goto sees the same sid the placement does. *)
+  (* CIL leaves every sid at -1 until a CFG pass; jump-target labels are keyed by sid,
+     so number the statements ourselves. Switch cases and goto targets are the same
+     physical statements as the body's. *)
   let next_sid = ref 0 in
   let rec number (s : C.stmt) =
     s.sid <- !next_sid;
@@ -1463,34 +1244,24 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
     | _ -> ()
   in
   List.iter number fd.sbody.bstmts;
-  (* ABI §3: aggregates travel by hidden pointer / stack copy — call-slice machinery.
-     A sub-word param arrives as a full word (caller / jig pass the raw int); every
-     sub-word int is narrowed to its declared width at entry (below). *)
   (match C.unrollType return_type with
    | C.TComp _ | C.TArray _ ->
-     unsupported
-       "aggregate return (hidden pointer, ABI §3) — none in DOOM (census); deferred"
+     unsupported "aggregate return by value (ABI §3's hidden pointer is unimplemented)"
    | _ -> ());
   List.iter
     (fun (v : C.varinfo) ->
        match C.unrollType v.vtype with
        | C.TComp _ | C.TArray _ ->
-         unsupported
-           "aggregate param (stack copy, ABI §3) — none in DOOM (census); deferred"
+         unsupported "aggregate parameter by value (ABI §3's stack copy is unimplemented)"
        | _ -> ())
     fd.sformals;
   let call_info = call_arity fd in
-  (* A body with / or % (or a non-pow-2 ptr−ptr) BLs a Runtime helper (ABI §5), so it is
-     non-leaf even with zero source calls — LNK gets clobbered, and values must live in
-     callee-saved homes. It also gets a div area in the frame: 2 operand words + up to 6
-     scratch saves for the mid-expression call protocol (gen_helper_call2). The helpers
-     themselves are frame-less leaves that never touch the caller's stack, so no outgoing
-     home area is owed for them. *)
+  (* a helper BL makes the function non-leaf even with no source calls; the helpers are
+     frame-less leaves, so no outgoing area is owed for them *)
   let has_div = calls_runtime_helper fd in
   let leaf = call_info = None && not has_div in
-  (* >4 params (s4.2): args 5+ arrive on the stack, so the callee sets FP = entry SP and
-     reads them at FP+16.. (below). A variadic callee needs FP unconditionally: va_start
-     anchors at FP + 4*n_formals (the home-area slot after the last named argument). *)
+  (* args 5+ arrive on the stack, read at FP+16..; a variadic callee always needs FP
+     (va_start) *)
   let is_vararg =
     match C.unrollType fd.svar.vtype with
     | C.TFun (_, _, va, _) -> va
@@ -1502,11 +1273,9 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
     | None -> 0
     | Some n -> 4 * max 4 n
   in
-  (* s4.3: a variable that can't live in a register — an aggregate, or a scalar whose address
-     is taken (CIL's [vaddrof]) — gets a word-aligned slot in the frame's locals region, just
-     above the outgoing and div areas. Addressed SP-relative: the offset ([slots_base]+off) is
-     known before body codegen fixes the save set — which an FP-relative offset couldn't be
-     (it subtracts the frame size). *)
+  (* aggregates and address-taken scalars get a frame slot. SP-relative, because the
+     offset must be known before body codegen fixes the save set — an FP-relative
+     offset subtracts the frame size *)
   let slots = Hashtbl.create 8 in
   let locals_size = ref 0 in
   let needs_slot (v : C.varinfo) =
@@ -1524,15 +1293,12 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   let alloc_slot (v : C.varinfo) = if needs_slot v then add_slot v in
   List.iter alloc_slot fd.sformals;
   List.iter alloc_slot fd.slocals;
-  (* The unified register model (spilling rungs 2-3): every function gets AT LEAST six
-     scratch registers. The compact shape — homes from R0, scratch above, zero-cost
-     frames — survives only where it honors that: leaves with <= 6 register candidates.
-     Everything else takes the SPLIT shape: homes in callee-saved R6-R11 (survive calls;
-     for a demoted big leaf they merely cost saves), locals past six spill to slots
-     (rung 1), params past six spill via a prologue copy from their arrival point, and
-     scratch WIDENS to R0-R5 plus every unused home register — sound because a busy
-     split-shape scratch in R6-R11 is callee-saved (real calls preserve it by contract)
-     and the div-area protocol saves whatever is busy regardless. *)
+  (* Every function gets at least six scratch registers. The compact shape — homes from
+     R0, scratch above, a zero-cost frame — is kept only for leaves with <= 6 register
+     candidates. Everything else takes the split shape: homes in callee-saved R6-R11,
+     locals and params past six spill to slots, and scratch widens to R0-R5 plus every
+     unused home register — sound because a busy scratch in R6-R11 is callee-saved, and
+     the helper-call protocol saves whatever is busy below R6. *)
   let n_candidates =
     List.length fd.sformals
     + List.length
@@ -1546,11 +1312,9 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
     Hashtbl.replace homes v.vid !next;
     incr next
   in
-  (* Params: a home while they fit (a vaddrof-slotted param keeps one too — its arrival
-     register, spilled to the slot by the prologue, s4.3 step 2); past the budget they
-     are slot-only, and the prologue routes the arrival straight to the slot. Since the
-     first six formals take the six split-shape homes, a spilled param's index is >= 6,
-     i.e. it arrived on the stack at FP+4i. *)
+  (* params: a home while they fit (an address-taken one keeps its arrival register,
+     spilled to the slot by the prologue); past that, slot-only — necessarily index
+     >= 6, so they arrived on the stack *)
   List.iter
     (fun (v : C.varinfo) ->
        if !next <= max_reg
@@ -1558,19 +1322,15 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
        else if not (Hashtbl.mem slots v.vid)
        then add_slot v)
     fd.sformals;
-  (* Locals: a register home while they fit, else spill (rung 1) — in BOTH shapes now:
-     a demoted leaf spills like a non-leaf, its >= 6 scratch guaranteed by the split. *)
+  (* locals: a home while they fit, else a spill slot *)
   List.iter
     (fun (v : C.varinfo) ->
        if not (Hashtbl.mem slots v.vid)
        then if !next <= max_reg then assign v else add_slot v)
     fd.slocals;
   let scratch_lo, scratch_hi = if compact then !next, max_reg else 0, max_reg in
-  (* the div area (s7): 2 operand words + at most six saves — only busy CALLER-SAVED
-     scratches (R0-R5) need saving at a helper call; callee-saved R6-R11, homes and
-     widened scratches alike, survive by the helpers' ABI §5 contract *)
+  (* the div area: 2 operand words + at most six caller-saved scratch saves *)
   let div_area = if has_div then 32 else 0 in
-  (* locals region base: above the outgoing area and the div area *)
   let slots_base = outgoing_area + div_area in
   let ctx =
     { rev_frags = []
@@ -1599,12 +1359,9 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
         !next - 1 (* the last home; scratch (and so the save set) grow from here *)
     }
   in
-  (* entry narrowing (s3.3): a sub-word param arrives as a full word; narrow its home to
-     the declared width so it holds the C-correct value from the first use (the jig's gcc
-     oracle narrows at the call site — we get the raw int). Unsigned masks, signed
-     sign-extends; the home register IS the canonical location, so rewrite it in place. A
-     slotted param (s4.3 step 2) is skipped: its home is transient — the prologue spills it to
-     the slot, and the slot's own sub-word load narrows on read. *)
+  (* a sub-word param arrives as a full word: narrow its home to the declared width
+     (the caller passes the raw int). A slotted param is skipped — its slot's sub-word
+     load narrows on read *)
   List.iter
     (fun (v : C.varinfo) ->
        match C.unrollType v.vtype with
@@ -1617,20 +1374,17 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
        | _ -> ())
     fd.sformals;
   List.iter (gen_stmt ctx) fd.sbody.bstmts;
-  (* The frame (ABI §3): SP-relative, low-to-high — outgoing area · locals region (s4.3) ·
-     callee-saved R[6..max_used] · FP (needs_fp) · LNK (non-leaf). The saves are contiguous
-     (homes then, for a leaf, scratch — both fill upward). The outgoing area (sized to the
-     widest call, [call_info]) and the locals ([locals_size]) sit below the saves, so a pure
-     leaf touching only R0-R5 with no slots gets frame = 0 (no SUB/ADD SP, just [B LNK]). *)
+  (* The frame, built after the body because only now is the save set (max_used)
+     known. SP-relative, low to high: outgoing area · div area · locals region ·
+     callee-saved R[6..max_used] · FP (needs_fp) · LNK (non-leaf). A leaf touching only
+     R0-R5 with no slots gets frame = 0: no SUB/ADD SP, just B LNK. *)
   let saved =
     List.init
       (max 0 (ctx.max_used - first_callee_saved + 1))
       (fun i -> first_callee_saved + i)
   in
-  (* the saves start above the outgoing area, the div area, and the locals region *)
   let saves_base = slots_base + !locals_size in
   let saves_end = saves_base + (4 * List.length saved) in
-  (* slots above the saves: FP (needs_fp), then LNK (non-leaf), matching the ABI §3 idiom *)
   let fp_off = saves_end in
   let lnk_off = saves_end + if needs_fp then 4 else 0 in
   let frame = lnk_off + if leaf then 0 else 4 in
@@ -1653,11 +1407,9 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
   emit
     ctx
     (R.Branch { cond = R.True; neg = false; link = false; target = R.To_reg lnk_reg });
-  (* prologue: open the frame; save callee-saved (+ FP if needs_fp, + LNK if non-leaf); set
-     FP = entry SP so incoming stack args land at FP+16..; then place params into their homes.
-     The saves run first, preserving the caller's R6-R11/FP before we overwrite them. Params:
-     args 1-4 move from R0-R3 (a non-leaf's homes; a leaf's already sit there), args 5+ (s4.2)
-     load from the frame at FP+16.. — the caller staged them there at the BL (ABI §3). *)
+  (* prologue: open the frame, save callee-saved (+ FP, + LNK) before anything
+     overwrites them, set FP = entry SP, then move params to their homes — args 1-4
+     from R0-R3, args 5+ from FP+16.. *)
   let prologue =
     if frame = 0
     then []
@@ -1697,9 +1449,8 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
                     else
                       [ L.Ins (R.Load { size = R.W; a = h; base = fp_reg; off = 4 * i }) ]
                   in
-                  (* an address-taken param (s4.3 step 2): once it lands in its home,
-                     spill the home into its slot — the slot is its canonical location
-                     for body access, whether it arrived in a register or on the stack *)
+                  (* an address-taken param: once in its home, spill it to its slot — the
+                     slot is its canonical location *)
                   let spill =
                     match slot_opt with
                     | Some off ->
@@ -1711,11 +1462,8 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
                   in
                   place @ spill
                 | None, Some off ->
-                  (* a SPILLED param (no home, rungs 2-3): route the arrival straight to
-                     the slot. In practice i >= 6 (the first six formals took the homes),
-                     so it arrived on the stack; the register branch is kept for shape
-                     robustness. R5 is safe as the shuttle: scratch, not an arrival
-                     register for any spilled index, and dead this early in the prologue. *)
+                  (* a spilled param goes straight to its slot. In practice i >= 6, so it
+                     arrived on the stack; R5 is a safe shuttle this early *)
                   if i < 4
                   then
                     [ L.Ins
@@ -1742,9 +1490,7 @@ let compile_once ~(globals : Globals.t) (fd : C.fundec) : L.obj =
 let compile ~globals (fd : C.fundec) : L.obj =
   try compile_once ~globals fd with
   | Scratch_exhausted ->
-    (* the three-address retry: flatten the body (temporaries become ordinary
-       locals -> homes/spill slots) and compile again. Only the functions that
-       actually exhaust the pool pay the temp-heavy lowering. *)
+    (* the three-address retry *)
     flatten_fundec fd;
     (try compile_once ~globals fd with
      | Scratch_exhausted ->

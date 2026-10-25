@@ -6,13 +6,12 @@
     parse errors. *)
 val parse_file : string -> GoblintCil.file
 
-(** [parse_string ~name src] parses a self-contained C snippet (no [#include] / no macros —
-    headerless int code is already "preprocessed"); [name] labels the temporary unit.
-    Raises [Failure] on parse errors. *)
+(** [parse_string ~name src] parses a self-contained C snippet (no [#include], no
+    macros); [name] labels the temporary unit. Raises [Failure] on parse errors. *)
 val parse_string : name:string -> string -> GoblintCil.file
 
-(** [merge units ~name] amalgamates parsed units into one (Mergecil.merge — the single-TU /
-    PureDOOM rename step). Raises [Failure] on merge errors. *)
+(** [merge units ~name] amalgamates parsed units into one program (Mergecil.merge,
+    which renames colliding statics). Raises [Failure] on merge errors. *)
 val merge : GoblintCil.file list -> name:string -> GoblintCil.file
 
 (** [fundecs file] returns every function definition in [file], in source order. *)

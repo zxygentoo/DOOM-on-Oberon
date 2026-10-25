@@ -1,9 +1,3 @@
-(* The instr-level linker (ABI §6). See linker.mli. Two passes: (1) a base word offset per
-   function, in layout order, building the symbol table; (2) resolve each function at its base
-   — intra-function branches are PC-relative so the base cancels, calls need the callee's
-   global offset. A RISC5 PC-relative branch at word A lands at A+1+off, so off = target-A-1
-   (risc.ml) — identical to Fundec's old intra-function resolve, now over the whole program. *)
-
 module R = Emu.Risc5_isa
 
 type frag =
@@ -26,20 +20,13 @@ type image =
   ; code_base : int
   }
 
-(* The intrinsic registry (ABI §5, frozen: { FixedMul }). A Call to an intrinsic
-   expands INLINE at resolve instead of becoming a BL: FixedMul is the machine's party
-   trick (§1: MUL leaves the 64-bit product's high word in H, natively, in 2 cycles),
-   and the expansion clobbers exactly R0, R1, H, flags — a strict subset of a call's
-   clobber set, so callers cannot tell, except by being fast. Taking an intrinsic's
-   ADDRESS is unsupported: there is no function to point at (sym_addr fails loud).
-   The registry maps name -> expansion, so an intrinsic's declared width (frag_width)
-   and its emitted code are the same list and can never disagree. *)
+(* name -> expansion, so an intrinsic's width (frag_width) and its emitted code are
+   one list and can't disagree *)
 let intrinsics : (string * R.instr list) list =
   [ ( "FixedMul"
-    , (* fixed_t product = (int64(a) * int64(b)) >> 16, without any 64-bit value:
-         MUL computes the full 64-bit product (low -> R0, high -> H); the result
-         is high<<16 | low>>>16 — the middle 32 bits, exactly the int cast of the
-         arithmetic shift. ROR+AND is the logical >>16 (no LSR on RISC5, s5.2b). *)
+    , (* (int64 a * int64 b) >> 16 with no 64-bit value: MUL leaves the low
+         word in R0 and the high in H; the result is the middle 32 bits,
+         high<<16 | low>>>16. ROR+AND is the logical >>16 — RISC5 has no LSR *)
       [ R.Alu { op = R.Mul; u = false; v = false; a = 0; b = 0; operand = R.Reg 1 }
       ; R.Alu { op = R.Mov; u = true; v = false; a = 1; b = 0; operand = R.Reg 0 }
       ; R.Alu { op = R.Lsl; u = false; v = false; a = 1; b = 1; operand = R.Imm 16 }
@@ -59,15 +46,12 @@ let frag_width = function
     (match List.assoc_opt name intrinsics with
      | Some expansion -> List.length expansion
      | None -> 1)
-  | Addr _ -> 2 (* MOV-high + IOR, fixed even for small addresses: deterministic layout *)
+  | Addr _ -> 2
 ;;
 
 let code_size o = List.fold_left (fun a f -> a + frag_width f) 0 o.frags
 
-(* The canonical 2-word absolute-constant build: MOV' the high halfword (u: the
-   16-bit immediate lands <<16), IOR the low. ALWAYS two words, even for a zero
-   high half — everything sized before layout (the Addr frag, crt0, the eDSL)
-   depends on the width never varying with the value. *)
+(* u: MOV's 16-bit immediate lands in the high halfword *)
 let load_const_pair d n =
   [ R.Alu
       { op = R.Mov
@@ -97,16 +81,11 @@ let find_sym_addr (img : image) name =
 let sym_addr (img : image) name =
   match find_sym_addr img name with
   | Some addr -> addr
-  | None ->
-    Check.unsupported "address of undefined function %s — 3b linker / mini-libc" name
+  | None -> Check.unsupported "address of undefined function %s" name
 ;;
 
 let link ~(code_base : int) (objs : obj list) : image =
-  (* pass 1: base offset per function — the assoc list keeps layout order (the map
-     dump), the table serves the per-frag lookups in O(1). One name, one function: a
-     second obj under a taken name would resolve at the first one's base, its own
-     BLs landing wrong — refuse it (a repeat is a bug upstream: Mergecil renames
-     static collisions, the drawer swap replaces what it shadows) *)
+  (* pass 1: each function's base word offset *)
   let sym_tbl = Hashtbl.create 1024 in
   let _, rev_syms =
     List.fold_left
@@ -122,10 +101,9 @@ let link ~(code_base : int) (objs : obj list) : image =
   let sym name =
     match Hashtbl.find_opt sym_tbl name with
     | Some off -> off
-    | None ->
-      Check.unsupported "call to undefined function %s — 3b linker / mini-libc" name
+    | None -> Check.unsupported "call to undefined function %s" name
   in
-  (* pass 2: resolve one function at its base offset *)
+  (* pass 2: resolve each function at its base *)
   let resolve_obj o =
     let base = Hashtbl.find sym_tbl o.name in
     let addr = Hashtbl.create 16 in
@@ -143,6 +121,7 @@ let link ~(code_base : int) (objs : obj list) : image =
       (fun f ->
          let here = !a in
          a := !a + frag_width f;
+         (* a PC-relative branch at word A lands at A + 1 + off *)
          let branch cond neg target =
            R.Branch { cond; neg; link = false; target = R.To_off (target - here - 1) }
          in
@@ -153,7 +132,7 @@ let link ~(code_base : int) (objs : obj list) : image =
          | Jmp l -> [ branch R.True false (Hashtbl.find addr l) ]
          | Call name ->
            (match List.assoc_opt name intrinsics with
-            | Some expansion -> expansion (* inline, no BL (the registry above) *)
+            | Some expansion -> expansion
             | None ->
               [ R.Branch
                   { cond = R.True
@@ -162,9 +141,7 @@ let link ~(code_base : int) (objs : obj list) : image =
                   ; target = R.To_off (sym name - here - 1)
                   }
               ])
-         | Addr (r, name) ->
-           (* the function's absolute byte address, the canonical 2-word build *)
-           load_const_pair r (code_base + (4 * sym name)))
+         | Addr (r, name) -> load_const_pair r (code_base + (4 * sym name)))
       o.frags
   in
   { code = List.concat_map resolve_obj objs; symbols; sym_tbl; code_base }

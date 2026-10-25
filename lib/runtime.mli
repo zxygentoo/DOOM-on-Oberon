@@ -1,7 +1,5 @@
-(** The runtime helpers (ABI §5): hand-rolled [Risc5_isa] instruction sequences the
-    backend calls by name — the first drawer of the 1a eDSL, where hand-written and
-    compiled code meet as the same kind of value ({!Linker.obj}) and link freely into
-    one program.
+(** The runtime helpers (ABI §5): hand-written instruction sequences the backend calls
+    by name, linked into the program like any compiled function.
 
     The division family: [__div]/[__mod] (signed, C-truncating) and
     [__udiv]/[__umod] (unsigned), plus [__lsr] (variable-count logical shift —

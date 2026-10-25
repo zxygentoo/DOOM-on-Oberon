@@ -1,11 +1,7 @@
-(* goblint-cil front end for the RISC5 target: the machine model (ABI §4) and parsing C
-   into the typed AST the backend consumes. Mirrors the spike's driver
-   (the §9 CIL spike); owns the machdep so the whole toolchain shares one. *)
-
 open GoblintCil
 
-(* ABI §4: ILP32, little-endian, char unsigned. Pin the two RISC5 choices onto
-   goblint-cil's stock gcc-32 machdep; must be installed before initCIL. *)
+(* goblint-cil's gcc-32 machdep with the two RISC5 choices; must be installed before
+   initCIL *)
 let risc5_mach : Machdep.mach =
   match Machdep.gcc32 with
   | Some m -> { m with char_is_unsigned = true; little_endian = true }
@@ -27,7 +23,6 @@ let ensure_init () =
     initialized := true)
 ;;
 
-(* Parse one preprocessed translation unit (.i). *)
 let parse_file (path : string) : file =
   ensure_init ();
   Errormsg.hadErrors := false;
@@ -36,8 +31,6 @@ let parse_file (path : string) : file =
   file
 ;;
 
-(* Parse a self-contained C snippet (no #include / no macros — headerless int code is
-   already "preprocessed") into a Cil.file. *)
 let parse_string ~(name : string) (src : string) : file =
   let tmp = Filename.temp_file name ".c" in
   Fun.protect
@@ -49,8 +42,6 @@ let parse_string ~(name : string) (src : string) : file =
        parse_file tmp)
 ;;
 
-(* Amalgamate parsed units into one (Mergecil.merge — the single-TU / PureDOOM rename step,
-   spike-proven at full scale, AGENT.md §9). *)
 let merge (units : file list) ~(name : string) : file =
   Errormsg.hadErrors := false;
   let m = Mergecil.merge units name in
