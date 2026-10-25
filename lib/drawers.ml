@@ -7,10 +7,13 @@ open Asm
    then run a tight do-while of count+1 iterations (C's while (count--)). Logical >>
    is ROR+mask, signed >> is ASR, and the unsigned compares read C after SUB.
 
-   Frame: SUB SP,36 — [0..15] the ABI §3 outgoing home area (live during the
-   RANGECHECK I_Error call), [16] R6, [20] R7, [24] LNK. I_Error never returns, but
-   the error block still parks after the BL. *)
+   Frame: SUB SP,36 — [0..15] the ABI §3 outgoing home area, [16] R6, [20] R7,
+   [24] LNK. The RANGECHECK error block stores I_Error's arguments in the home area as
+   well as loading R0-R3: I_Error is variadic, and a variadic callee reads its
+   arguments from there. I_Error never returns; the block parks after the BL anyway. *)
 
+(* R0-R3 -> the home area, for a variadic callee *)
+let home_args = [ stw 0 14 0; stw 1 14 4; stw 2 14 8; stw 3 14 12 ]
 let bl_sym name = L.Call name
 let ldw_db a off = ldw a 13 off
 
@@ -104,8 +107,9 @@ let span ~off ~str : L.obj =
         ; ldw_db 3 ds_y
         ]
       @ load_const2 0 fmt
-      @ [ alu R.Add 0 13 (R.Reg 0)
-        ; bl_sym "I_Error" (* never returns (setjmp-shaped exit) *)
+      @ [ alu R.Add 0 13 (R.Reg 0) ]
+      @ home_args
+      @ [ bl_sym "I_Error" (* never returns (setjmp-shaped exit) *)
         ; L.Label l_park
         ; L.Jmp l_park
         ]
@@ -190,7 +194,9 @@ let column ~off ~str : L.obj =
       ; ldw_db 3 dc_x
       ]
       @ load_const2 0 fmt
-      @ [ alu R.Add 0 13 (R.Reg 0); bl_sym "I_Error"; L.Label l_park; L.Jmp l_park ]
+      @ [ alu R.Add 0 13 (R.Reg 0) ]
+      @ home_args
+      @ [ bl_sym "I_Error"; L.Label l_park; L.Jmp l_park ]
   }
 ;;
 
@@ -203,10 +209,11 @@ let column ~off ~str : L.obj =
    void __dg_dither_fs(const u8 *src, u32 *dst, int stride)
      args: R0=src  R1=dst  R2=stride (words)
 
-   Frame (SUB SP,72): +0..15 the ABI §3 home area (live during the one-time
+   Frame (SUB SP,76): +0..15 the ABI §3 home area (live during the one-time
    BL __dg_fs_build) · +16..36 R6..R11 · +40 LNK · +44/48/52 the args parked
    across the init call · +56 sy · +60 acc (Bresenham) · +64 b2 (B-pass second
-   target row) · +68 adv (dst line advance, rep*stride4)
+   target row) · +68 adv (dst line advance, rep*stride4) · +72 R12 (FP, callee-saved:
+   the kernel uses it as a temp)
 
    Registers, steady: R2 stride4 · R5 &__dg_lum · R6 dst line · R11 src line.
    Per row-pass: R3 cut slab (&cut[bnrow]) · R4 mask slab · R0 src cursor ·
@@ -269,13 +276,14 @@ let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
   in
   { L.name = "__dg_dither_fs"
   ; frags =
-      [ alu R.Sub 14 14 (R.Imm 72)
+      [ alu R.Sub 14 14 (R.Imm 76)
       ; stw 6 14 16
       ; stw 7 14 20
       ; stw 8 14 24
       ; stw 9 14 28
       ; stw 10 14 32
       ; stw 11 14 36
+      ; stw 12 14 72
       ; stw 15 14 40
       ; stw 0 14 44
       ; stw 1 14 48
@@ -350,8 +358,9 @@ let dither_fs ~lum_off ~cut_off ~mask_off ~ready_off : L.obj =
         ; ldw 9 14 28
         ; ldw 10 14 32
         ; ldw 11 14 36
+        ; ldw 12 14 72
         ; ldw 15 14 40
-        ; alu R.Add 14 14 (R.Imm 72)
+        ; alu R.Add 14 14 (R.Imm 76)
         ; ret
         ]
   }

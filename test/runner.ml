@@ -1,6 +1,6 @@
 (* Run one compiled function in the vendored emulator — the jig's execution half.
    The Runner plays the caller: args in R0.. (5+ on the stack), a stop sentinel in LNK,
-   and R6-R11 seeded with sentinels. After the return it checks SP and R6-R11 came back
+   and R6-R12 seeded with sentinels. After the return it checks SP and R6-R12 came back
    intact, so every sample is also a callee-saved-contract and frame-balance test. *)
 
 module Isa = Emu.Risc5_isa
@@ -15,7 +15,7 @@ let data_base = 0x80000
 
 (* below the data image; the stack grows down into the gap *)
 let stack_top = 0x70000
-let callee_saved = [ 6; 7; 8; 9; 10; 11 ]
+let callee_saved = [ 6; 7; 8; 9; 10; 11; 12 ]
 let sentinel r = 0xCAFE_0000 lor r land 0xFFFF_FFFF
 
 (* a runaway guard: hitting it means a codegen bug; long samples pass [steps] *)

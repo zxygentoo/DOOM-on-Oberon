@@ -1196,6 +1196,55 @@ let fixed_samples =
    tx-ready wait would spin forever. *)
 let libc_selfchecks =
   [ ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
+       __builtin_va_list va_list; extern int __setjmp(unsigned int *env); extern void \
+       __longjmp(unsigned int *env, int val); unsigned int rje[9]; int ga; int gb; int \
+       gc; void I_Error(const char *f, ...) { va_list ap; int a; int b; int c; \
+       __builtin_va_start(ap, f); a = __builtin_va_arg(ap, int); b = \
+       __builtin_va_arg(ap, int); c = __builtin_va_arg(ap, int); __builtin_va_end(ap); \
+       ga = a; gb = b; gc = c; __longjmp(rje, f[0]); } unsigned char *ylookup[204]; int \
+       columnofs[324]; int ds_y; int ds_x1; int ds_x2; unsigned char *ds_colormap; \
+       unsigned char *ds_source; int ds_xfrac; int ds_yfrac; int ds_xstep; int ds_ystep; \
+       void R_DrawSpan(void) { unsigned int position, step; unsigned char *dest; int \
+       count; int spot; unsigned int xtemp, ytemp; if (ds_x2 < ds_x1 || ds_x1 < 0 || \
+       ds_x2 >= 320 || (unsigned)ds_y > 200) { I_Error(\"R_DrawSpan: %i to %i at %i\", \
+       ds_x1, ds_x2, ds_y); } position = ((ds_xfrac << 10) & 0xffff0000) | ((ds_yfrac >> \
+       6) & 0x0000ffff); step = ((ds_xstep << 10) & 0xffff0000) | ((ds_ystep >> 6) & \
+       0x0000ffff); dest = ylookup[ds_y] + columnofs[ds_x1]; count = ds_x2 - ds_x1; do { \
+       ytemp = (position >> 4) & 0x0fc0; xtemp = (position >> 26); spot = xtemp | ytemp; \
+       *dest++ = ds_colormap[ds_source[spot]]; position += step; } while (count--); } \
+       int rcs(int i){ int r; ds_x1 = 20 + (i & 7); ds_x2 = 3; ds_y = 7; r = \
+       __setjmp(rje); if (r) return ((r * 100 + ga) * 100 + gb) * 1000 + gc; \
+       R_DrawSpan(); return -1; }"
+    , "rcs"
+      (* the hand R_DrawSpan's RANGECHECK path (ds_x2 < ds_x1). A variadic callee reads
+         its arguments from the caller's home area (ABI §3), so the drawer must store
+         them there, not only load R1-R3. The fake I_Error reads all three and longjmps
+         out with the format's first byte, 'R' = 82, proving R0 arrived too:
+         ((82*100 + ds_x1)*100 + ds_x2)*1000 + ds_y *)
+    , [ 0, 822003007; 5, 822503007 ] )
+  ; ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
+       __builtin_va_list va_list; extern int __setjmp(unsigned int *env); extern void \
+       __longjmp(unsigned int *env, int val); unsigned int rje[9]; int ga; int gb; int \
+       gc; void I_Error(const char *f, ...) { va_list ap; int a; int b; int c; \
+       __builtin_va_start(ap, f); a = __builtin_va_arg(ap, int); b = \
+       __builtin_va_arg(ap, int); c = __builtin_va_arg(ap, int); __builtin_va_end(ap); \
+       ga = a; gb = b; gc = c; __longjmp(rje, f[0]); } unsigned char *ylookup[204]; int \
+       columnofs[324]; int dc_x; int dc_yl; int dc_yh; int dc_iscale; int dc_texturemid; \
+       unsigned char *dc_colormap; unsigned char *dc_source; int centery; void \
+       R_DrawColumn(void) { int count; unsigned char *dest; int frac; int fracstep; \
+       count = dc_yh - dc_yl; if (count < 0) return; if ((unsigned)dc_x >= 320 || dc_yl \
+       < 0 || dc_yh >= 200) I_Error(\"R_DrawColumn: %i to %i at %i\", dc_yl, dc_yh, \
+       dc_x); dest = ylookup[dc_yl] + columnofs[dc_x]; fracstep = dc_iscale; frac = \
+       dc_texturemid + (dc_yl - centery) * fracstep; do { *dest = \
+       dc_colormap[dc_source[(frac >> 16) & 127]]; dest += 320; frac += fracstep; } \
+       while (count--); } int rcc(int i){ int r; dc_yl = 5; dc_yh = 9; dc_x = 400 + (i & \
+       7); r = __setjmp(rje); if (r) return ((r * 100 + ga) * 100 + gb) * 1000 + gc; \
+       R_DrawColumn(); return -1; }"
+    , "rcc"
+      (* the same for the hand R_DrawColumn (dc_x >= 320):
+         ((82*100 + dc_yl)*100 + dc_yh)*1000 + dc_x *)
+    , [ 0, 820509400; 5, 820509405 ] )
+  ; ( "char *__heap_base = (char *)0x90000; char *__heap_end = (char *)0xF0000; typedef \
        struct _IO_FILE FILE; extern void __file_register(const char *, const void *, \
        unsigned long); extern FILE *fopen(const char *, const char *); extern int \
        fclose(FILE *); extern unsigned long fread(void *, unsigned long, unsigned long, \
