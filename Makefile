@@ -2,18 +2,26 @@
 # fetched artifact lives under _out/ (the root stays source-only); every
 # target encodes its opam switch, so the ox-vs-default trap can't bite.
 #
+#   make           blob + dsk
 #   make blob      the DOOM blob (doomcc over _out/i + libc)
 #   make dsk       the bootable DOOM.dsk (script/mkdsk.sh)
+#   make wad       fetch the shareware IWAD (md5-pinned)
+#   make chunks    split it into the <=3 MiB chunk files the dsk carries
+#   make rom       the Cyclesim boot ROM stub (_out/doomboot.rom)
+#   make i         the patched, preprocessed .i tree (doomcc's input)
 #   make ref       the SDL reference build (plain gcc — the 5026 oracle)
 #   make golden    the -m32 golden-frame generator binary
 #   make goldens   run it: _out/golden/golden_g*.fbw (the pixel oracle)
+#   make build     dune build (the OCaml tools)
 #   make test      the differential jig (dune runtest, default switch)
 #   make fmt       dune fmt (default switch — the pre-commit gate)
 #   make sim       the Cyclesim leg (dune --root sim, OxCaml switch)
+#   make clean     rm -rf _out (the vendor tree stays patched)
 #
 # Independence property (AGENT.md §9): the ref/golden recipes are plain gcc
-# on the original vendor sources — no CIL, no doomcc, no dune anywhere in
-# them — so a toolchain bug can't corrupt both sides of a differential. The
+# on the vendor sources — patched by git apply alone, the same patch/c set
+# the blob gets — with no CIL, no doomcc, no dune anywhere in them, so a
+# toolchain bug can't corrupt both sides of a differential. The
 # golden build shares exactly ONE file with the target path: libc/dither.c,
 # the shipped kernel, making every golden comparison a full-scale compiler
 # differential. Don't let either recipe grow a dune dependency.
@@ -45,9 +53,21 @@ sim:
 
 # ---- the source pipeline ---------------------------------------------------
 
-# the .i tree: patch the vendor submodule (idempotent) + gcc -E the SRC_DOOM
-# TU list; script/ppx_doomsrc.sh owns the logic, this rule owns the ordering
-i _out/i/.stamp: script/ppx_doomsrc.sh $(wildcard patch/c/*.patch)
+# the patched vendor tree: patch/c/*.patch applied to the doomgeneric
+# submodule (idempotent). The stamp is a prerequisite of EVERY consumer of
+# the vendor sources — the .i tree and both host oracles — because the patch
+# step writes files no other rule names as its target: without the edge, a
+# fresh clone's `make goldens` compiles the pristine tree, and its frames
+# silently can't match the blob. script/patch_doomsrc.sh owns the logic (and
+# is the one writer of vendor/doomgeneric), this rule owns the ordering
+PATCHES := $(sort $(wildcard patch/c/*.patch))
+_out/.patched: script/patch_doomsrc.sh $(PATCHES)
+	./script/patch_doomsrc.sh
+	@mkdir -p _out && touch $@
+
+# the .i tree: gcc -E the SRC_DOOM TU list; script/ppx_doomsrc.sh owns the
+# logic, this rule owns the ordering
+i _out/i/.stamp: script/ppx_doomsrc.sh _out/.patched
 	./script/ppx_doomsrc.sh
 	@touch _out/i/.stamp
 
@@ -77,10 +97,11 @@ _out/doom1.wad:
 blob: _out/i/.stamp
 	$(DUNE) exec bin/doomcc.exe -- _out/i/*.i $(LIBC) -o _out/doom.blob
 
-chunks _out/doom1.wad.0: _out/doom1.wad
+chunks: _out/doom1.wad
 	$(DUNE) exec bin/split_wad.exe -- _out/doom1.wad
 
 rom:
+	@mkdir -p _out
 	$(DUNE) exec bin/emit_rom.exe -- -o _out/doomboot.rom
 
 dsk: blob chunks
@@ -91,10 +112,12 @@ dsk: blob chunks
 CC := gcc
 SRC_DOOM = $(shell sed -n 's/^SRC_DOOM = //p' $(SRCDIR)/Makefile)
 
-# the reference build: 64-bit SDL2, stock truecolor, original sources — the
-# independent implementation behind the 5026-gametic desync constant
+# the reference build: 64-bit SDL2, stock truecolor, the patched vendor
+# sources — the independent implementation behind the 5026-gametic desync
+# constant. RFLAGS is recursive (=) so sdl2-config runs only when a ref
+# object actually builds — every other target works without SDL2 installed
 RDIR   := _out/ref
-RFLAGS := -std=gnu99 -O2 -Wall $(shell sdl2-config --cflags)
+RFLAGS  = -std=gnu99 -O2 -Wall $(shell sdl2-config --cflags)
 RSRC    = $(patsubst doomgeneric_xlib.o,doomgeneric_sdl.o,$(SRC_DOOM))
 ROBJS   = $(addprefix $(RDIR)/,$(RSRC))
 
@@ -102,7 +125,7 @@ ref: $(RDIR)/doomgeneric
 $(RDIR)/doomgeneric: $(ROBJS)
 	$(CC) $(ROBJS) -o $@ -lm $(shell sdl2-config --libs)
 
-$(RDIR)/%.o: $(SRCDIR)/%.c | $(RDIR)
+$(RDIR)/%.o: $(SRCDIR)/%.c _out/.patched | $(RDIR)
 	$(CC) $(RFLAGS) -I$(SRCDIR) -c $< -o $@
 
 $(RDIR):
@@ -121,10 +144,10 @@ golden: $(GDIR)/golden
 $(GDIR)/golden: $(GOBJS)
 	$(CC) -m32 $(GOBJS) -o $@ -lm
 
-$(GDIR)/%.o: $(SRCDIR)/%.c | $(GDIR)
+$(GDIR)/%.o: $(SRCDIR)/%.c _out/.patched | $(GDIR)
 	$(CC) $(GFLAGS) -I$(SRCDIR) -c $< -o $@
 
-$(GDIR)/doom_golden.o: bin/doom_golden.c | $(GDIR)
+$(GDIR)/doom_golden.o: bin/doom_golden.c _out/.patched | $(GDIR)
 	$(CC) $(GFLAGS) -I$(SRCDIR) -c $< -o $@
 
 $(GDIR)/dither.o: libc/dither.c | $(GDIR)

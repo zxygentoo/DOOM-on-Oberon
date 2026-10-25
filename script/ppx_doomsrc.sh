@@ -7,18 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SRCDIR=vendor/doomgeneric/doomgeneric
-# Local source patches (patch/c/*.patch — the C half; patch/oberon/ patches the
-# stock PO2013 sources at mkdsk time): the vendor tree is a pinned submodule
-# (ignore = dirty — the applied patches keep it modified by design), so our few
-# source changes live as reviewed patch files applied idempotently here — a
-# fresh checkout and an already-patched tree both converge. 0001 defloat the
-# timedemo fps (ABI §4 float ban) · 0002 default gamma 2 · 0003 alias the
-# videobuffer (fps lever #1) · 0004 pin the videobuffer (the Halftone
-# placement seam).
-for p in patch/c/*.patch; do
-  git -C vendor/doomgeneric apply --reverse --check "$PWD/$p" 2>/dev/null \
-    || git -C vendor/doomgeneric apply "$PWD/$p"
-done
+# The port's C patches go in first (patch_doomsrc.sh, their one writer —
+# idempotent, so a read-only no-op when the Makefile has already run it).
+./script/patch_doomsrc.sh
 mkdir -p _out/i
 rm -f _out/i/*.i
 srcs=$(sed -n 's/^SRC_DOOM = //p' "$SRCDIR/Makefile")
