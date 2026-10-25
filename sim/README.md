@@ -1,10 +1,9 @@
-# sim/ — the Cyclesim leg (AGENT.md 1d)
+# sim/ — the Cyclesim leg
 
-`doom.blob` on the cycle-accurate HardCaml model of the machine: the vendored
+`doom.blob` on the cycle-accurate Hardcaml model of the machine: the vendored
 [oberon-risc-hardcaml](https://github.com/zxygentoo/oberon-risc-hardcaml)
-design, closed with the behavioural PSRAM double widened to the full 16 MiB
-(`Cellram_model ~addr_bits:23` — the first full-SoC exercise of 2a's 24-bit
-decode), driven by `run_sim.ml`.
+board SoC, closed with the behavioural PSRAM double widened to the full
+16 MiB (`Cellram_model ~addr_bits:23`), driven by `run_sim.ml`.
 
 ## Why a separate dune project
 
@@ -34,29 +33,30 @@ The code itself is stock OCaml on both sides; only the dependency universes
 are incompatible.
 
 The two worlds meet as **files**, the same seam discipline as everywhere else
-in this project: `doom.blob`, `doom1.wad`, `doomboot.rom` (the 26-word boot
-stub, `bin/emit_rom.ml`) go in; `.fbw` framebuffer dumps (the golden-oracle
-format) and cycle counts come out.
+in this project: `doom.blob`, `doom1.wad`, `doomboot.rom` (the 32-word boot
+ROM, `bin/emit_rom.ml`, `make rom`) go in; `.fbw` framebuffer dumps (the
+golden-oracle format) and cycle counts come out.
 
 ## Layout
 
-- `vendor/oberon-risc-hardcaml` — a symlink to the root submodule (one
-  submodule, two workspace roots), pristine (`data_only` to dune; its nested
-  emulator submodule is initialized — the MAIN workspace's `emu` reads it,
-  this root never scans it). Pin bumps happen at the root.
+- `vendor/oberon-risc-hardcaml` — a symlink to the root's submodule (one
+  checkout, two workspace roots), pristine and `data_only` to dune; the main
+  workspace's `emu` reads the emulator from its nested submodule. Pin bumps
+  happen at the root.
 - `risc5/`, `nexys4/` — wrapper libs that `copy_files`-compile the submodule's
   `lib/` and `board/nexys-4/` into this project (the same pattern both repos
   use to vendor the emulator).
 - `run_sim.ml` — the harness: pokes blob + WAD + SHARED page into the PSRAM
   model's byte lanes before releasing reset, boots the doomboot ROM, polls the
   SHARED markers (`+8` init/done, `+16` heartbeat, `+12` exit status), reports
-  cycles-per-tick (simulated time is real 60 MHz time — the ms counter ticks
-  every 60 000 cycles), and dumps the framebuffer.
+  cycles per tick, and dumps the framebuffer. Simulated time is the board's:
+  the ms counter ticks every 60 000 cycles — the 60 MHz build every number
+  here was measured on; the pinned host now ships 64 MHz.
 
 ## Build & run
 
 ```
-opam exec --switch=5.2.0+ox -- dune build --root sim
+opam exec --switch=5.2.0+ox -- dune build --root sim     # or: make sim
 
 D=$(pwd)  # repo root; dune exec runs from the build dir, use absolute paths
 opam exec --switch=5.2.0+ox -- dune exec --root $D/sim ./run_sim.exe -- \
@@ -72,18 +72,16 @@ design's own inline tests run upstream, not here.
 Under `-timedemo` (singletics) the heartbeat counts Ticks and gametic =
 heartbeat + 1: `-ticks N` parks the machine with gametic N+1 on the screen.
 To compare against `golden_gNNNNN.fbw`, run `-ticks N-1` (or generate the
-host frame at N+1). Verified 2026-07-09: `-ticks 100` ≡ host gametic 101,
-bit-identical.
+host frame at N+1): `-ticks 100` ≡ host gametic 101, bit-identical.
 
-## -hw (feat/halftone: the hardware scanout ditherer)
+## -hw: the Halftone scanout
 
-`-hw` runs the shipped config with the video DMA live and the Halftone
-scanout path on (`video:true fb_bram:true halftone:true` — 10c proved fb_bram
-cycle-identical to the `video:false` counterfactual, so cycles/tick stays
-comparable with non-hw runs), and advertises the hardware to the blob via
-SHARED +544 (ABI.md §11). The blob then composites into the
-Halftone window and skips the software dither. `-fbw` in this mode dumps the
-frame the PANEL shows: after the park, the harness lets the raster free-run
-one full scan (~1.1 M cycles) and reconstructs the .fbw from the compose
-FSM's `ht_ack`/`ht_row`/`ht_col`/`ht_word` probes — same file format,
-same golden comparison.
+`-hw` turns the video DMA and the Halftone scanout on (`video fb_bram
+halftone`; fb_bram is proven cycle-identical to the video-off build, so
+cycles/tick stay comparable with non-hw runs) and advertises the hardware to
+the blob in SHARED +544 (ABI.md §11). The blob then copies each frame into
+the Halftone window instead of dithering it. `-fbw` in this mode dumps the
+frame the panel shows: after the park, the raster free-runs one full scan
+(~1.1 M cycles) and the harness rebuilds the .fbw from `ht_ack`/`ht_word`
+plus the SoC's `vidreq`/`vidadr` — same file format, same golden
+comparison.

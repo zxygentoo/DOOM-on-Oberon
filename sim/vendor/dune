@@ -1,8 +1,5 @@
-; The vendored oberon-risc-hardcaml design (a symlink to the repo root's
-; vendor/oberon-risc-hardcaml — one submodule, two workspace roots) is its own
-; dune project and stays PRISTINE — raw data here; sim/risc5 and sim/nexys4
-; compile its sources into this project (the same pattern as the main
-; workspace's vendor/emu, which reads the emulator from the SAME tree's nested
-; submodule).
+; The hardcaml repo, a symlink to the root's submodule (dune deps can't escape a
+; workspace root), stays pristine: data to dune. sim/risc5 and sim/nexys4
+; copy_files its sources into this project.
 
 (data_only_dirs oberon-risc-hardcaml)

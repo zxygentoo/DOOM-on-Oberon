@@ -1,7 +1,6 @@
-; Re-expose the vendored Nexys 4 board layer as `nexys4_board` — the board
-; SoC, the PSRAM controller, and Cellram_model (the behavioural PSRAM double
-; the DOOM harness preloads). Mirrors board/nexys-4/dune, minus the
-; emit_verilog executable module.
+; The vendored board layer as `nexys4_board` (the SoC, the PSRAM controller,
+; and Cellram_model, the PSRAM double run_sim preloads), mirroring
+; board/nexys-4/dune minus emit_verilog.
 
 (copy_files ../vendor/oberon-risc-hardcaml/board/nexys-4/*.ml)
 

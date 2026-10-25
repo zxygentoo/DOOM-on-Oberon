@@ -1,20 +1,16 @@
-(* run_blob — the 1d emulator harness: play DOOM.Mod's stub against the real blob.
+(* run_blob — the blob on the emulator, loaded the way DOOM.Mod loads it.
 
-   Loads doom.blob at BLOB_BASE and the WAD at WAD_BASE (ABI §8), verifies the §7
-   header and zeroes bss, sets up the SHARED page (+28 = WAD length), attaches a UART
-   console (the blob's printf arrives on stdout), and drives Init/Tick through the
-   crt0 thunks exactly as test_blob rehearsed — plus a deterministic synthetic ms
-   clock (the ms-counter MMIO advances every [steps_per_ms] instructions, default
-   44 000 ≈ 60 MHz / CPI 1.37, so simulated time roughly models the real machine and
-   fps numbers mean something). Frames dump as PGM (1024×768, fb bottom-up flipped,
-   bit 0 = leftmost, 1 = white) plus the Headless FNV hash — the visual-golden anchor.
+   Loads the blob at BLOB_BASE and the WAD at WAD_BASE (ABI §8), verifies the §7
+   header, zeroes bss, fills the SHARED page, and calls Init, then Tick, through the
+   crt0 thunks; the blob's printf arrives on stdout. The ms counter is synthetic: it
+   advances every -steps-per-ms instructions (default 44 000 ≈ 60 MHz at CPI 1.37),
+   so a run reproduces exactly and the fps -timedemo prints roughly models the board.
+   Frames dump as 1024×768 PGMs, logged with their Headless FNV hash.
 
-   A PC that doesn't advance across a step is a self-loop — doomcc's trap for refused
-   or undefined symbols — reported with the address for a doom.blob.map lookup.
+   A PC that doesn't advance across a step is one of doomcc's self-loop traps; the
+   run fails with its address, for a lookup in doom.blob.map.
 
-   Usage: run_blob [options] <doom.blob> <doom1.wad> — the options are [usage]
-   below (`run_blob -help` prints it); the longer story of each sits on its
-   parse_args arm. *)
+   Usage: run_blob [options] <doom.blob> <doom1.wad>   (options: [usage], or -help) *)
 
 module M = Emu.Risc
 module F = Emu.Risc.For_tests
@@ -22,14 +18,11 @@ module Isa = Emu.Risc5_isa
 module H = Emu.Headless
 module AC = Abi_constants
 
-(* ABI §8, the himem layout — the constants page (lib/abi_constants.ml). *)
 let blob_base = AC.blob_base
 let shared_base = AC.shared_base
 let wad_cap = AC.wad_window_end - AC.wad_base
 let fail = Run_harness.fail
 let read_file = Run_harness.read_file
-
-(* ---- args ---- *)
 
 let usage =
   "usage: run_blob [options] <doom.blob> <doom1.wad>\n\
@@ -67,46 +60,37 @@ let rec parse_args = function
   | "-steps-per-ms" :: n :: rest -> set_int steps_per_ms n rest
   | "-max-steps" :: n :: rest -> set_int max_steps n rest
   | "-args" :: s :: rest ->
-    (* the DOOM command tail, written verbatim to SHARED +1024 (ABI §8) before
-       Init — e.g. -args "-timedemo demo1". Under -timedemo the engine runs
-       singletics (one gametic per Tick, one render each), so the heartbeat IS
-       the gametic counter and -dump-every dumps at exact gametics; the run
-       finishes through G_CheckDemoStatus's I_Error ("timed N gametics ..." on
-       the console, SHARED status negative) — that unwind is the SUCCESS path. *)
+    (* written to SHARED +1024 before Init. Under -timedemo the engine runs one
+       gametic per Tick, so -dump-every dumps at exact gametics, and the run ends
+       through G_CheckDemoStatus's I_Error ("timed N gametics" on the console,
+       status negative): that unwind is the success path. *)
     blob_args := s;
     parse_args rest
   | "-profile" :: p :: rest ->
-    (* the emulator flat profile (the 1d perf campaign's Amdahl instrument):
-       count PC hits per code word during the Tick loop (Init excluded — the
-       frame is what matters), then aggregate by doom.blob.map symbol ranges
-       and weight the STATIC per-word opcode classes by the dynamic counts —
-       the exact dynamic instruction mix at zero per-step decode cost. *)
+    (* executions per code word over the Tick loop (Init excluded), aggregated
+       by doom.blob.map symbol. Opcode classes are decoded from the blob once,
+       per word, so the instruction mix costs nothing per step. *)
     profile_out := p;
     parse_args rest
   | "-keys" :: s :: rest ->
-    (* scripted input: comma list of tick:doomkey:pressed (all decimal) —
-       each event goes through the real KeyIn entry (ev = pressed | key<<8,
-       ABI §7) just before that Tick, so the whole ring/responder/menu path
-       is drivable headlessly, e.g. menu quit: 27 Esc, 113 'q', 121 'y' *)
+    (* each event goes through the real KeyIn entry just before its Tick, so the
+       ring, the responders and the menus all run; menu quit is Esc, 'q', 'y'
+       (doomkeys 27, 113, 121) *)
     keys_spec := s;
     parse_args rest
   | "-hw" :: rest ->
-    (* feat/halftone: advertise the hardware scanout (SHARED +544 bit 0,
-       ABI.md §11). The emulator models no Halftone — the window is
-       plain RAM and nothing reads the mode bit — but the BLOB forks on the
-       flag: DG_DrawFrame drops the dither for the LUT upload, so -profile /
-       instruction counts measure the hw-path workload. Frame dumps are
-       meaningless in this mode (the mono fb is never written). *)
+    (* SHARED +544 bit 0 (ABI §11). The emulator has no Halftone — the window
+       is plain RAM — but the blob takes the hardware path (frame copy and LUT
+       upload instead of the dither), so -profile measures that workload. The
+       mono fb is never written, so frame dumps go blank. *)
     hw := true;
     parse_args rest
   | "-dump-at" :: s :: rest ->
-    (* comma list of GAMETICS (needs -args "-timedemo demo1": singletics makes
-       gametic = tick count + 1, so both this harness and the host golden
-       generator key dumps on counted Ticks — no game-memory access). Dumps
-       frame_gNNNNN.fbw — the raw fb window, 32*768 LE words in memory order —
-       the format bin/doom_golden.c writes as golden_gNNNNN.fbw;
-       cmp(1) of the pair is the oracle's verdict. A .pgm rides along for
-       eyeballs. Pick gametics past the demo-start wipe (>= 100). *)
+    (* needs -args "-timedemo demo1": gametic = Ticks + 1, here as in
+       bin/doom_golden.c, so neither side reads game memory to align.
+       frame_gNNNNN.fbw is the raw fb window, the format of the generator's
+       golden_gNNNNN.fbw: cmp(1) of the pair is the oracle. A .pgm rides
+       along. Pick gametics past the demo-start wipe (>= 100). *)
     dump_at := s;
     parse_args rest
   | ("-help" | "--help") :: _ ->
@@ -128,8 +112,6 @@ and set_int r n rest =
     parse_args rest
   | None -> fail "run_blob: not an integer: %s" n
 ;;
-
-(* ---- the machine, loaded the way the stub loads it ---- *)
 
 let word_of_bytes b off = Int32.to_int (Bytes.get_int32_le b off) land 0xFFFF_FFFF
 
@@ -161,12 +143,10 @@ let verify_header blob =
   then fail "run_blob: Init/Tick entry missing (0)"
 ;;
 
-(* Run one crt0 entry to its B LNK, advancing the synthetic clock; returns R0.
-   [total_steps] / [ms_countdown] persist across calls so the ms counter never
-   rewinds. The step loop is THE harness hot path (tens of billions of steps over
-   a timedemo), so the per-step work stays branch-cheap: the profiling test is a
-   bool hoisted out of the loop, and the ms clock is a countdown threaded through
-   the loop arguments — no division, no ref traffic per step. *)
+(* Run one entry to its return; returns R0. The clock state persists across calls,
+   so the ms counter never rewinds. The step loop is the hot path (tens of billions
+   of steps per timedemo): the profiling test is hoisted out of it, and the clock is
+   a countdown in the loop arguments — no division or ref traffic per step. *)
 let total_steps = ref 0
 let sim_ms = ref 0
 let ms_countdown = ref 0 (* steps to the next ms tick; armed on first use *)
@@ -231,8 +211,6 @@ let dump_raw m path =
   done;
   Out_channel.with_open_bin path (fun oc -> Out_channel.output_bytes oc b)
 ;;
-
-(* ---- the flat profile report ---- *)
 
 (* doom.blob.map: "# ..." header lines, then "0xADDR name" per code symbol,
    ascending — a symbol owns [addr, next addr). *)
@@ -404,7 +382,6 @@ let () =
   then fail "run_blob: WAD %d bytes exceeds the §8 window %d" (String.length wad) wad_cap;
   let m = M.make () in
   let ram = F.ram m in
-  (* the stub's obligations: image at BLOB_BASE, bss zeroed per the header *)
   load_image ram blob_base blob;
   let word off = word_of_bytes blob off in
   let bss_start = word AC.hdr_bss_base
@@ -412,17 +389,15 @@ let () =
   for w = bss_start / 4 to ((bss_start + bss_len) / 4) - 1 do
     ram.(w) <- 0
   done;
-  (* WAD into himem (padded tail rides the pre-zeroed RAM) *)
   let wadb = Bytes.make ((String.length wad + 3) land lnot 3) '\000' in
   Bytes.blit_string wad 0 wadb 0 (String.length wad);
   load_image ram AC.wad_base wadb;
-  (* SHARED page: zeroed, then the WAD length (§8 +28) *)
   for w = shared_base / 4 to ((shared_base + AC.shared_size) / 4) - 1 do
     ram.(w) <- 0
   done;
   ram.((shared_base + AC.shared_wad_len) / 4) <- String.length wad;
   if !hw then ram.((shared_base + AC.shared_present_flags) / 4) <- 1;
-  (* the command tail (§8 +1024): raw bytes + NUL, exactly as the stub will *)
+  (* NUL-terminated, as DOOM.Mod writes it *)
   if String.length !blob_args > 0
   then (
     if String.length !blob_args > 3000
@@ -430,7 +405,6 @@ let () =
     let tail = Bytes.make ((String.length !blob_args + 4) land lnot 3) '\000' in
     Bytes.blit_string !blob_args 0 tail 0 (String.length !blob_args);
     load_image ram (shared_base + AC.shared_cmd_tail) tail);
-  (* UART console: printf -> stdout *)
   M.set_serial
     m
     (Run_harness.tx_serial (fun b ->
@@ -439,7 +413,6 @@ let () =
   M.set_time m 0;
   let status () = ram.((shared_base + AC.shared_status) / 4)
   and heartbeat () = ram.((shared_base + AC.shared_heartbeat) / 4) in
-  (* ---- Init(wad_addr, cfg_addr) ---- *)
   Printf.eprintf "run_blob: Init...\n%!";
   let r =
     call_entry m "Init" (blob_base + word AC.hdr_init) ~r0:AC.wad_base ~r1:shared_base
@@ -473,10 +446,8 @@ let () =
       (H.framebuffer_hash m)
       base
   in
-  (* post-Init the fb holds gametic 1's render (Create runs init + one tic) *)
-  (* -hw probe: the Halftone threshold window's first words after Init — did the
-     blob's __dg_upload_thresholds land? (v2 raw upload: expected 0x30E000 =
-     311C550F for the DOOM blue noise, bytes 15, 85, 28, 49 verbatim) *)
+  (* did __dg_upload_thresholds land? The blue noise opens 15, 85, 28, 49, so the
+     first word reads 311C550F *)
   if !hw
   then
     Printf.eprintf
@@ -484,8 +455,8 @@ let () =
       (F.ram m).(AC.ht_threshold_base / 4)
       (F.ram m).((AC.ht_threshold_base + 4) / 4)
       (F.ram m).((AC.ht_threshold_base + 8) / 4);
+  (* Create ran init plus one tic: the fb holds gametic 1 *)
   if List.mem 1 gametic_targets then dump_gametic 1;
-  (* -profile: count from the first Tick on (Init excluded — frames are the cost) *)
   if !profile_out <> ""
   then (
     let code_start = blob_base + AC.header_size
@@ -508,7 +479,6 @@ let () =
   in
   if key_events <> [] && word AC.hdr_keyin = 0
   then fail "run_blob: -keys but no KeyIn entry";
-  (* ---- Tick loop ---- *)
   let frame = ref 0 in
   (try
      for t = 1 to !ticks do
@@ -520,7 +490,7 @@ let () =
          key_events;
        let r = call_entry m "Tick" (blob_base + word AC.hdr_tick) ~r0:0 ~r1:0 in
        flush stdout;
-       (* singletics under -timedemo: gametic = tick count + 1 *)
+       (* under -timedemo, gametic = Ticks + 1 *)
        if List.mem (t + 1) gametic_targets then dump_gametic (t + 1);
        if
          gametic_targets = []

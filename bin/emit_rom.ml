@@ -1,23 +1,22 @@
-(* emit_rom — the Cyclesim boot ROM stub (AGENT.md 1d, the sim leg).
+(* emit_rom — the boot ROM run_sim boots: the stub's calling side, for Cyclesim.
 
-   The cycle-accurate model boots from its 512-word ROM (reset PC = ROM word 0, byte
-   0xFFE000); the sim harness preloads blob + WAD + SHARED page directly into the PSRAM
-   model, so the ROM's only job is the stub's calling side: point R0/R1 at the WAD and
-   the SHARED page, BL the blob's crt0 entries (read from the §7 header at runtime — no
-   baked offsets), and report progress through the SHARED page for the harness to poll:
+   run_sim preloads blob, WAD and SHARED page into the PSRAM model, so the ROM only
+   calls: R0/R1 = WAD and SHARED, BL Init, then BL Tick until done, with the entry
+   offsets read from the blob's §7 header at run time. It talks to run_sim through
+   two SHARED words no loader uses:
 
-     SHARED+8 (the reserved flags word — the sim harness contract):
-       0xD00D0000 | (Init() & 0xFFFF)   after Init returns
-       0xD0E0D0E0                        after Tick returns nonzero, or the tick
-                                         target is reached (fb frozen exactly there)
-     SHARED+4 (in): tick target — park after this many Ticks; 0 = run forever.
-     SHARED+16 is Tick's own heartbeat; SHARED+12 the blob's exit status (§8).
+     +8 (out)  0xD00D0000 | (Init() & 0xFFFF)   after Init returns
+               0xD0E0D0E0                        when Init or Tick returns nonzero
+                                                 or the target is reached; the ROM
+                                                 then parks, the fb frozen
+     +4 (in)   tick target; 0 = run until Tick returns nonzero
 
-   The stub needs no stack (its only calls are the thunks, which own theirs) and makes
-   no MMIO accesses; R6-R11 hold its state across calls — the crt0 thunks save and
-   restore them, so they survive by the very contract test_blob proves.
+   Tick heartbeats +16 itself, and +12 is the blob's exit status (§8).
 
-   Usage: emit_rom [-o doomboot.rom]  — raw little-endian u32 words. *)
+   No stack: the only calls are to the thunks, which bring their own. R6-R11 hold the
+   ROM's state across them — the thunks save and restore those (test_blob proves it).
+
+   Usage: emit_rom [-o out.rom]   (default doomboot.rom; raw little-endian words) *)
 
 module R = Emu.Risc5_isa
 module L = Doomcc_core.Linker

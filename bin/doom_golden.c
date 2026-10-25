@@ -1,26 +1,22 @@
-/* doom_golden.c — the headless golden-frame generator (AGENT.md 1d).
+/* doom_golden.c — the host side of the pixel oracle: DOOM's platform layer,
+ * headless.
  *
- * The host half of the visual-golden oracle: the same game, the same WAD, the
- * same -timedemo demo1, and — the load-bearing part — THE SAME libc/dither.c,
- * blitting CMAP256 320x200 frames into a fake 1024x768 1-bit framebuffer with
- * the exact machine geometry (origin word 583*32+6, stride -32). At chosen
- * gametics the raw fb window (32*768 little-endian words, memory order — fb
- * line 0 at the bottom, bit 0 leftmost) dumps to golden_gNNNNN.fbw; 
- * -dump-at writes the identical format from emulator RAM, and cmp(1) is the
- * verdict: bit-identical or the toolchain/port diverged.
+ * The same game, WAD and -timedemo demo1 as the blob, and the same libc/dither.c,
+ * compiled by plain gcc and blitting into a fake 1024x768 1-bit framebuffer with
+ * the machine's geometry. At chosen gametics the raw fb window (32*768
+ * little-endian words in memory order: fb line 0 at the bottom, bit 0 leftmost)
+ * is written to golden_gNNNNN.fbw; run_blob -dump-at writes the same format from
+ * emulator RAM, and cmp(1) of the pair is the verdict.
  *
- * Alignment needs no game-memory access on either side: under -timedemo the
- * engine is singletics, so after doomgeneric_Create (which runs init + ONE
- * tic) gametic = 1, and after the t-th doomgeneric_Tick gametic = t + 1 —
- * both sides just count Tick calls. Choose gametics away from the demo-start
- * wipe (whose multiple renders per gametic depend on the pacing clock; from
- * ~gametic 100 on, render <-> gametic is 1:1).
+ * Neither side reads game memory to align: under -timedemo the engine is
+ * singletics, so after doomgeneric_Create (init plus one tic) gametic = 1, and
+ * after the t-th doomgeneric_Tick gametic = t + 1 — both sides count Ticks.
+ * Choose gametics past the demo-start wipe, whose renders per gametic depend on
+ * the clock; from about gametic 100 on, renders and gametics are 1:1.
  *
- * Build: `make golden` (top-level Makefile) — gcc -m32 -funsigned-char
- * (the jig oracle's target model), no SDL, no sound.
- *
- * Usage: `make goldens` (or GOLDEN_TICS=... ./golden in _out/golden; defaults
- * to that list — frames land next to the binary) */
+ * Build and run: `make goldens` — gcc -m32 -funsigned-char (the jig oracle's
+ * target model), no SDL, no sound. Frames land in _out/golden; GOLDEN_TICS=g,...
+ * picks the gametics (default 100,1000,2500,5000). */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,9 +32,9 @@ extern void __dg_dither_fs(const unsigned char *src, unsigned int *dst, int stri
 #define FB_WORDS (32 * 768)
 static unsigned int fb[FB_WORDS];
 
-/* mirror of the blob's DG_DrawFrame wrapper (libc/doom_oberon.c),
-   byte for byte in effect: LUT-on-palette_changed, then the fullscreen blit
-   (screen top-left = fb word 767*32, stride -32 — fb bottom-up) */
+/* the blob's software DG_DrawFrame (libc/doom_oberon.c), in effect: rebuild
+   the LUT on palette_changed, then the fullscreen blit (the fb is bottom-up:
+   the screen's top-left is word 767*32, and the stride is -32) */
 void DG_DrawFrame(void)
 {
     if (palette_changed) {
@@ -60,16 +56,15 @@ uint32_t DG_GetTicksMs(void)
     return t;
 }
 
-/* ---- scripted input + scene capture (the dither-lab side doors; all three
- * are env-gated and default OFF, so the golden path stays byte-identical) ----
+/* Env-gated extras, all off by default (the golden frames don't depend on them):
  *
- * GOLDEN_KEYS=tick:doomkey:pressed,...  feed key events before that Tick
- * GOLDEN_SCENES=tick:name,...           dump DG_ScreenBuffer (64000 B of
+ * GOLDEN_KEYS=tick:doomkey:pressed,...  feed key events during that Tick
+ * GOLDEN_SCENES=gametic:name,...        write DG_ScreenBuffer (64000 B of
  *                                        320x200 palette indices) to
  *                                        scene_<name>.sbuf and colors[] (1024
- *                                        BGRA bytes, gamma pre-applied) to
- *                                        scene_<name>.pal after that Tick
- * GOLDEN_ARGS=-warp 1                    replace "-timedemo demo1"           */
+ *                                        BGRA bytes, gamma applied) to
+ *                                        scene_<name>.pal at that gametic
+ * GOLDEN_ARGS=-warp 1                    replaces "-timedemo demo1"          */
 
 static int key_q[256][3]; /* tick, doomkey, pressed */
 static int key_n, key_cursor, tick_now;
@@ -189,15 +184,15 @@ int main(int argc, char **argv)
         }
         doomgeneric_Create(argn, args);
     }
-    /* gametic = t + 1 after the t-th Tick; the demo's I_Error exits for us
-       (scripted GOLDEN_KEYS quit runs land here too, via exit()) */
+    /* before Tick t (from 0) the screen shows gametic t + 1. The demo ends in
+       I_Error, which exits — as does a scripted quit. */
     for (t = 0; t < 6000; t++) {
         int k;
         tick_now = t;
         for (k = 0; k < n; k++)
             if (targets[k] == t + 1) dump(t + 1);
-        /* scenes share GOLDEN_TICS' gametic numbering (pre-Tick, t + 1), so
-           GOLDEN_SCENES=1000:game pairs bit-exactly with golden_g01000.fbw */
+        /* numbered as GOLDEN_TICS: GOLDEN_SCENES=1000:game pairs with
+           golden_g01000.fbw */
         for (k = 0; k < scene_n; k++)
             if (scene_tick[k] == t + 1) capture_scene(scene_name[k]);
         doomgeneric_Tick();

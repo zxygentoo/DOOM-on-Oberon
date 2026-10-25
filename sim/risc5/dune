@@ -1,7 +1,6 @@
-; Re-expose the vendored design's target-independent core (lib/) as `risc5`
-; in this project — mirrors the submodule's own lib/dune (inline expect tests
-; ride along, compiled here; run them upstream, not from this root). Third
-; party to this project: warnings off.
+; The vendored design's core (its lib/) as `risc5`, mirroring the submodule's
+; lib/dune. Its inline tests compile here but run upstream. Warnings off: third
+; party.
 
 (copy_files ../vendor/oberon-risc-hardcaml/lib/*.ml)
 

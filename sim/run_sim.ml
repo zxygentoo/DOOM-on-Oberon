@@ -1,27 +1,27 @@
-(* run_sim — DOOM on the cycle-accurate model (AGENT.md 1d, the Cyclesim leg).
+(* run_sim — the blob on the cycle-accurate model: the board SoC under Cyclesim.
 
-   The board SoC (icache on, board PSRAM timing) closed with Cellram_model widened to
-   the full 16 MiB (addr_bits 23 — the first full-SoC exercise of 2a's himem decode).
-   The harness plays the loader: pokes doom.blob, doom1.wad, and the SHARED page
-   (+28 WAD length, +1024 command tail) straight into the PSRAM model's byte lanes
-   before releasing reset, and boots the doomboot ROM stub (bin/doomboot.ml), which
-   calls the blob's crt0 entries and reports through the SHARED page:
+   The SoC is configured like the board bitstream (see [create]) and closed with the
+   behavioural PSRAM widened to the full 16 MiB. The harness plays the loader: it
+   writes the blob, the WAD and the SHARED page (+28 WAD length, +1024 command tail,
+   +4 tick target) straight into the PSRAM model's byte lanes, then releases reset
+   into the emit_rom boot ROM, which calls the blob's entries and reports through the
+   SHARED page:
 
-     +8  = 0xD00D0000 | (Init() & 0xFFFF)  once Init returns; 0xD0E0D0E0 when done
-     +16 = Tick's heartbeat (under -timedemo: singletics, heartbeat = gametic - 1)
+     +8  = 0xD00D0000 | (Init() & 0xFFFF) once Init returns; 0xD0E0D0E0 when done
+     +16 = Tick's heartbeat (under -timedemo, gametic = heartbeat + 1)
      +12 = the blob's exit status
 
-   Simulated time is real time: the board ms counter ticks every 60 000 cycles, so
-   cycles/tick IS the 60 MHz machine's honest cost, cache misses and all.
+   Simulated time is the board's: the ms counter ticks every [clocks_per_ms] cycles,
+   so cycles/tick is the real machine's cost, cache misses and all.
 
-   Output: progress per chunk (cycles, heartbeat), cycles-per-tick over the run, and
-   -fbw dumps the fb window in the golden format (32*768 LE words) for cmp against
-   host/doomgeneric_golden.c and doomrun.
-
-   Build & run (the ox switch — see sim/dune):
-     opam exec --switch=5.2.0+ox -- dune exec --root sim ./run_sim.exe -- \
-       ../doom.blob ../doom1.wad ../doomboot.rom -args "-timedemo demo1" \
-       -ticks 2 -fbw ../sim_g00002.fbw *)
+   Usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>
+     -ticks N          park after N Ticks (default 2; 0 = until the blob finishes)
+     -args "TAIL"      the DOOM command tail, e.g. -args "-timedemo demo1"
+     -fbw FILE         at the end, dump the fb window in the golden .fbw format
+     -max-mcycles N    cycle cap in millions (default 4000)
+     -hw               advertise the Halftone scanout; -fbw captures the panel
+     -profile FILE     cycles by doom.blob.map symbol, from the first Tick
+   Build and run on the OxCaml switch, with absolute paths: sim/README.md. *)
 
 open Hardcaml
 module Soc = Nexys4_board.Soc
@@ -56,31 +56,25 @@ module O = struct
   [@@deriving hardcaml]
 end
 
-(* the Board_tb wiring, with the himem-wide PSRAM model; [hw] = feat/halftone:
-   video DMA live (served on-chip: Framebuf + the Halftone scanout ditherer —
-   10c proved fb_bram cycle-identical to the video:false counterfactual, so
-   cycles/tick stays comparable across the seam) *)
+(* the host's Board_tb wiring, with the PSRAM model widened to 16 MiB. Video DMA
+   runs only under [hw] (served on-chip by Framebuf and Halftone); fb_bram is
+   proven cycle-identical to the video-off build, so cycles/tick compare across
+   the two. *)
 let create ~hw ~contents (i : _ I.t) : _ O.t =
   let dq = Signal.wire 16 in
   let soc =
     Soc.create
       ~contents
-      (* the SHIPPED bitstream config (emit_verilog.ml) — measure the real
-         machine, not the poor-performance soc.ml defaults: 60 MHz ms clock,
-         Phase-9 pipelined DSP multipliers, the full 10a-10d memory arc
-         (icache + write-update snoop + depth-2 write buffer). fb_bram is
-         moot with ~video:false (no DMA to serve); rc/wc are the rc=6 trade. *)
+      (* the bitstream's memory and multiplier knobs (the host's
+         board/nexys-4/emit_verilog.ml), not the slow Soc defaults — but the
+         clock is the 60 MHz build's, the one every sim number was measured on;
+         the pinned host now ships 64 MHz (clocks_per_ms 64000) *)
       ~clocks_per_ms:60000
       ~read_cycles:6
       ~write_cycles:5
       ~fast_mul:true
       ~mul_stages:2
       ~icache:true
-        (* the fps campaign's cache lever (2026-07-09, landed on the board):
-           16 KiB (4096 lines) — DOOM's working set thrashed the 4 KiB default
-           (read-miss stall 51% of the frame); CAPACITY, not line width, was
-           the lever. 32 KiB was tried on hardware and walked back in the host
-           session; the LOCKED bitstream ships lines_log2:12 — mirror that. *)
       ~lines_log2:12
       ~write_update:true
       ~write_buffer:true
@@ -121,7 +115,7 @@ let create ~hw ~contents (i : _ I.t) : _ O.t =
 
 module Sim = Cyclesim.With_interface (I) (O)
 
-(* ---- ABI §8 constants + the SHARED sim contract ---- *)
+(* ABI §8 values restated: abi_constants lives in the other dune root *)
 let shared_base = 0x300000
 let blob_base = 0x100000
 let wad_base = 0xA00000
@@ -143,7 +137,6 @@ let read_file p =
   | Sys_error e -> fail "run_sim: %s" e
 ;;
 
-(* ---- args ---- *)
 let ticks = ref 2
 let blob_args = ref ""
 let fbw = ref ""
@@ -167,20 +160,15 @@ let rec parse = function
     max_mcycles := int_of_string n;
     parse r
   | "-hw" :: r ->
-    (* feat/halftone: hardware-scanout mode — SHARED +544 bit 0 advertises the
-       Halftone window to the blob (DG_DrawFrame reduces to the LUT upload);
-       -fbw then dumps the frame the PANEL actually shows, reconstructed from
-       the compose FSM's acked words over one full scan of the parked frame *)
+    (* SHARED +544 bit 0: the blob presents through Halftone, and -fbw captures
+       what the panel shows (see the capture at the end) *)
     hw := true;
     parse r
   | "-profile" :: p :: r ->
-    (* the CYCLE-attribution profiler (the fps campaign's instrument): sample
-       the core's traced [pc] register every cycle from the first Tick on
-       (Init excluded, doomrun's -profile convention) and attribute the cycle
-       to that instruction address — a stalled instruction holds PC, so
-       memory-stall cycles land exactly where they are paid. Aggregated by
-       doom.blob.map symbol at exit; dividing by doomrun's per-symbol INSTR
-       profile yields per-function CPI, which is what prices the cache lever. *)
+    (* samples the core's pc every cycle from the first Tick on (where run_blob
+       -profile starts too) and charges the cycle to that address: a stalled
+       instruction holds pc, so stall cycles land where they are paid. Divided
+       by run_blob's per-symbol instruction counts, it gives per-function CPI. *)
     profile_out := p;
     parse r
   | a :: r ->
@@ -190,7 +178,7 @@ let rec parse = function
 ;;
 
 (* doom.blob.map: "# ..." headers, then "0xADDR name" per code symbol, ascending
-   (doomrun's parser, ported) *)
+   (run_blob's parser) *)
 let parse_map path =
   let syms = ref [] in
   In_channel.with_open_text path (fun ic ->
@@ -291,20 +279,18 @@ let () =
   let poke_string base s = String.iteri (fun k c -> poke_byte (base + k) (Char.code c)) s in
   poke_string blob_base blob;
   poke_string wad_base wad;
-  (* SHARED: model memory is born zeroed; write the WAD length + command tail *)
+  (* the model's memory starts zeroed: no SHARED clearing, and the tail's NUL is free *)
   let wl = String.length wad in
   poke_byte (shared_base + 28) (wl land 0xFF);
   poke_byte (shared_base + 29) ((wl lsr 8) land 0xFF);
   poke_byte (shared_base + 30) ((wl lsr 16) land 0xFF);
   poke_byte (shared_base + 31) ((wl lsr 24) land 0xFF);
   if String.length !blob_args > 0 then poke_string (shared_base + 1024) !blob_args;
-  (* the stub's tick target (SHARED+4): it parks the machine there, fb frozen *)
+  (* the ROM's tick target *)
   poke_byte (shared_base + 4) (!ticks land 0xFF);
   poke_byte (shared_base + 5) ((!ticks lsr 8) land 0xFF);
   poke_byte (shared_base + 6) ((!ticks lsr 16) land 0xFF);
   poke_byte (shared_base + 7) ((!ticks lsr 24) land 0xFF);
-  (* feat/halftone: advertise the hardware scanout (the loader's obligation;
-     ABI.md §11 — a zeroed page = software dither) *)
   if !hw then poke_byte (shared_base + 544) 1;
   (* idle inputs; reset for a few cycles *)
   i.pclk := Bits.gnd;
@@ -418,18 +404,16 @@ let () =
   then
     if !hw
     then (
-      (* feat/halftone: reconstruct the frame the panel shows from the compose
-         FSM's probes — at each ht_ack the latched (row, col) name the span
-         word just composed in ht_word. The machine is parked (doomboot's
-         self-loop), the raster free-runs (Cyclesim advances the pclk raster
-         1:1 with clk), so one full scan (~1.1 M cycles) visits all 24576
-         visible words. File format = the golden .fbw: the fb window in memory
-         order, i.e. span rows 256..1023 ascending = screen bottom-up. *)
-      (* the completed request's (row, col) is tracked off the soc-level
-         vidreq/vidadr wires: the FSM accepts only when idle and acks 12 cycles
-         later — well inside the raster's ~29.5-cycle request spacing — so each
-         ack pairs with the last request seen (a probe register inside Halftone
-         would be dead datapath and Cyclesim-DCE bait; learned the hard way) *)
+      (* Reconstruct the frame the panel shows. The machine is parked in the
+         ROM's self-loop while the raster free-runs (Cyclesim steps the pclk
+         logic 1:1 with clk), so one full scan (~1.1 M cycles) visits all 24576
+         visible words. Each ht_ack completes the word in ht_word; which word is
+         tracked off the SoC-level vidreq/vidadr wires: the FSM accepts only
+         when idle and acks 12 cycles later, well inside the raster's
+         ~29.5-cycle request spacing, so an ack pairs with the last request
+         seen. (A probe register inside Halftone would be dead logic, which
+         Cyclesim prunes.) The file is the golden .fbw: span rows 256..1023
+         ascending = the screen bottom-up. *)
       let probe n =
         match Cyclesim.lookup_node_or_reg_by_name sim n with
         | Some x -> x

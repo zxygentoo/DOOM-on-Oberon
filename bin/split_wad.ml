@@ -1,14 +1,12 @@
-(* split_wad — the host-side WAD chunk splitter (AGENT.md §3; 2c's tooling half).
+(* split_wad — split the WAD into chunk files the Project Oberon filesystem can hold.
 
-   The PO filesystem caps a single file at Wad.po_file_cap (~3.06 MB); DOOM1.WAD is
-   ~4 MB. Split it into plain byte-range chunk files the stock FS can hold; the stub
-   concatenates them into himem at init and hands the blob one WAD pointer (§2.7 —
-   the blob never touches storage).
+   A PO file caps at Wad.po_file_cap (~3.06 MB) and DOOM1.WAD is ~4 MB, so the WAD
+   travels as plain byte ranges <file>.0, <file>.1, ... that DOOM.Mod concatenates
+   back into himem. Refuses a split the stub couldn't load back (Wad.check_chunk_size)
+   or a chunk name too long for the FS, and verifies that the written chunks
+   reassemble to the input.
 
-   Usage:  split_wad <file> [chunk_size_bytes]
-   Writes <file>.0, <file>.1, ... next to the input, re-reads them, and verifies the
-   concatenation is byte-identical to the input. Chunk names are Oberon filenames on
-   the target — checked against the FS limits here, where failing is cheap. *)
+   Usage:  split_wad <file> [chunk_size_bytes] *)
 
 open Doomcc_core
 

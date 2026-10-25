@@ -1,5 +1,4 @@
-(* emit_bn64 — the void-and-cluster blue-noise threshold-map generator (Ulichney 1993),
-   host-side tooling for the dither kernel (AGENT.md §5).
+(* emit_bn64 — the void-and-cluster blue-noise threshold-map generator (Ulichney 1993).
 
    Emits a 64x64 blue-noise threshold table as C source on stdout — the
    __dg_bn64 array baked into libc/dither.c. Deterministic by construction

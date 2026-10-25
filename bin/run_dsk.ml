@@ -1,28 +1,17 @@
-(* run_dsk — boot a .dsk on the vendored emulator IN-PROCESS and drive the booted
-   system with a deterministic script: raw PS/2 bytes (exactly what the SDL
-   frontend encodes — fake-shift wrappers and all), mouse clicks (middle-click
-   invokes Oberon commands, so no serial orchestration), SHARED-page probes
-   (ABI §8: status / key-ring head / tail read straight from RAM), and PGM
-   frame dumps. The on-system complement of run_blob's -keys: run_blob proves
-   the blob's input path, run_dsk proves DOOM.Mod's PollKeys and the whole
-   stub on the real booted OS.
+(* run_dsk — boot a .dsk on the emulator in-process and drive the booted system from
+   a script: raw PS/2 bytes (as the SDL frontend encodes them, fake-shift wrappers and
+   all), middle-clicks (which run Oberon commands), SHARED-page probes (status and
+   key-ring indices, read from RAM) and PGM dumps. Where run_blob -keys exercises the
+   blob's input path, run_dsk exercises DOOM.Mod's on the booted OS.
 
-   The machine is paced by SIMULATED time (frame i = i/60 s), so scripts are
-   reproducible and the run goes as fast as the host allows. The UART (blob
-   printf) is captured to a log file. The disk is written IN PLACE — pass a
-   copy.
+   Time is simulated (frame i = i/60 s), so a script reproduces exactly. The UART is
+   captured to a file. The disk is written in place — pass a copy.
 
-   Usage: run_dsk [options] <image.dsk> — the options are [usage] below
-   (`run_dsk -help` prints it).
-
-   -htdump reads the halftone pixel window (ABI.md §11:
-   320x200 palette bytes at 0x310000, row 0 = top) as an 8-bit PGM — the
-   emulator has no halftone scanout, but the window is plain RAM, so a
-   client whose LUT is identity (Mandel) dumps as a directly viewable
-   grayscale frame.
-
-   Click coordinates are screen coords with y from the TOP (what you read off
-   a dumped PGM); the Oberon flip happens here. *)
+   Usage: run_dsk [options] <image.dsk>   (options: [usage], or -help)
+   Click y counts from the top, as read off a dumped PGM. -htdump reads the Halftone
+   pixel window (ABI §11: 320×200 bytes at 0x310000, top row first) as an 8-bit PGM:
+   the emulator has no scanout, but the window is plain RAM, and a client with an
+   identity LUT (Mandel) dumps as a viewable grayscale frame. *)
 
 module M = Emu.Risc
 module F = Emu.Risc.For_tests
@@ -34,8 +23,6 @@ let cpu_hz = H.cpu_hz
 let ht_w = 320 (* the DOOM client's halftone window geometry (ABI §11) *)
 let ht_h = 200
 let fail = Run_harness.fail
-
-(* ---- args ---- *)
 
 let usage =
   "usage: run_dsk [options] <image.dsk>   (the disk is written in place)\n\
@@ -206,11 +193,10 @@ let () =
            M.keyboard_input m b;
            Printf.printf "run_dsk: %6d ms  ps2 %d byte(s)\n%!" ms (Bytes.length b)
          | Click (x, ytop) ->
-           (* move + middle press (SDL button 2); Oberon polls the mouse word once
-              per LOOP PASS, and under DOOM.Window a pass contains a whole game
-              tick (~125 sim-ms) — a 50 ms pulse fell between polls. 400 ms spans
-              several passes; menu commands fire on RELEASE, so a longer hold is
-              still one click *)
+           (* held 400 ms: Oberon polls the mouse once per loop pass, and with
+              DOOM in a viewer a pass includes a whole game tick (~125 sim-ms), so
+              a short pulse can fall between polls. Commands fire on release, so
+              the long hold is still one click. *)
            M.mouse_moved m x (M.fb_height m - 1 - ytop);
            M.mouse_button m 2 true;
            acts := List.sort compare ((ms + 400, Release) :: !acts);

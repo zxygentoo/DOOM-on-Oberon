@@ -1,27 +1,24 @@
-(* doomcc — the whole-program driver (AGENT.md 1b): preprocessed C (.i) -> RISC5 blob.
+(* doomcc — the whole-program driver: preprocessed C -> the RISC5 blob.
 
-   The full pipeline: parse + amalgamate (Frontend) · data/bss layout (Globals) ·
-   per-function compilation (Fundec) · whole-program link at BLOB_BASE with crt0 thunks
-   and Runtime helpers (Linker/Crt0/Runtime) · the ABI §7 blob file + symbol map (Blob).
-   Functions the gate still refuses are histogrammed by reason (each names its pending
-   slice) and their symbols become one-word self-loop traps, alongside the undefined
-   imports the mini-libc will provide — that printed list is the 1c worklist.
+   Parses and merges the units (Frontend), lays out data and bss (Globals), compiles
+   each function (Fundec), swaps in the hand-written drawers, links at BLOB_BASE with
+   the crt0 entry thunks and the runtime helpers, and writes the ABI §7 blob plus its
+   symbol map. Functions Check refuses are counted by reason; they and every other
+   undefined symbol link as one-word self-loop traps, so reaching one hangs where
+   run_blob can name it.
 
-   Each stage below is a named function in pipeline order, printing its own report
-   line(s) as it runs; the [let ()] at the bottom IS the pipeline.
-
-   Usage:  doomcc <unit.i> [unit2.i ...] [-o out.blob]
-   Preprocess first with script/ppx_doomsrc.sh (or gcc -E -std=gnu99). *)
+   Usage:  doomcc <unit.i>... [-o out.blob]     (default doom.blob; map: <out>.map)
+   Units are gcc -E -std=gnu99 output — `make i` builds DOOM's — or preprocessor-free
+   C such as libc/*.c. *)
 
 module C = GoblintCil
 open Doomcc_core
 module AC = Abi_constants
 
-(* Args: preprocessed .i inputs, optional -o. m_fixed.c is replaced WHOLESALE
-   (AGENT.md §4): its int64_t code arrives via the host-preprocessed .i as 32-bit
-   `long` — a silent miscompile, not a refusal — so the file is skipped
-   unconditionally: FixedMul is the ABI §5 linker intrinsic, FixedDiv comes from
-   libc/fixed.c. Encoded here so no invocation can forget. *)
+(* m_fixed.i is dropped here, where no invocation can forget it: host preprocessing
+   spells its int64_t as x86-64 `long`, which ILP32 sizes at 32 bits, so it would
+   compile silently wrong. FixedMul is the linker intrinsic (ABI §5) and FixedDiv
+   comes from libc/fixed.c. *)
 let parse_args argv : string list * string =
   let out = ref "doom.blob"
   and inputs = ref [] in
@@ -50,7 +47,6 @@ let parse_args argv : string list * string =
   inputs, !out
 ;;
 
-(* (1) Front end: parse each TU, amalgamate to one unit (the PureDOOM rename step). *)
 let parse_and_merge (inputs : string list) : C.file =
   let units = List.map Frontend.parse_file inputs in
   let merged = Frontend.merge units ~name:"doom" in
@@ -58,8 +54,7 @@ let parse_and_merge (inputs : string list) : C.file =
   merged
 ;;
 
-(* (2) Data/bss layout: every placeable global gets a DB-relative offset; the
-   unplaceable ones are skipped-with-reason and refuse per touching function. *)
+(* An unplaceable global doesn't fail the build: each function touching it refuses. *)
 let layout_globals (merged : C.file) : Globals.t =
   let globals = Globals.from_file merged in
   Printf.printf
@@ -72,9 +67,6 @@ let layout_globals (merged : C.file) : Globals.t =
   globals
 ;;
 
-(* (3) Walk the merged unit and compile each function. Fundec.compile covers the
-   landed slices; Check refuses the rest, histogrammed by reason — each bucket names
-   the slice that will handle it (the printed histogram is the slice worklist). *)
 let compile_functions ~(globals : Globals.t) (merged : C.file) : Linker.obj list =
   let total = ref 0
   and ok = ref 0
@@ -104,8 +96,7 @@ let compile_functions ~(globals : Globals.t) (merged : C.file) : Linker.obj list
        | exception C.SizeOfError (why, _) ->
          incr rejected;
          bump ("sizeof failed (incomplete type?): " ^ why))
-    | C.GVar _ | C.GVarDecl _ ->
-      () (* handled by Globals above (GVarDecl-only = extern) *)
+    | C.GVar _ | C.GVarDecl _ -> () (* placed by layout_globals *)
     | _ -> ());
   Printf.printf
     "codegen: %d functions — %d compiled (%d instrs), %d gate-refused\n"
@@ -115,17 +106,16 @@ let compile_functions ~(globals : Globals.t) (merged : C.file) : Linker.obj list
     !rejected;
   if !rejected > 0
   then (
-    Printf.printf "         why the rest don't compile yet (the slice worklist):\n";
+    Printf.printf "         refused, by reason:\n";
     Hashtbl.fold (fun k n acc -> (n, k) :: acc) reasons []
     |> List.sort (fun a b -> compare (fst b) (fst a))
     |> List.iter (fun (n, k) -> Printf.printf "         %5d  %s\n" n k));
   List.rev !objs
 ;;
 
-(* The 1a drawer swap: the flat profile priced __dg_dither at 38% of the frame under
-   naive codegen; the hand-rolled objs (lib/drawers.ml, ~10 instrs/px) replace their
-   compiled versions. dither.c's C stays the spec — the jig diffs the hand code
-   against gcc compiling it, the golden oracle against the glibc-built host frames. *)
+(* The hand-written drawers (lib/drawers.ml) replace their compiled versions, and only
+   where the C was compiled: the C stays the spec, and the jig diffs each drawer
+   against gcc compiling it. *)
 let swap_drawers ~(globals : Globals.t) ~(merged : C.file) (objs : Linker.obj list)
   : Linker.obj list
   =
@@ -143,7 +133,7 @@ let swap_drawers ~(globals : Globals.t) ~(merged : C.file) (objs : Linker.obj li
     List.iter
       (fun (d : Linker.obj) ->
          Printf.printf
-           "drawers: %s hand-rolled (1a) — compiled version replaced\n"
+           "drawers: %s hand-rolled — compiled version replaced\n"
            d.Linker.name)
       drawers;
     let names = List.map (fun (d : Linker.obj) -> d.Linker.name) drawers in
@@ -151,15 +141,14 @@ let swap_drawers ~(globals : Globals.t) ~(merged : C.file) (objs : Linker.obj li
     @ drawers)
 ;;
 
-(* Symbols referenced but not defined — libc imports the mini-libc will provide, plus
-   any still-refused function. Each becomes a one-word self-loop trap so the layout
-   closes, and the printed list IS the mini-libc worklist. *)
+(* Referenced but defined nowhere: the refused functions and anything no unit
+   provides. Each becomes a trap (see the header). *)
 let undefined_symbols ~(globals : Globals.t) (objs : Linker.obj list) : string list =
   let defined = Hashtbl.create 256 in
   List.iter (fun (o : Linker.obj) -> Hashtbl.replace defined o.Linker.name ()) objs;
   let missing = Hashtbl.create 64 in
   let note_ref name =
-    (* intrinsics resolve by inline expansion, not by a defining object (ABI §5) *)
+    (* intrinsics expand inline; nothing defines them *)
     if (not (Hashtbl.mem defined name)) && not (Linker.is_intrinsic name)
     then Hashtbl.replace missing name ()
   in
@@ -173,7 +162,7 @@ let undefined_symbols ~(globals : Globals.t) (objs : Linker.obj list) : string l
   if missing <> []
   then (
     Printf.printf
-      "link:    %d undefined symbols -> self-loop traps (the mini-libc worklist):\n"
+      "link:    %d undefined symbols -> self-loop traps:\n"
       (List.length missing);
     Printf.printf "         %s\n" (String.concat " " missing));
   missing
@@ -181,10 +170,9 @@ let undefined_symbols ~(globals : Globals.t) (objs : Linker.obj list) : string l
 
 let trap name : Linker.obj = { Linker.name; frags = [ Linker.Label 0; Linker.Jmp 0 ] }
 
-(* (4) Whole-program link at BLOB_BASE (3b.2, ABI §6/§7/§8): size the code section
-   (crt0 thunks included — a thunk for each entry whose C symbol exists; thunk size
-   is a constant, so the section is sizable before the layout the thunks bake in),
-   fix the layout, build the thunks against it, and resolve everything. *)
+(* The thunks bake in layout addresses (save area, data base), but the layout needs
+   the code size first; Crt0.size being a constant breaks the cycle. One thunk per
+   entry whose C function exists. *)
 let link_program ~(globals : Globals.t) (objs : Linker.obj list) (traps : Linker.obj list)
   : Blob.layout * Linker.image * int
   =
@@ -217,8 +205,6 @@ let link_program ~(globals : Globals.t) (objs : Linker.obj list) (traps : Linker
   in
   if layout.Blob.bss_base + layout.Blob.bss_length > AC.blob_end_cap
   then (
-    (* past the cap the bss runs into the C stack's row (ABI §8): a blob that would
-       corrupt itself at run time is a failed build, not a warning *)
     Printf.eprintf
       "doomcc: blob end 0x%X exceeds the 1.75 MB cap 0x%X (ABI §8: bss would run into \
        the C stack)\n"
@@ -246,9 +232,8 @@ let patched_data ~(globals : Globals.t) ~(layout : Blob.layout) (image : Linker.
   data
 ;;
 
-(* The ABI §7 blob file. Header entries point at the thunks, not the C functions —
-   the thunk owns the world switch (ABI §7); 0 while the port layer's C entry
-   doesn't exist yet. *)
+(* Header entries point at the thunks, not the C functions: the thunk owns the switch
+   into C (stack, DB, Oberon's registers saved). 0 = no such entry. *)
 let write_blob ~out ~(globals : Globals.t) ~(layout : Blob.layout) (image : Linker.image)
   : unit
   =
@@ -290,7 +275,6 @@ let write_map ~path ~out ~(layout : Blob.layout) (image : Linker.image) : unit =
   close_out oc
 ;;
 
-(* ---- the pipeline ---- *)
 let () =
   let inputs, out = parse_args (List.tl (Array.to_list Sys.argv)) in
   let merged = parse_and_merge inputs in
