@@ -12,10 +12,8 @@
    printf) is captured to a log file. The disk is written IN PLACE — pass a
    copy.
 
-   Usage: run_dsk [-seconds N] [-serial-log FILE]
-                 [-ps2 "ms:HEXBYTES,..."] [-click "ms:x:ytop,..."]
-                 [-probe "ms,..."] [-dump "ms:name,..."]
-                 [-htdump "ms:name,..."] <image.dsk>
+   Usage: run_dsk [options] <image.dsk> — the options are [usage] below
+   (`run_dsk -help` prints it).
 
    -htdump reads the halftone pixel window (ABI.md §11:
    320x200 palette bytes at 0x310000, row 0 = top) as an 8-bit PGM — the
@@ -38,6 +36,17 @@ let ht_h = 200
 let fail = Run_harness.fail
 
 (* ---- args ---- *)
+
+let usage =
+  "usage: run_dsk [options] <image.dsk>   (the disk is written in place)\n\
+  \  -seconds N             simulated seconds to run (default 30)\n\
+  \  -serial-log FILE       UART capture (default run_dsk-uart.log)\n\
+  \  -ps2 \"ms:HEXBYTES,...\" raw PS/2 bytes at a simulated time\n\
+  \  -click \"ms:x:ytop,...\" middle-click at screen coords, y from the top\n\
+  \  -probe \"ms,...\"        print the SHARED status and key-ring indices\n\
+  \  -dump \"ms:name,...\"    framebuffer -> run_dsk_<name>.pgm\n\
+  \  -htdump \"ms:name,...\"  Halftone pixel window -> run_dsk_<name>.pgm"
+;;
 
 let seconds = ref 30
 let serial_log = ref "run_dsk-uart.log"
@@ -73,6 +82,11 @@ let rec parse_args = function
   | "-htdump" :: s :: rest ->
     htdump_spec := s;
     parse_args rest
+  | ("-help" | "--help") :: _ ->
+    print_endline usage;
+    exit 0
+  | a :: _ when String.length a > 1 && a.[0] = '-' ->
+    fail "run_dsk: unknown flag, or a flag missing its value: %s\n%s" a usage
   | a :: rest ->
     inputs := a :: !inputs;
     parse_args rest
@@ -89,15 +103,19 @@ let int_of s =
 
 let bytes_of_hex s =
   let n = String.length s in
-  if n = 0 || n land 1 <> 0 then fail "run_dsk: odd hex string: %s" s;
-  Bytes.init (n / 2) (fun i -> Char.chr (int_of_string ("0x" ^ String.sub s (2 * i) 2)))
+  if n = 0 || n land 1 <> 0 then fail "run_dsk: empty or odd-length hex string: %s" s;
+  Bytes.init (n / 2) (fun i ->
+    let pair = String.sub s (2 * i) 2 in
+    match int_of_string_opt ("0x" ^ pair) with
+    | Some b -> Char.chr b
+    | None -> fail "run_dsk: bad hex byte %S in %s" pair s)
 ;;
 
 (* one scheduled action, fired when simulated ms passes its time *)
 type action =
   | Ps2 of bytes
   | Click of int * int (* x, y-from-top: move + middle press *)
-  | Release (* middle button up, auto-scheduled 50 ms after a Click *)
+  | Release (* middle button up, auto-scheduled 400 ms after a Click *)
   | Probe
   | Dump of string
   | Htdump of string
@@ -151,7 +169,7 @@ let () =
   let dsk =
     match !inputs with
     | [ d ] -> d
-    | _ -> fail "usage: run_dsk [options] <image.dsk>  (disk is written in place)"
+    | _ -> fail "%s" usage
   in
   if not (Sys.file_exists dsk) then fail "run_dsk: no such disk: %s" dsk;
   let m = M.make () in
@@ -169,7 +187,7 @@ let () =
     Printf.printf
       "run_dsk: %6d ms  status %d  ring head %d tail %d  fb %016Lx\n%!"
       ms
-      (w AC.shared_status)
+      (Run_harness.signed32 (w AC.shared_status))
       (w AC.shared_ring_head)
       (w AC.shared_ring_tail)
       (H.framebuffer_hash m)

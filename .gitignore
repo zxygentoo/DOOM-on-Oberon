@@ -10,5 +10,7 @@ _build/
 *.fbw
 frame_*.pgm
 run_dsk_*.pgm
+run_dsk-uart.log
+doomboot.rom
 scene_*.sbuf
 scene_*.pal

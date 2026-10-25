@@ -38,11 +38,11 @@ let () =
        | None -> fail "split_wad: chunk size must be an integer: %s" size)
     | _ -> fail "usage: split_wad <file> [chunk_size_bytes]"
   in
-  if chunk_size > Wad.po_file_cap
-  then
-    fail "split_wad: chunk size %d exceeds the PO file cap %d" chunk_size Wad.po_file_cap;
   let data = read_file input in
   if String.length data = 0 then fail "split_wad: %s is empty" input;
+  (match Wad.check_chunk_size ~len:(String.length data) chunk_size with
+   | Ok () -> ()
+   | Error why -> fail "split_wad: %s" why);
   let chunks = Wad.split ~chunk_size (Bytes.of_string data) in
   let names = List.mapi (fun i _ -> Wad.chunk_name input i) chunks in
   List.iter

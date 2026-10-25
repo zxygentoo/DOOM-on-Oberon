@@ -12,8 +12,9 @@
    A PC that doesn't advance across a step is a self-loop — doomcc's trap for refused
    or undefined symbols — reported with the address for a doom.blob.map lookup.
 
-   Usage: run_blob [-ticks N] [-dump-every N] [-steps-per-ms N] [-max-steps N]
-                  <doom.blob> <doom1.wad> *)
+   Usage: run_blob [options] <doom.blob> <doom1.wad> — the options are [usage]
+   below (`run_blob -help` prints it); the longer story of each sits on its
+   parse_args arm. *)
 
 module M = Emu.Risc
 module F = Emu.Risc.For_tests
@@ -29,6 +30,21 @@ let fail = Run_harness.fail
 let read_file = Run_harness.read_file
 
 (* ---- args ---- *)
+
+let usage =
+  "usage: run_blob [options] <doom.blob> <doom1.wad>\n\
+  \  -ticks N            Ticks to run after Init (default 10)\n\
+  \  -dump-every N       PGM-dump every Nth tick and the last (default 1; 0 = the\n\
+  \                      last only); off under -dump-at\n\
+  \  -dump-at G,G,...    dump frame_gNNNNN.fbw + .pgm at these gametics (with\n\
+  \                      -args \"-timedemo demo1\": the golden-oracle format)\n\
+  \  -args \"TAIL\"        the DOOM command tail, e.g. -args \"-timedemo demo1\"\n\
+  \  -keys T:K:P,...     scripted KeyIn events (tick:doomkey:pressed, decimal)\n\
+  \  -hw                 advertise the Halftone scanout (frame dumps go blank)\n\
+  \  -profile FILE       flat profile of the Tick loop, by doom.blob.map symbol\n\
+  \  -steps-per-ms N     the synthetic ms clock (default 44000)\n\
+  \  -max-steps N        step budget per entry call (default 2000000000)"
+;;
 
 let ticks = ref 10
 let dump_every = ref 1
@@ -93,6 +109,13 @@ let rec parse_args = function
        eyeballs. Pick gametics past the demo-start wipe (>= 100). *)
     dump_at := s;
     parse_args rest
+  | ("-help" | "--help") :: _ ->
+    print_endline usage;
+    exit 0
+  | a :: _ when String.length a > 1 && a.[0] = '-' ->
+    (* a typo'd flag would otherwise land as a positional input and surface as a
+       misleading usage error *)
+    fail "run_blob: unknown flag, or a flag missing its value: %s\n%s" a usage
   | a :: rest ->
     inputs := a :: !inputs;
     parse_args rest
@@ -368,10 +391,11 @@ let dump_frame = Run_harness.dump_frame
 
 let () =
   parse_args (List.tl (Array.to_list Sys.argv));
+  if !dump_every < 0 then fail "run_blob: -dump-every %d: want >= 0" !dump_every;
   let blob_path, wad_path =
     match List.rev !inputs with
     | [ b; w ] -> b, w
-    | _ -> fail "usage: run_blob [options] <doom.blob> <doom1.wad>"
+    | _ -> fail "%s" usage
   in
   let blob = Bytes.of_string (read_file blob_path) in
   let wad = read_file wad_path in
@@ -423,8 +447,8 @@ let () =
   flush stdout;
   Printf.eprintf
     "run_blob: Init -> %d (status %d), %d steps, %d sim-ms\n%!"
-    r
-    (status ())
+    (Run_harness.signed32 r)
+    (Run_harness.signed32 (status ()))
     !total_steps
     !sim_ms;
   if r <> 0 then fail "run_blob: Init failed";
@@ -498,7 +522,9 @@ let () =
        flush stdout;
        (* singletics under -timedemo: gametic = tick count + 1 *)
        if List.mem (t + 1) gametic_targets then dump_gametic (t + 1);
-       if gametic_targets = [] && (t mod !dump_every = 0 || t = !ticks || r <> 0)
+       if
+         gametic_targets = []
+         && ((!dump_every > 0 && t mod !dump_every = 0) || t = !ticks || r <> 0)
        then (
          incr frame;
          let path = Printf.sprintf "frame_%04d.pgm" !frame in
@@ -506,7 +532,7 @@ let () =
          Printf.eprintf
            "run_blob: tick %d -> %d, heartbeat %d, %d sim-ms, fb %016Lx -> %s\n%!"
            t
-           r
+           (Run_harness.signed32 r)
            (heartbeat ())
            !sim_ms
            (H.framebuffer_hash m)
@@ -517,7 +543,7 @@ let () =
    | Exit -> ());
   Printf.eprintf
     "run_blob: done — status %d, heartbeat %d, %d total steps, %d sim-ms\n%!"
-    (status ())
+    (Run_harness.signed32 (status ()))
     (heartbeat ())
     !total_steps
     !sim_ms;

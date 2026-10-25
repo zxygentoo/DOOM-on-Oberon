@@ -15,7 +15,7 @@
    1 + r*253/4095 — the 1..254 range that keeps the kernel's endpoint
    guarantee: luminance 0 never fires, 255 always does.
 
-   Usage: dune exec bin/emit_bn64.exe [-- -sigma S] [-- -pgm P]
+   Usage: dune exec bin/emit_bn64.exe [-- [-sigma S] [-pgm P]]
           (C array on stdout; -sigma defaults to the shipping 1.5; -pgm also writes a
           50%-mask preview PGM) *)
 

@@ -87,6 +87,10 @@ printf 'doom.blob\ndoom1.wad.0\ndoom1.wad.1\n' >>"$T/src/.packonly"
 # 5. System.Tool: Mandel.Open joins the stock demos line (after Stars.Open),
 #    and a DOOM section is appended (middle-click targets)
 "$BIN/ob2txt.exe" "$T/src/System.Tool" >/dev/null
+grep -q 'Blink.Run  Stars.Open$' "$T/src/System.Tool.txt" || {
+  echo "mkdsk: System.Tool's demo line changed; update the Mandel.Open edit" >&2
+  exit 1
+}
 sed -i 's/Blink.Run  Stars.Open$/Blink.Run  Stars.Open  Mandel.Open/' "$T/src/System.Tool.txt"
 printf '\nDOOM.Run\nDOOM.Run -win\n\nDOOM.Run -timedemo demo1\nDOOM.Run -win -timedemo demo1\n' >>"$T/src/System.Tool.txt"
 "$BIN/txt2ob.exe" "$T/src/System.Tool.txt" >/dev/null

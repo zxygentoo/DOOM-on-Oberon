@@ -63,6 +63,16 @@ let () =
   let doom1 = 4_196_020 in
   eqi "doom1_chunks" ((doom1 + Wad.default_chunk_size - 1) / Wad.default_chunk_size) 2;
   check "doom1_names" (String.length (Wad.chunk_name "doom1.wad" 1) <= 31);
+  (* The stub's limits (DOOM.Mod's load loop): word-aligned chunk boundaries and
+     at most ten chunks — the default and the cap itself both pass for DOOM1. *)
+  let loads len cs = Wad.check_chunk_size ~len cs = Ok () in
+  check "default_loads_doom1" (loads doom1 Wad.default_chunk_size);
+  check "cap_loads_doom1" (loads doom1 Wad.po_file_cap);
+  check "unaligned_refused" (not (loads 10_000 4097));
+  check "zero_refused" (not (loads 100 0));
+  check "over_cap_refused" (not (loads 100 (Wad.po_file_cap + 4)));
+  check "ten_chunks_load" (loads (10 * 4096) 4096);
+  check "eleven_chunks_refused" (not (loads ((10 * 4096) + 1) 4096));
   if !failures = 0
   then Printf.printf "wadsplit: ok, %d checks passed\n" !total
   else (

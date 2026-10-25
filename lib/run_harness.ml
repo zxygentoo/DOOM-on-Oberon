@@ -13,6 +13,13 @@ let fail fmt =
     fmt
 ;;
 
+(* a 32-bit machine word as the signed C int it holds — the SHARED status and the
+   entry results are ints (exit(-1) must print as -1, not 4294967295) *)
+let signed32 w =
+  let w = w land 0xFFFF_FFFF in
+  if w land 0x8000_0000 <> 0 then w - 0x1_0000_0000 else w
+;;
+
 let read_file path =
   try In_channel.with_open_bin path In_channel.input_all with
   | Sys_error e -> fail "%s" e
