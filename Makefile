@@ -15,6 +15,7 @@
 #   make goldens   run it: _out/golden/golden_g*.fbw (the pixel oracle)
 #   make build     dune build (the OCaml tools)
 #   make test      the differential jig (dune runtest, default switch)
+#   make check     the emulator oracles: frames + 5026 gametics vs the host
 #   make fmt       dune fmt (default switch — the pre-commit gate)
 #   make sim       the Cyclesim leg (dune --root sim, OxCaml switch)
 #   make clean     rm -rf _out (the vendor tree stays patched)
@@ -39,7 +40,8 @@ SRCDIR := vendor/doomgeneric/doomgeneric
 LIBC   := libc/mini.c libc/stdio.c libc/fixed.c libc/doom_heap.c \
           libc/doom_oberon.c libc/dither.c
 
-.PHONY: all prereqs build blob chunks dsk rom i wad ref golden goldens test fmt sim clean
+.PHONY: all prereqs build blob chunks dsk rom i wad ref golden goldens test check fmt \
+        sim clean
 
 all: blob dsk
 
@@ -172,6 +174,16 @@ goldens: golden _out/doom1.wad
 	@ln -sf ../doom1.wad $(GDIR)/doom1.wad
 	cd $(GDIR) && ./golden; st=$$?; test $$st -eq 255 -o $$st -eq 0 || exit $$st
 	@ls $(GDIR)/golden_g*.fbw
+
+# ---- the oracles, end to end ------------------------------------------------
+
+# the emulator oracle set (AGENT.md 1d): the golden generator and the blob on
+# run_blob both play -timedemo demo1 — frames bit-identical at the chosen
+# gametics, both runs ending at 5026. script/check_oracles.sh owns the
+# verdicts; results land in _out/check/ (~6 min, nearly all emulation)
+check: blob golden _out/doom1.wad
+	$(DUNE) build bin/run_blob.exe
+	./script/check_oracles.sh
 
 clean:
 	rm -rf _out
