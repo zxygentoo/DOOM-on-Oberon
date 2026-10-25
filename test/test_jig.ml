@@ -148,7 +148,13 @@ let gcc_compile ?(gcc_extra = "") ~src ~fname ~arity () : string =
       (Filename.quote cfile)
       (Filename.quote exe)
   in
-  if Sys.command cmd <> 0 then failwith ("gcc failed for " ^ fname);
+  if Sys.command cmd <> 0
+  then
+    failwith
+      ("gcc failed for "
+       ^ fname
+       ^ " (the oracle builds with -m32: is the 32-bit multilib installed? `make \
+          prereqs` checks)");
   Sys.remove cfile;
   exe
 ;;

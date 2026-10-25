@@ -1,3 +1,29 @@
 (lang dune 3.0)
 
 (name doom_sim)
+
+(generate_opam_files true)
+
+; The OxCaml-switch toolchain, as the generated doom_sim.opam. The switch
+; itself comes from the oxcaml opam repository:
+;   opam switch create 5.2.0+ox \
+;     --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
+;   opam install --switch 5.2.0+ox --deps-only ./sim
+; The hardcaml suite is pinned to the preview every sim/ number was measured on.
+
+(package
+ (name doom_sim)
+ (allow_empty)
+ (synopsis "The Cyclesim leg: doom.blob on the cycle-accurate Hardcaml model")
+ (depends
+  (ocaml
+   (>= 5.2.0))
+  (hardcaml
+   (= "v0.18~preview.130.106+341"))
+  (hardcaml_waveterm
+   (= "v0.18~preview.130.106+341"))
+  (ppx_hardcaml
+   (= "v0.18~preview.130.106+341"))
+  (ppx_expect
+   (= "v0.18~preview.130.106+341"))
+  qcheck-core))

@@ -3,6 +3,7 @@
 # target encodes its opam switch, so the ox-vs-default trap can't bite.
 #
 #   make           blob + dsk
+#   make prereqs   check the system prerequisites (submodules, switches, -m32)
 #   make blob      the DOOM blob (doomcc over _out/i + libc)
 #   make dsk       the bootable DOOM.dsk (script/mkdsk.sh)
 #   make wad       fetch the shareware IWAD (md5-pinned)
@@ -26,16 +27,24 @@
 # the shipped kernel, making every golden comparison a full-scale compiler
 # differential. Don't let either recipe grow a dune dependency.
 
-DUNE  := opam exec --switch default -- dune
-DUNEX := opam exec --switch=5.2.0+ox -- dune
+# the two opam switches (dune-project / sim/dune-project list their packages);
+# override on the command line — make SWITCH=... OXSWITCH=... — or bypass
+# opam inside an activated environment with make DUNE=dune
+SWITCH   := default
+OXSWITCH := 5.2.0+ox
+DUNE     := opam exec --switch $(SWITCH) -- dune
+DUNEX    := opam exec --switch $(OXSWITCH) -- dune
 
 SRCDIR := vendor/doomgeneric/doomgeneric
 LIBC   := libc/mini.c libc/stdio.c libc/fixed.c libc/doom_heap.c \
           libc/doom_oberon.c libc/dither.c
 
-.PHONY: all build blob chunks dsk rom i wad ref golden goldens test fmt sim clean
+.PHONY: all prereqs build blob chunks dsk rom i wad ref golden goldens test fmt sim clean
 
 all: blob dsk
+
+prereqs:
+	@SWITCH='$(SWITCH)' OXSWITCH='$(OXSWITCH)' ./script/check_prereqs.sh
 
 # ---- the OCaml side (dune, default switch) --------------------------------
 
@@ -105,7 +114,7 @@ rom:
 	$(DUNE) exec bin/emit_rom.exe -- -o _out/doomboot.rom
 
 dsk: blob chunks
-	./script/mkdsk.sh
+	DUNE='$(DUNE)' ./script/mkdsk.sh
 
 # ---- the host oracles (plain gcc — keep dune-free, see header) --------------
 

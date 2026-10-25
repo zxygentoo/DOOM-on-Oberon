@@ -9,10 +9,12 @@
 #   + a DOOM section appended to System.Tool
 #
 # Host tools come from the vendored OCaml emulator (oberon-risc-hardcaml's own
-# nested submodule — one pin, owned by the host repo; dune-built on demand); the
-# result boots on the same emulator (16 MiB himem machine):
+# nested submodule — one pin, owned by the host repo; dune-built incrementally
+# on every run, so a pin bump can't leave stale tools behind); the result boots
+# on the same emulator (16 MiB himem machine; --root runs it from the emulator
+# root, hence the absolute path):
 #   dune exec --root vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml \
-#     bin/risc.exe -- DOOM.dsk
+#     bin/risc.exe -- "$PWD/_out/DOOM.dsk"
 #
 # Real hardware (Nexys 4, the 2a bitstream): the .dsk is a filesystem-only image
 # (first word 0x9B1EA38D); BootLoad reads the FS from SD block 0x80000 (BootLoad.Mod
@@ -20,19 +22,20 @@
 # rebase in software). Raw device, no partitioning; SW0 off (on = serial boot):
 #   sudo dd if=DOOM.dsk of=/dev/sdX bs=512 seek=524290 conv=fsync status=progress
 #
-# Usage: script/mkdsk.sh [output.dsk]   (env: EMU= to relocate the tool repo)
+# Usage: script/mkdsk.sh [output.dsk]
+#   (env: EMU= to relocate the tool repo; DUNE= the dune command — `make dsk`
+#    passes the Makefile's, so make SWITCH=... reaches the tool build too)
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 EMU=${EMU:-$REPO/vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml}
+DUNE=${DUNE:-opam exec --switch default -- dune}
 BIN=$EMU/_build/default/tools/bin
 OUT=${1:-$REPO/_out/DOOM.dsk}
 
-for t in extract_source.exe build_po_image.exe ob2txt.exe txt2ob.exe; do
-  [ -x "$BIN/$t" ] || { echo "building host tools in $EMU"; \
-    opam exec --switch default -- dune build --root "$EMU" \
-      tools/bin/ob2txt.exe tools/bin/txt2ob.exe \
-      tools/bin/extract_source.exe tools/bin/build_po_image.exe; break; }
-done
+# $DUNE unquoted on purpose: it is a command line (opam exec ... -- dune)
+$DUNE build --root "$EMU" \
+  tools/bin/ob2txt.exe tools/bin/txt2ob.exe \
+  tools/bin/extract_source.exe tools/bin/build_po_image.exe
 
 for f in "$REPO/_out/doom.blob" "$REPO/_out/doom1.wad.0" "$REPO/_out/doom1.wad.1"; do
   [ -f "$f" ] || { echo "missing $f (make blob / make chunks first)" >&2; exit 1; }
