@@ -9,8 +9,8 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
     stub owns the raw PS/2 FIFO (make/break + E0 arrows that Input.Mod drops). The
     blob presents through the Halftone scanout (ABI.md par 11) when the hardware is
     there, else through its software dither into the framebuffer (the emulator).
-    The hardware path holds the Halftone claim for the run, so like -win it refuses
-    while another consumer (a Mandel viewer) lives.
+    It takes no Halftone claim: the seized loop freezes every other client, and the
+    restore at exit lets them re-shape and re-upload (ABI.md par 11).
   - DOOM.Run -win: the viewer presentation, Halftone only — an ordinary MenuViewers
     viewer; an Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone
     rect (the largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to
@@ -266,13 +266,10 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   PROCEDURE Seize(argPos: INTEGER);
     VAR r, st, hw: INTEGER;
   BEGIN
-    (*hardware path: the claim spans the run, as in Win; the software path never
-      touches Halftone's tables and needs none*)
-    IF ~HasHalftone() THEN hw := 0; Msg("DOOM: no Halftone hardware: software dither")
-    ELSIF Halftone.Claim() THEN hw := 1
-    ELSE hw := -1; Msg("DOOM: panel rect in use (close its viewer first)")
+    IF HasHalftone() THEN hw := 1
+    ELSE hw := 0; Msg("DOOM: no Halftone hardware: software dither")
     END ;
-    IF (hw >= 0) & Load(hw, argPos) THEN
+    IF Load(hw, argPos) THEN
       Msg("DOOM: Init (D_DoomMain takes a while)");
       r := init(WadBase, SharedBase);
       IF r # 0 THEN Restore; Ended(r)
@@ -282,8 +279,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
         UNTIL (r # 0) OR (st # 0);
         Restore; Ended(st)
       END
-    END ;
-    IF hw = 1 THEN Halftone.Release END
+    END
   END Seize;
 
   PROCEDURE Paint(x, y, w, h: INTEGER);  (*the frame ground around the rect*)
