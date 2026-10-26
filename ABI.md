@@ -1,16 +1,20 @@
-# ABI.md — the 3a spec (calling convention · asm · blob format · himem layout)
+# ABI.md — the blob's ABI (calling convention · linker · blob format · himem layout)
 
-**Status: FROZEN v1 (2026-07-05) — changes require a `version` bump (§10).**
+**Status: FROZEN v1 (2026-07-05) — changes require a `version` bump (§10).** This
+is the v1-final text, corrected against the implementation at release (§10): no
+field or offset changed, and no code — it always did what this text now says.
 
-Consumers: the OCaml backend (1b), the 1a eDSL, the `risc5_isa` module +
-instr-level linker (3b; `risc5_isa` lives in the host repo, stock OCaml),
-stub loader (2c), sim harness (1d), Oberon prototypes (2b). Every constant
-and convention below is load-bearing for all of them; change nothing here
-after freeze without bumping the header version.
+Consumers: the compiler (`lib/` — codegen, the instr-level linker, the
+hand-written runtime helpers and drawers, the crt0 thunks), the loader
+(`patch/oberon/DOOM.Mod`) and its harness doubles (`bin/run_blob.ml`,
+`bin/run_dsk.ml`, `bin/emit_rom.ml` for the Cyclesim model), and the jig. The §8
+constants page is also code, `lib/abi_constants.ml`; this file is the
+cross-language authority.
 
 ## 1. Machine assumptions
 
-- RISC5 @ 60 MHz, little-endian, flat 24-bit byte addresses (16 MiB).
+- RISC5, little-endian, flat 24-bit byte addresses (16 MiB). (The board clocks it
+  at 64 MHz; nothing here depends on the clock.)
 - **No interrupts enabled, no traps, no MMU.** (Confirm-in-sim item C1.)
 - `LDB` zero-extends — there is no sign-extending byte load ⇒ `char` is
   **unsigned** (free choice; the other costs 2 instructions per load).
@@ -56,12 +60,16 @@ their loops.
   16-byte *home area* at `SP+0..15` (slots for R0–R3); arg 5 lives at
   `SP+16`, arg 6 at `SP+20`, … at the instant of `BL`.
 - Return value in R0. No 64-bit types exist (§4), so no register pairs.
-- **Aggregates** are never in registers: struct args are copied to the
-  stack; struct returns go via a hidden pointer passed as a synthetic first
-  arg in R0 (the classic hidden-pointer rewrite).
-- **Varargs**: callee stores R0–R3 into its home area on entry; `va_list` is
-  a `char*` walking upward. (`printf`/`I_Error`/`sprintf` are the only
-  consumers.)
+- **Aggregates by value** — struct arguments and struct returns — are refused
+  at compile time: DOOM passes every aggregate by pointer. (Had they been
+  needed: struct args copied to the stack, returns through a hidden pointer in
+  R0.) Whole-struct assignment is a byte copy.
+- **Varargs**: the *caller* stores every argument — R0–R3 into the home area
+  as well as 5+ on the stack — so at the `BL` the whole list lies contiguous at
+  `SP+0…`. A variadic callee takes FP and walks it upward from `FP + 4·(fixed
+  params)`; `va_list` is a `char*`, and the callee's prologue costs nothing.
+  Hand-written code calling a variadic function must store R0–R3 too (the
+  drawers' `I_Error` calls do).
 - Frame idiom (non-leaf):
 
 ```
@@ -78,7 +86,10 @@ their loops.
         B    LNK
 ```
 
-- Leaf functions may skip FP, LNK save, and the frame entirely.
+- A function sets up FP only when it reads incoming stack arguments (more than
+  four parameters, or variadic); locals are SP-relative — SP is fixed for the
+  whole body, since DOOM has no `alloca` or VLA. Leaf functions may skip the LNK
+  save and the frame entirely.
 - Oberon compatibility: ORG also evaluates the first parameters into R0… —
   for the ≤3-arg blob entries the conventions coincide at the boundary; the
   crt0 thunks (§7) own everything else.
@@ -90,50 +101,44 @@ their loops.
 | char | 8-bit **unsigned** (chocolate-doom lineage is already clean here) |
 | short | 16-bit |
 | int, long, pointers | 32-bit |
-| long long | **does not exist** — census-verified (the §9 spike census, AGENT.md; enforced by lib/check.ml): `FixedMul`/`FixedDiv` are the tree's *only* 64-bit sites, and both are 1a asm |
-| float, double | **banned in the blob v1** — census-verified strays are 6 cold functions (m_config float vars, am_map zoom, mouse-speed box (dead — no mouse), timedemo fps print), excised/pinned at 1c; RISC5 single-precision FPU exists if ever needed |
+| long long | **does not exist** (refused by `lib/check.ml`). DOOM's only 64-bit code is `m_fixed.c`'s `FixedMul`/`FixedDiv`, which doomcc replaces wholesale: `FixedMul` is the §5 intrinsic, `FixedDiv` is 32-bit C (`libc/fixed.c`). The other refused 64-bit functions are glibc header inlines (`__bswap_64`, `__uint64_identity`) that nothing calls |
+| float, double | **no runtime floating point** (refused). Constant `double` expressions under an integer cast fold at compile time (am_map's `(int)(.867 * 65536)` idiom); the one runtime use that matters, the timedemo's fps print, is patched to integers (`patch/c/0001`); the rest is unreachable (no config file, no mouse) and refused. The RISC5 FPU exists if ever needed |
 | alignment | natural, max 4; stack and structs word-aligned |
-| packed | **no packed attribute** — `PACKEDATTR` defined empty; every WAD-facing struct gets a `sizeof` assert in the host reference build |
-| bitfields | **banned outright** — census-verified (the §9 spike census, AGENT.md; enforced by lib/check.ml): sole user is `struct color` (i_video.h, not WAD-facing), patched to plain `uint8_t` fields at 1c; on-disk structs confirmed clean (integer fields + mask macros); backend never implements a bitfield ABI |
+| packed | `PACKEDATTR` is `__attribute__((packed))` under gcc, so packed structs reach CIL and are laid out byte-exact. A word access at a misaligned offset is refused at compile time — `LDW`/`STW` drop the low two address bits |
+| bitfields | **byte-aligned `:8` fields only** — one addressable byte each, accessed with `LDB`/`STB` (DOOM's only bitfield struct, `struct color`, is four of them); any other width or offset is refused |
 
 ## 5. Runtime helpers and intrinsics
 
-Helpers (hand-rolled, 1a) — standard ABI calls, clobber caller-saved only:
+Helpers (hand-written, `lib/runtime.ml`) — standard ABI calls; the division and
+shift helpers touch only R0–R3, H and the flags:
 
 | Symbol | Contract |
 |---|---|
-| `__div`, `__mod` | signed truncating `/` `%`; wrap hardware DIV (negate-before / fix-after); full sign coverage |
-| `__udiv`, `__umod` | unsigned; fast path hardware DIV, slow path for divisor ≥ 2³¹ (quotient is 0 or 1) |
-| `FixedDiv` | `(a<<16)/b`, 48/32 software long division, ~200–300 cycles |
-| `memcpy`, `memset`, `memmove` | word-loop cores |
+| `__div`, `__mod` | signed truncating `/` `%`; wrap hardware DIV (negate-before / fix-after); full sign coverage; a zero divisor yields 0 |
+| `__udiv`, `__umod` | unsigned; one `DIV'` (exact for any dividend), plus the path for divisor ≥ 2³¹ (quotient 0 or 1) |
+| `__lsr` | logical `>>` by a variable count (RISC5 has no logical shift right) |
+| `__setjmp`, `__longjmp` | the unwind behind `exit()` (§7): a 9-word buffer of R6–R12, SP, LNK |
 
 The backend maps C `/` and `%` to these calls; it never emits a bare `DIV`.
+`FixedDiv` is ordinary C (`libc/fixed.c`, ~200 cycles); `mem*` are the
+mini-libc's compiled C (`libc/mini.c`, with a word-copy fast path in `memcpy`).
 
 **Intrinsics** (an `instr list → instr list` pass, §6) — registry frozen
-at: `{ FixedMul }`. A `FixedMul` call expands inline (≈6 instructions:
+at: `{ FixedMul }`. A `FixedMul` call expands inline (6 instructions:
 `MUL`, `MOV'` from H, `LSL`/`ROR`/`AND`/`IOR`), result in R0, clobbers
 R0–R1 + H + flags — within the ABI's notion of a call, so callers can't
 tell (except by being fast).
 
 ## 6. The assembler/linker layer (over risc5_isa)
 
-The canonical representation is `risc5_isa.instr` — a **host-repo,
-stock-OCaml** module: the instr ADT + `encode`/`decode` + inlinable field
-accessors, the single definition of the RISC5 encoding. It's shared by the
-compiler backend, this layer, the core tests, and — a later sub-project —
-the emulator's own decode (the accessor layer is shaped so `single_step`
-adopts it at ~zero cost — **spike-proven** on the vendored emulator: every
-`[@inline]` accessor compiles to zero calls, bit-exact under both stock
-non-flambda and flambda2; the sole nuance is that matching the `kind` *variant*
-on the hot path costs a few % under non-flambda — free under flambda2 — so a
-hot decoder can branch on `p`/`q` directly, though the emulator ships
-`match kind` anyway, the cost being immaterial for a dev target). The backend
-emits `instr` lists directly;
-hand-written 1a code is an OCaml eDSL constructing the same `instr` values.
-Nothing round-trips through text. The concrete API — accessors, the `instr`
-ADT, `encode`/`decode`, and the invariants — is defined in
-[`risc5_isa.mli`](vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml/lib/risc5_isa.mli) (landed in the
-vendored emulator; the standalone host-repo module is the 3b hoist).
+The canonical representation is `Risc5_isa.instr`: the instr ADT +
+`encode`/`decode` + field accessors, the single definition of the RISC5
+encoding, shared by the compiler, this layer and the emulator's own decoder
+(it lives in the emulator,
+[`risc5_isa.mli`](vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml/lib/risc5_isa.mli),
+which the host repo vendors). The backend emits `instr` lists directly, and the
+hand-written code (`lib/asm.ml`'s eDSL) constructs the same values, so
+compiled and hand-written code link freely. Nothing round-trips through text.
 
 So the "assembler" is not a parser but an **instr-level linker** — a small
 pipeline of `instr list` passes:
@@ -141,29 +146,23 @@ pipeline of `instr list` passes:
 - **Label/branch resolution** — symbolic labels (a DOOM-repo layer *above*
   risc5_isa; `risc5_isa.instr` itself carries resolved offsets only) become
   concrete PC-relative / DB-relative offsets; forward refs are a two-pass.
-- **Pseudo / intrinsic expansion** — `LEA Rd, label` → `MOV'`+`IOR` (2
-  words); the `FixedMul` intrinsic (§5) → its ≈6-instr inline.
+- **Pseudo / intrinsic expansion** — an address `Rd := label` → `MOV'`+`IOR`
+  (always 2 words, so layout never depends on resolved values); the `FixedMul`
+  intrinsic (§5) → its 6-instruction inline.
 - **Addressing** — register aliases `FP DB SP LNK` (§2); global data is
   DB-relative; an absolute address is placed as a data word.
 - **Section layout** — code / data / bss flattened in order; bss reserves
   without emitting; the flat image links at a fixed himem address (§8), no
   relocation.
 - **Header + map** — auto-emit the §7 header (lengths, entry offsets from
-  the crt0 entries, checksum); dump a symbol map. `[@@deriving show]` on
-  `instr` gives free listings — the debugging currency.
+  the crt0 entries, checksum); dump a symbol map (`doom.blob.map`).
+- **Pointer-valued data** — an initializer holding a data or code address is
+  patched to the absolute word at link time.
 
-**Deferred, both directions (demand-driven):** a text *parser* (text →
-instr) and a canonical-mnemonic *disassembler* (instr → text). Neither is
-on a critical path — backend and eDSL both produce `instr`, deriving-show
-covers reading — so each is a leaf, addable later at zero cost to the rest.
-Build one the first time it itches (most likely a hot loop you'd rather
-hand-edit as `.s`). The eventual text syntax, if built: one instr/line,
-`;` comments, `name:` / `.Lname` labels, mnemonics with `'` for u-variants,
-`@label` / `.word` / `.code` / `.data` / `.bss`, no macros, no expression
-grammar.
-
-Worked leaf (no frame), shown in that deferred text view — the near-term
-eDSL constructs the identical `instr` list:
+Never built, and not needed: a text parser (text → instr) or a disassembler
+(instr → text). Both producers make `instr` values, so text would only ever be a
+view. The leaf below is written in assembly notation for reading; the eDSL
+builds exactly this list:
 
 ```
 ; void bzero8(char *p, int n)   ; R0 = p, R1 = n
@@ -196,7 +195,7 @@ anything else bumps `version`.
 Entries are **crt0 thunks** that own the world switch:
 
 ```
-save R6–R15 → save area in blob data     ; Oberon's world, parked
+save R6–R15 → save area at the bss end   ; Oberon's world, parked
 SP  = STACK_TOP ; SUB SP, SP, 16         ; C stack + initial home area
 DB  = LEA DB, __data_base
 BL   <C entry>                            ; args already in R0/R1 (§3)
@@ -205,9 +204,8 @@ B    LNK                                  ; back to the stub
 ```
 
 Signatures: `Init(wad_addr, cfg_addr) → 0 | error code`;
-`Tick() → 0 continue | 1 quit`; `KeyIn(ev)` (enqueues; v1 blob also polls
-UART itself, §6 of AGENT.md) — `ev = pressed | doomkey << 8`, the §8
-ring/wire byte order. `exit()`/`I_Error` set status in the shared
+`Tick() → 0 continue | 1 quit`; `KeyIn(ev)` enqueues one key event —
+`ev = pressed | doomkey << 8`, the §8 ring byte order. `exit()`/`I_Error` set status in the shared
 page and return through the thunk — never halt (realized as a
 setjmp-shaped unwind: each entry arms a jmp_buf of the callee-saved state
 R6–R12/SP/LNK; `exit` restores it and the entry returns normally).
@@ -232,19 +230,22 @@ decode territory + margin).
 | `0xA00000` | `0xE01000` | 4 MB + 4 KB | **WAD** (chunks concatenated by stub; the real shareware WAD is 4 196 020 B — 1 716 past 4 MiB, so the window carries one extra page) |
 
 No hardware guard pages exist; the blob/stack gap is convention. A stack
-that grows past `0x2C0000` corrupts .bss silently — the jig's stack-depth
-test (BSP recursion worst case) is the insurance.
+that grows past `0x2C0000` corrupts .bss silently. Nothing measures DOOM's
+worst-case depth (BSP recursion); 256 KB is a wide margin for it, and doomcc
+refuses a blob whose bss would reach the stack's row.
 
 SHARED page (v1 fields; rest reserved):
-`+0` magic · `+4` version · `+8` flags (reserved) · `+12` blob status
+`+0`, `+4`, `+8` unused — named magic, version and flags at the freeze, never
+written by any loader (the Cyclesim boot ROM borrows `+4` as its tick target and
+`+8` for its progress markers, `bin/emit_rom.ml`) · `+12` blob status
 (0 running, 1 quit, negative = I_Error code) · `+16` frame counter
 (heartbeat, incremented by `Tick`) · `+20` key ring head · `+24` tail ·
 `+28` WAD length in bytes (stub writes before `Init`) · `+32…` ring of
 2-byte events (make/break, code), 256 entries · `+1024…` the **command
 tail**: NUL-terminated text, ≤ 3 KB — the loader writes the raw tail
 verbatim before `Init` (a zeroed page is the empty tail; no parsing on the
-loader side — an Oberon stub byte-copies `Oberon.Par`'s text up to `~`, the
-harness copies its `-args` string). `Init` prepends the baked
+loader side — DOOM.Mod copies the rest of the command's line, up to `~` or the
+line's end; run_blob copies its `-args` string). `Init` prepends the baked
 `doom -iwad doom1.wad` and tokenizes on blanks **in place** (writing NULs),
 so the region belongs to the blob after `Init` — `myargv` points into it.
 
@@ -252,30 +253,37 @@ Key-ring discipline (v1; a §10 non-breaking clarification of the fields
 above): head and tail are free-running u32 counters, masked at use
 (index = counter & 255) — empty is `head = tail`, full is
 `head − tail = 256`, both exact across the u32 rollover. The producer
-(stub `KeyIn` / a UART poll) writes the 2-byte event at
+(the blob's `KeyIn`) writes the 2-byte event at
 `+32 + 2·(head & 255)`, *then* increments head; the consumer (the blob's
 `DG_GetKey`) reads at `+32 + 2·(tail & 255)` when `tail ≠ head`, then
 increments tail. A full ring drops the event, producer-side. Event bytes:
 byte 0 = pressed (1 make, 0 break), byte 1 = doomkey code (`doomkeys.h`) —
 the sender owns all translation; the blob never sees a scancode. The stub
-zeroes the SHARED page (head = tail = 0) before writing magic/version and
-calling `Init`.
+zeroes the SHARED page (head = tail = 0) before calling `Init`.
 
-SHARED `+544` (a §10-non-breaking reserved-field addition, 2026-07-14): the
-**presentation flags**, loader-written before `Init`. Bit 0 = the Halftone
-hardware is present (zero — every pre-Halftone loader/harness — is the
-software dither, bit-identically unchanged). Bit 1 = viewer presentation:
-the *stub* owns mode + geometry; the blob keeps thresholds + LUT + frame
-copy (§11).
+SHARED `+544` (a §10-non-breaking reserved-field addition): the
+**presentation flags**, loader-written before `Init`. Bit 0 = present through
+the Halftone hardware (zero, the default, is the software dither). Bit 1 =
+viewer presentation: the *stub* owns mode + geometry; the blob keeps
+thresholds + LUT + frame copy (§11). DOOM.Mod sets bit 0 only after finding
+the hardware (its frame counter, §11, advances).
 
-## 9. Confirm-in-sim checklist (becomes the first jig vectors)
+## 9. Assumptions the freeze rests on, and how each came out
 
-- **C1** — interrupts genuinely never fire (else R12/H/flags rules change).
-- **C2** — whether loads set N/Z (we forbid relying on it either way).
-- **C3** — `DIV'` (unsigned) with divisor ≥ 2³¹: confirmed-unsupported;
-  helper slow path covers it.
-- **C4** — `MUL'` (unsigned) H semantics vs the signed case.
-- **C5** — `MOV'` variants: H read (v=0) vs flags read (v=1) encodings.
+- **C1** — interrupts never fire (else the R12/H/flags rules change). Holds:
+  interrupts are disabled from reset, and neither Project Oberon 2013's system
+  modules nor the blob enable them.
+- **C2** — whether loads set N/Z. Moot: the backend derives every condition
+  from an explicit compare or ALU op, and the hand code consumes a flag in the
+  instruction right after the op that set it.
+- **C3** — `DIV'` (unsigned) with divisor ≥ 2³¹ is out of the divider's range.
+  Confirmed; `__udiv`/`__umod` handle it (§5).
+- **C4** — `MUL'` (unsigned) H semantics. Moot: the backend emits signed `MUL`
+  for every multiply (the low word is the same), and H is read only after
+  `FixedMul`'s signed `MUL`.
+- **C5** — `MOV'` reading H (v=0) vs the flags (v=1). The H read is used —
+  `FixedMul` and the division helpers — and exercised by the jig's fixed-point
+  and division samples and every frame; the flags read is unused.
 
 ## 10. Freeze protocol
 
@@ -290,14 +298,22 @@ a `version = 2` event.
 Amendments within v1 (all additive; blob header untouched): the WAD window
 end `0xE00000 → 0xE01000` (2026-07-08, first contact with the real shareware
 WAD); the key-ring discipline and SHARED `+28`/command-tail clarifications
-(§8); SHARED `+544` presentation flags + **§11**, the Halftone display seam —
-promoted 2026-07-15 from the draft `halftone-seam.md` after the mode shipped
-(board-proven, merged in both repos; the draft doc is retired).
+(§8); SHARED `+544` presentation flags + **§11**, the Halftone display seam
+(2026-07-15, after the mode shipped).
+
+v1-final errata (2026-10-26, the release): the text now matches what was
+built, where it had described plans — §3's varargs rule (the caller stores
+the arguments, not the callee), its aggregate rule (by-value structs are
+refused, not copied) and when FP exists, the type metrics (§4: packed structs and
+byte-aligned `:8` bitfields are supported, `FixedDiv` is C), the helper table
+(§5), the linker's passes (§6), SHARED `+0`/`+4`/`+8` (§8: never written), the
+C1–C5 outcomes (§9). No field or offset changed, and no code: every
+correction is the text catching up with the implementation.
 
 ## 11. The Halftone display seam (shipped 2026-07-14; v1-additive)
 
 The generalized indexed/grayscale display mode — hardware: the host repo's
-`Halftone` (`board/nexys-4/halftone.{ml,mli}`, its AGENT.md §5 row 11);
+`Halftone` (`board/nexys-4/halftone.{ml,mli}`);
 Oberon face: `Halftone.Mod` (shipped with the hardware, `board/nexys-4/Mod`);
 DOOM's raw-MMIO client: `libc/dither.c` + `libc/doom_oberon.c`. **The
 hardware keeps only mechanism; every policy — tone, thresholds, geometry —
@@ -313,7 +329,7 @@ loads are untouched.
 
 | byte offset | contents |
 |---|---|
-| `+0 .. +63999` | pixel bytes — **meaning is client-defined**: the row map names each displayed row's byte offset, so 320×200 row-major, strided images, or a double-buffered pair are all just row maps. Clients render **complete frames** here (the 2026-07-10 board lesson: the raster must never watch a renderer mid-sweep) |
+| `+0 .. +63999` | pixel bytes — **meaning is client-defined**: the row map names each displayed row's byte offset, so 320×200 row-major, strided images, or a double-buffered pair are all just row maps. Clients render **complete frames** here — the raster must never watch a renderer mid-sweep |
 | `+64000 .. +64255` | tone LUT: index = pixel byte, value = 8-bit gray |
 | `+64256 ..` | the register block, below |
 
@@ -379,7 +395,7 @@ latches the geometry shadows). Vblank is detected as a video **request gap**
 (video issues no fetches during blanking; a saturating watchdog fires ~68 µs
 in). The machine's first readable frame clock.
 
-Mode discipline (v1, blob-owned — §5 blob-talks-MMIO): upload thresholds +
+Mode discipline (fullscreen, blob-owned): upload thresholds +
 row map + LUT + geometry, then **mode on at the first `DG_DrawFrame`**
 (never at Init), **off in `exit()`** (instant desktop restore — the mono
 framebuffer was never written). Mode-on over zeroed tables scans all-zero
@@ -388,8 +404,7 @@ bit 1 (§8) the stub owns mode + geometry instead: `DOOM.Run -win`'s viewer
 lifecycle re-`Open`s the largest 4:3 rect per ModifyMsg, and quit/suspend
 drop the mode.
 
-Arbitration (2026-07-15, `Halftone.Mod` policy — the hardware stays pure
-mechanism): the rect is **single-owner at consumer lifetime** — `Claim` takes
+Arbitration (`Halftone.Mod` policy — the hardware stays pure mechanism): the rect is **single-owner at consumer lifetime** — `Claim` takes
 it for as long as the consumer lives (a viewer from open to close, or one
 command), `Release` frees it (parameterless: doubles as the recovery command
 for a claim wedged by a dead client). While a claim is live a second `Claim`
