@@ -8,6 +8,7 @@ blob that a small Oberon-07 stub loads into himem and runs, on the emulator,
 the cycle-accurate Hardcaml model and a Nexys 4 FPGA."""
 maintainer: ["zxy <zxygentoo@gmail.com>"]
 authors: ["zxy <zxygentoo@gmail.com>"]
+license: "MIT AND GPL-2.0-or-later"
 homepage: "https://github.com/zxygentoo/DOOM-on-Oberon"
 bug-reports: "https://github.com/zxygentoo/DOOM-on-Oberon/issues"
 depends: [

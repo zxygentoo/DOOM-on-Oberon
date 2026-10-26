@@ -4,6 +4,8 @@
 
 (generate_opam_files true)
 
+(license MIT)
+
 ; The OxCaml-switch toolchain, as the generated doom_sim.opam. The switch
 ; itself comes from the oxcaml opam repository:
 ;   opam switch create 5.2.0+ox \

@@ -4,6 +4,8 @@
 
 (generate_opam_files true)
 
+(license "MIT AND GPL-2.0-or-later")
+
 (source
  (github zxygentoo/DOOM-on-Oberon))
 
