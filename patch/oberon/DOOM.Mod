@@ -5,32 +5,32 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   SHARED page zeroed + WAD length at +28 + presentation flags at +544 + command tail
   at +1024, then Init/Tick through the crt0 thunks.
   Two presentations, one blob, one command:
-  - DOOM.Run: the fullscreen SEIZE — the loop never returns to Oberon.Loop, so the
+  - DOOM.Run: the fullscreen SEIZE -- the loop never returns to Oberon.Loop, so the
     stub owns the raw PS/2 FIFO (make/break + E0 arrows that Input.Mod drops). The
     blob presents through the Halftone scanout (ABI.md par 11) when the hardware is
     there, else through its software dither into the framebuffer (the emulator).
     It takes no Halftone claim: the seized loop freezes every other client, and the
     restore at exit lets them re-shape and re-upload (ABI.md par 11).
-  - DOOM.Run -win: the viewer presentation, Halftone only — an ordinary MenuViewers
+  - DOOM.Run -win: the viewer presentation, Halftone only -- an ordinary MenuViewers
     viewer; an Oberon.Task calls Tick once per loop pass, the STUB owns the Halftone
     rect (the largest 4:3 rect in the frame; SHARED +544 bit 1 tells the blob to
     keep only thresholds/LUT/frame-copy), and the desktop stays LIVE around the
     game. The rect is single-owner at CONSUMER lifetime (Halftone.Claim in Win,
     Release at close/quit): -win refuses up front while another consumer (a Mandel
-    viewer) lives, and our claim holds through suspend and resize — no one can
+    viewer) lives, and our claim holds through suspend and resize -- no one can
     touch the tables under a live window, so the blob's one-time threshold upload
     stays valid for the whole session.
     The -win token is consumed by the stub (a presentation choice, never passed to
     the blob); the rest of the line is the DOOM command tail as always.
     Keys are POINT-TO-PLAY: while the pointer is over the game frame, Input.SetSink
-    (the raw-scancode tap patched into Input.Mod — patch/oberon/Input.Mod.patch,
+    (the raw-scancode tap patched into Input.Mod -- patch/oberon/Input.Mod.patch,
     applied by mkdsk like the agent autoload patch) hands the untranslated
-    make/break stream to the same Byte FSM the seize loop uses — full
+    make/break stream to the same Byte FSM the seize loop uses -- full
     arrows/modifiers, identical feel; move the pointer off the game and the keyboard
     is Oberon's again (type in the Log mid-game). System.Close abandons the game
     (the next Run reloads fresh).*)
 
-  (*import order: ORB wants interface-referenced modules first — Display before
+  (*import order: ORB wants interface-referenced modules first -- Display before
     Viewers, Viewers/Texts before Oberon, MenuViewers/TextFrames after (the proven
     Mandel.Mod order)*)
   IMPORT SYSTEM, Files, Input, Display, Viewers, Texts, Oberon, MenuViewers,
@@ -134,7 +134,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
 
   (*is the Halftone display mode there? Its status word carries a frame counter that
     advances at 60 Hz; without the hardware the slot holds a constant (on the emulator,
-    the host clipboard's length — sampled only twice, since each read fetches it)*)
+    the host clipboard's length -- sampled only twice, since each read fetches it)*)
   PROCEDURE HasHalftone(): BOOLEAN;
     VAR f, t: INTEGER;
   BEGIN f := Halftone.Frame(); t := Oberon.Time() + 50;
@@ -153,7 +153,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   END Ended;
 
   (*the command tail (ABI par 8, SHARED +1024): the rest of the command line from
-    [pos], verbatim — ended by ~, end of text, or end of line (so a bare
+    [pos], verbatim -- ended by ~, end of text, or end of line (so a bare
     DOOM.Run in a Tool doesn't swallow the lines below it)*)
   PROCEDURE CopyArgs(pos: INTEGER);
     VAR r: Texts.Reader; ch: CHAR; a: INTEGER; b: BYTE;
@@ -189,7 +189,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
 
   (*one byte of the scancode stream: F0 = break prefix, E0 = extended prefix,
     else a key. The emulator (and a real keyboard) wraps arrows in fake-shift
-    E0 12 / E0 F0 12 — tabE[12H] = 0 swallows it. Event = pressed | doomkey<<8.
+    E0 12 / E0 F0 12 -- tabE[12H] = 0 swallows it. Event = pressed | doomkey<<8.
     Shared by the seize loop's FIFO drain (PollKeys) and -win's raw tap
     (Input.SetSink feeds it from inside Oberon.Loop's own polling).*)
   PROCEDURE Byte(b: BYTE);
@@ -213,7 +213,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   END PollKeys;
 
   (*repaint the desktop DOOM scribbled over: viewer state lives in the heap, only
-    pixels were lost — one restore broadcast redraws every frame and filler*)
+    pixels were lost -- one restore broadcast redraws every frame and filler*)
   PROCEDURE Restore;
     VAR M: Viewers.ViewerMsg;
   BEGIN M.id := Viewers.restore; Viewers.Broadcast(M)
@@ -223,7 +223,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
     presentation bits at +544 + command tail from [argPos]), plant the entries.
     TRUE = ready for init(). hwbits: 0 = software dither, 1 = hardware scanout
     (blob owns mode+geometry), 3 = viewer presentation (bit 1: the STUB owns
-    mode+geometry — the blob keeps thresholds/LUT/frame-copy).*)
+    mode+geometry -- the blob keeps thresholds/LUT/frame-copy).*)
   PROCEDURE Load(hwbits, argPos: INTEGER): BOOLEAN;
     VAR ok: BOOLEAN; blobLen, wadLen, len, i, a, w: INTEGER;
       name: ARRAY 16 OF CHAR;
@@ -314,7 +314,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   END Shape;
 
   (*point-to-play: the raw tap (Input.Mod.patch) is ours exactly while the pointer
-    is over the game frame — park the mouse on DOOM to play with the seize loop's
+    is over the game frame -- park the mouse on DOOM to play with the seize loop's
     full make/break fidelity; move it off and the keyboard is Oberon's again. The
     sink feeds Byte from inside Oberon.Loop's own input polling, so events land in
     the blob's key ring between ticks, exactly like the seize loop's PollKeys.*)
@@ -350,7 +350,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
     ELSE  (*displayed*)
       IF ~modeOn & (F # NIL) THEN  (*fresh, resized or redisplayed: (re)shape under
         the held claim. The blob uploaded its thresholds + LUT during Init's first
-        frame, and they are still ours untouched — nobody can claim past a live
+        frame, and they are still ours untouched -- nobody can claim past a live
         window*)
         IF Shape(F.X, F.Y, F.W, F.H) THEN Halftone.On; modeOn := TRUE END
       END ;
@@ -377,7 +377,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
             Oberon.DrawMouseArrow(M(Oberon.InputMsg).X, M(Oberon.InputMsg).Y)
           END
       | MenuViewers.ModifyMsg:
-          (*open / neighbour resize / suspend (H = 0) — drop the mode, let the next
+          (*open / neighbour resize / suspend (H = 0) -- drop the mode, let the next
             displayed tick re-Shape against the updated frame*)
           IF (M.Y # G.Y) OR (M.H # G.H) THEN
             IF modeOn THEN Halftone.Off; modeOn := FALSE END ;
@@ -390,7 +390,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
   PROCEDURE Win(argPos: INTEGER);
     VAR r, X, Y: INTEGER;
   BEGIN
-    (*the claim spans the window's whole lifetime, taken HERE — up front, so another
+    (*the claim spans the window's whole lifetime, taken HERE -- up front, so another
       consumer refuses us BEFORE the ~10 s Load+Init, whose first frame would stomp
       its threshold/LUT tables (Init runs one tick by the doomgeneric contract).
       Every failure path releases; the success path releases at close/quit (Tick0)*)
@@ -407,13 +407,13 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
           TextFrames.NewMenu("DOOM", "System.Close"),
           F, TextFrames.menuH, X, Y);
         Oberon.Install(T);
-        Msg("DOOM: windowed — point the mouse at the game to play; System.Close to stop")
+        Msg("DOOM: windowed; point the mouse at the game to play, System.Close to stop")
       END
     ELSE Halftone.Release  (*Load failed (it said why); free the rect*)
     END
   END Win;
 
-  PROCEDURE Run*;  (*DOOM.Run [-win] [DOOM args...] — -win is the stub's own*)
+  PROCEDURE Run*;  (*DOOM.Run [-win] [DOOM args...] -- -win is the stub's own*)
     VAR win: BOOLEAN; argPos: INTEGER;
   BEGIN
     IF V # NIL THEN Msg("DOOM: close the DOOM window first")
@@ -435,7 +435,7 @@ MODULE DOOM; (*load the blob and the WAD into himem and run DOOM.
 
   BEGIN
     FOR i := 0 TO 255 DO tabN[i] := 0; tabE[i] := 0 END ;
-    (*letters -> lowercase ASCII: menus (y/n), save names, cheats — iddqd needs its d*)
+    (*letters -> lowercase ASCII: menus (y/n), save names, cheats -- iddqd needs its d*)
     N(1CH, ORD("a")); N(32H, ORD("b")); N(21H, ORD("c")); N(23H, ORD("d"));
     N(24H, ORD("e")); N(2BH, ORD("f")); N(34H, ORD("g")); N(33H, ORD("h"));
     N(43H, ORD("i")); N(3BH, ORD("j")); N(42H, ORD("k")); N(4BH, ORD("l"));
