@@ -1,5 +1,9 @@
 # DOOM on Oberon
 
+> **operating system** *(n.)* — anything that runs DOOM.
+
+By that definition, Project Oberon has qualified at last.
+
 **DOOM, as an Oberon command, on Niklaus Wirth's RISC5 machine** — compiled by a C
 toolchain written for it in OCaml, loaded by a small Oberon-07 module, and run on the
 [Hardcaml RISC5](https://github.com/zxygentoo/oberon-risc-hardcaml) on a Digilent Nexys 4,
@@ -12,13 +16,9 @@ on its cycle-accurate model, and on the
 frame dithered to the machine's one-bit screen. On the board, the same dithering happens
 in the display hardware.*
 
-No C compiler existed for RISC5, so this repository has one: the
-[CIL](https://github.com/goblint/cil) C front end and a RISC5 backend, both OCaml,
-compile [doomgeneric](https://github.com/ozkl/doomgeneric) and a small libc into a flat
-binary. `DOOM.Mod`, an ordinary Oberon module, loads that binary and the WAD into the
-memory above Oberon's own megabyte and calls it, one game tick at a time. On the board
-DOOM runs at **15 frames a second** at 64 MHz, fullscreen or in a viewer beside the live
-desktop, and its timedemo ends at exactly the tick count of a reference PC build.
+On the board DOOM runs at **15 frames a second** at 64 MHz, fullscreen or in a viewer
+beside the live desktop, and its timedemo ends at exactly the tick count of a reference
+PC build.
 
 ![The Nexys 4 board beside a monitor showing the Project Oberon desktop with DOOM's title screen in a viewer](https://raw.githubusercontent.com/zxygentoo/oberon-risc-hardcaml/v0.1.0/docs/oberon-on-nexys4.jpg)
 
@@ -26,20 +26,41 @@ desktop, and its timedemo ends at exactly the tick count of a reference PC build
 
 ## What is in here
 
-- **The compiler** (`lib/`, `bin/doomcc.ml`). CIL parses and merges DOOM's 80
-  translation units into one program; the backend selects RISC5 instructions with a
-  deliberately simple register allocator, refuses whatever lies outside the ABI rather
-  than miscompile it, and an instruction-level linker lays out the blob. The hottest
-  loops — the dither, `R_DrawSpan`, `R_DrawColumn` — are hand-written in an OCaml eDSL
-  over the same instruction type, each checked against gcc compiling the C it replaces.
-- **The runtime** (`libc/`): a mini-libc compiled by the same compiler, the doomgeneric
-  platform layer, and the one-bit dither. DOOM never touches storage: the WAD arrives as
-  a pointer.
-- **The loader** (`patch/oberon/DOOM.Mod`): reads the blob and the WAD (split into two
-  files, since the Oberon file system caps a file at ~3 MB), then runs DOOM fullscreen
-  or in a viewer, with raw PS/2 keys for press and release.
-- **The contract** between them: [`ABI.md`](ABI.md) — registers, calls, types, the blob
-  format, the memory map, and the Halftone display interface.
+| Path | What |
+|---|---|
+| `lib/`, `bin/doomcc.ml` | the compiler: the CIL front end, the RISC5 backend, the linker, and the hand-written runtime and drawers |
+| `libc/` | the mini-libc, the doomgeneric platform layer, the one-bit dither |
+| `patch/c/` | the port's changes to doomgeneric |
+| `patch/oberon/` | the loader, `DOOM.Mod`, and a raw-scancode tap for Oberon's `Input` module |
+| `ABI.md` | the contract between them: registers, calls, types, the blob format, the memory map, the Halftone display interface |
+| `test/` | the differential jig: the compiler against gcc |
+| `bin/run_*.ml`, `sim/` | DOOM on the emulator, on the booted OS, and on the cycle-accurate model |
+
+## How it works
+
+**Compiling.** No C compiler existed for RISC5, so this repository has one, in OCaml.
+The [CIL](https://github.com/goblint/cil) front end parses
+[doomgeneric](https://github.com/ozkl/doomgeneric)'s 80 translation units and a small
+libc and merges them into one program. The backend selects RISC5 instructions with a
+deliberately simple register allocator, and refuses anything outside the ABI rather than
+miscompile it. The hottest loops — the dither, `R_DrawSpan`, `R_DrawColumn` — are
+hand-written in an OCaml eDSL over the same instruction type, each checked against gcc
+compiling the C it replaces. An instruction-level linker lays it all out as `doom.blob`:
+a header, code, data, and a symbol map beside it.
+
+**Loading.** `DOOM.Mod` is an ordinary Oberon module, compiled by Oberon's own compiler.
+It reads `doom.blob` and the WAD — split into two files, since the Oberon file system
+caps a file at about 3 MB — into the memory above Oberon's own megabyte, and calls the
+blob's entries: `Init` once, `Tick` once a frame, `KeyIn` for each key. Each entry
+switches to a C stack and back. DOOM never touches storage, the WAD arrives as a
+pointer, and when DOOM quits or fails, control returns to Oberon.
+
+**Drawing.** DOOM renders 320 × 200 palette frames. On the board the Halftone display
+mode dithers them onto the one-bit screen as it scans out; elsewhere the blob dithers in
+software. Both make the same pixels.
+
+**Keys.** DOOM needs press and release, which Oberon's `Input` module throws away, so
+the loader reads raw PS/2 scancodes.
 
 ## Getting started
 
