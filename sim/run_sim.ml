@@ -1,119 +1,31 @@
 (* run_sim — the blob on the cycle-accurate model: the board SoC under Cyclesim.
 
-   The SoC is configured like the board bitstream (see [create]) and closed with the
-   behavioural PSRAM widened to the full 16 MiB. The harness plays the loader: it
-   writes the blob, the WAD and the SHARED page (+28 WAD length, +1024 command tail,
-   +4 tick target) straight into the PSRAM model's byte lanes, then releases reset
-   into the emit_rom boot ROM, which calls the blob's entries and reports through the
-   SHARED page:
+   The SoC is the bitstream's, Build_config.shipped, closed by the host's testbench with
+   the behavioural PSRAM widened to the full 16 MiB and held to the datasheet's timing.
+   The harness plays the loader: it writes the blob, the WAD and the SHARED page (+28 WAD
+   length, +1024 command tail, +4 tick target) straight into the PSRAM model's byte
+   lanes, then releases reset into the emit_rom boot ROM, which calls the blob's entries
+   and reports through the SHARED page:
 
      +8  = 0xD00D0000 | (Init() & 0xFFFF) once Init returns; 0xD0E0D0E0 when done
      +16 = Tick's heartbeat (under -timedemo, gametic = heartbeat + 1)
      +12 = the blob's exit status
 
-   Simulated time is the board's: the ms counter ticks every [clocks_per_ms] cycles,
-   so cycles/tick is the real machine's cost, cache misses and all.
+   Simulated time is the board's: the ms counter ticks every clocks_per_ms cycles, so
+   cycles/tick is the real machine's cost, cache misses and all.
 
-   Usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>
-     -ticks N          park after N Ticks (default 2; 0 = until the blob finishes)
-     -args "TAIL"      the DOOM command tail, e.g. -args "-timedemo demo1"
-     -fbw FILE         at the end, dump the fb window in the golden .fbw format
-     -max-mcycles N    cycle cap in millions (default 4000)
-     -hw               advertise the Halftone scanout; -fbw captures the panel
-     -profile FILE     cycles by doom.blob.map symbol, from the first Tick
+   Usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>   (options: [usage])
    Build and run on the OxCaml switch, with absolute paths: sim/README.md. *)
 
 open Hardcaml
 module Soc = Nexys4_board.Soc
-module Cellram_model = Nexys4_board.Cellram_model
 
-module I = struct
-  type 'a t =
-    { clock : 'a
-    ; pclk : 'a [@bits 1]
-    ; rst_n : 'a [@bits 1]
-    ; miso : 'a [@bits 1]
-    ; rxd : 'a [@bits 1]
-    ; btn : 'a [@bits 4]
-    ; sw : 'a [@bits 8]
-    ; gpio_in : 'a [@bits 8]
-    ; ps2c : 'a [@bits 1]
-    ; ps2d : 'a [@bits 1]
-    ; msclk : 'a [@bits 1]
-    ; msdat : 'a [@bits 1]
-    }
-  [@@deriving hardcaml]
-end
+module Build_config = Nexys4_board.Build_config
+module Tb = Soc.For_tests.Tb
 
-module O = struct
-  type 'a t =
-    { sclk : 'a [@bits 1]
-    ; txd : 'a [@bits 1]
-    ; hsync : 'a [@bits 1]
-    ; vsync : 'a [@bits 1]
-    ; rgb : 'a [@bits 6]
-    }
-  [@@deriving hardcaml]
-end
+let config = Build_config.shipped
 
-(* the host's Board_tb wiring, with the PSRAM model widened to 16 MiB. Video DMA
-   runs only under [hw] (served on-chip by Framebuf and Halftone); fb_bram is
-   proven cycle-identical to the video-off build, so cycles/tick compare across
-   the two. *)
-let create ~hw ~contents (i : _ I.t) : _ O.t =
-  let dq = Signal.wire 16 in
-  let soc =
-    Soc.create
-      ~contents
-      (* the bitstream's memory and multiplier knobs (the host's
-         board/nexys-4/emit_verilog.ml), not the slow Soc defaults — but the
-         clock is the 60 MHz build's, the one every sim number was measured on;
-         the pinned host now ships 64 MHz (clocks_per_ms 64000) *)
-      ~clocks_per_ms:60000
-      ~read_cycles:6
-      ~write_cycles:5
-      ~fast_mul:true
-      ~mul_stages:2
-      ~icache:true
-      ~lines_log2:12
-      ~write_update:true
-      ~write_buffer:true
-      ~wbuf_depth:2
-      ~video:hw
-      ~fb_bram:hw
-      ~halftone:hw
-      { Soc.I.clock = i.clock
-      ; pclk = i.pclk
-      ; rst_n = i.rst_n
-      ; miso = i.miso
-      ; rxd = i.rxd
-      ; btn = i.btn
-      ; sw = i.sw
-      ; gpio_in = i.gpio_in
-      ; ps2c = i.ps2c
-      ; ps2d = i.ps2d
-      ; msclk = i.msclk
-      ; msdat = i.msdat
-      ; mem_dq_i = dq
-      }
-  in
-  let m =
-    Cellram_model.create
-      ~addr_bits:23
-      { Cellram_model.I.clock = i.clock
-      ; mem_adr = soc.mem_adr
-      ; mem_dq_o = soc.mem_dq_o
-      ; ce_n = soc.ram_ce_n
-      ; we_n = soc.ram_we_n
-      ; ub_n = soc.ram_ub_n
-      ; lb_n = soc.ram_lb_n
-      }
-  in
-  Signal.assign dq m.mem_dq_i;
-  { O.sclk = soc.sclk; txd = soc.txd; hsync = soc.hsync; vsync = soc.vsync; rgb = soc.rgb }
-;;
-
-module Sim = Cyclesim.With_interface (I) (O)
+module Sim = Cyclesim.With_interface (Tb.I) (Tb.O)
 
 (* ABI §8 values restated: abi_constants lives in the other dune root *)
 let shared_base = 0x300000
@@ -137,6 +49,16 @@ let read_file p =
   | Sys_error e -> fail "run_sim: %s" e
 ;;
 
+let usage =
+  "usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>\n\
+  \  -ticks N          park after N Ticks (default 2; 0 = until the blob finishes)\n\
+  \  -args \"TAIL\"      the DOOM command tail, e.g. -args \"-timedemo demo1\"\n\
+  \  -fbw FILE         at the end, dump the fb window in the golden .fbw format\n\
+  \  -max-mcycles N    cycle cap in millions (default 4000)\n\
+  \  -hw               advertise the Halftone scanout; -fbw captures the panel\n\
+  \  -profile FILE     cycles by doom.blob.map symbol, from the first Tick"
+;;
+
 let ticks = ref 2
 let blob_args = ref ""
 let fbw = ref ""
@@ -147,18 +69,14 @@ let hw = ref false
 let inputs = ref []
 
 let rec parse = function
-  | "-ticks" :: n :: r ->
-    ticks := int_of_string n;
-    parse r
+  | "-ticks" :: n :: r -> set_int ticks n r
   | "-args" :: s :: r ->
     blob_args := s;
     parse r
   | "-fbw" :: p :: r ->
     fbw := p;
     parse r
-  | "-max-mcycles" :: n :: r ->
-    max_mcycles := int_of_string n;
-    parse r
+  | "-max-mcycles" :: n :: r -> set_int max_mcycles n r
   | "-hw" :: r ->
     (* SHARED +544 bit 0: the blob presents through Halftone, and -fbw captures
        what the panel shows (see the capture at the end) *)
@@ -171,10 +89,22 @@ let rec parse = function
        by run_blob's per-symbol instruction counts, it gives per-function CPI. *)
     profile_out := p;
     parse r
+  | ("-help" | "--help") :: _ ->
+    print_endline usage;
+    exit 0
+  | a :: _ when String.length a > 1 && a.[0] = '-' ->
+    fail "run_sim: unknown flag, or a flag missing its value: %s\n%s" a usage
   | a :: r ->
     inputs := a :: !inputs;
     parse r
   | [] -> ()
+
+and set_int r n rest =
+  match int_of_string_opt n with
+  | Some v ->
+    r := v;
+    parse rest
+  | None -> fail "run_sim: not an integer: %s" n
 ;;
 
 (* doom.blob.map: "# ..." headers, then "0xADDR name" per code symbol, ascending
@@ -252,7 +182,7 @@ let () =
   let blob_path, wad_path, rom_path =
     match List.rev !inputs with
     | [ b; w; r ] -> b, w, r
-    | _ -> fail "usage: run_sim [options] <doom.blob> <doom1.wad> <doomboot.rom>"
+    | _ -> fail "%s" usage
   in
   let blob = read_file blob_path
   and wad = read_file wad_path
@@ -262,7 +192,9 @@ let () =
       Int32.to_int (String.get_int32_le rom (4 * i)) land 0xFFFF_FFFF)
   in
   let sim =
-    Sim.create ~config:Cyclesim.Config.trace_all (create ~hw:!hw ~contents:rom_words)
+    Sim.create
+      ~config:Cyclesim.Config.trace_all
+      (Tb.create ~contents:rom_words ~addr_bits:23 ~datasheet_chip:true config)
   in
   let i = Cyclesim.inputs sim in
   let cram_lo = Cyclesim.lookup_mem_by_name sim "cram_lo" |> Option.get
@@ -293,16 +225,7 @@ let () =
   poke_byte (shared_base + 7) ((!ticks lsr 24) land 0xFF);
   if !hw then poke_byte (shared_base + 544) 1;
   (* idle inputs; reset for a few cycles *)
-  i.pclk := Bits.gnd;
-  i.miso := Bits.vdd;
-  i.rxd := Bits.vdd;
-  i.ps2c := Bits.vdd;
-  i.ps2d := Bits.vdd;
-  i.msclk := Bits.vdd;
-  i.msdat := Bits.vdd;
-  i.btn := Bits.zero 4;
-  i.sw := Bits.zero 8;
-  i.gpio_in := Bits.zero 8;
+  Soc.For_tests.drive_idle i;
   i.rst_n := Bits.gnd;
   for _ = 1 to 8 do
     Cyclesim.cycle sim
@@ -388,11 +311,13 @@ let () =
      if hn > h0
      then
        Printf.eprintf
-         "run_sim: %d ticks over %d Mcyc -> ~%d cycles/tick (~%.1f fps at 60 MHz)\n%!"
+         "run_sim: %d ticks over %d Mcyc -> ~%d cycles/tick (~%.1f fps at %d MHz)\n%!"
          (hn - h0)
          ((cn - c0) / 1_000_000)
          ((cn - c0) / (hn - h0))
-         (60.0e6 /. float_of_int ((cn - c0) / (hn - h0)))
+         (float_of_int (config.clocks_per_ms * 1000)
+          /. float_of_int ((cn - c0) / (hn - h0)))
+         (config.clocks_per_ms / 1000)
    | _ -> ());
   Printf.eprintf
     "run_sim: done — %d Mcyc total, heartbeat %d, status %d, marker %08X\n%!"

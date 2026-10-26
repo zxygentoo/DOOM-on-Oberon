@@ -2,8 +2,10 @@
 
 `doom.blob` on the cycle-accurate Hardcaml model of the machine: the vendored
 [oberon-risc-hardcaml](https://github.com/zxygentoo/oberon-risc-hardcaml)
-board SoC, closed with the behavioural PSRAM double widened to the full
-16 MiB (`Cellram_model ~addr_bits:23`), driven by `run_sim.ml`.
+board SoC in the bitstream's configuration (`Build_config.shipped`), closed by
+the host's own testbench (`Soc.For_tests.Tb`) with the behavioural PSRAM double
+widened to the full 16 MiB and held to the datasheet's timing, driven by
+`run_sim.ml`.
 
 ## Why a separate dune project
 
@@ -50,8 +52,7 @@ golden-oracle format) and cycle counts come out.
   model's byte lanes before releasing reset, boots the doomboot ROM, polls the
   SHARED markers (`+8` init/done, `+16` heartbeat, `+12` exit status), reports
   cycles per tick, and dumps the framebuffer. Simulated time is the board's:
-  the ms counter ticks every 60 000 cycles — the 60 MHz build every number
-  here was measured on; the pinned host now ships 64 MHz.
+  the ms counter ticks every `clocks_per_ms` cycles (64 000 — 64 MHz).
 
 ## Build & run
 
@@ -76,12 +77,10 @@ host frame at N+1): `-ticks 100` ≡ host gametic 101, bit-identical.
 
 ## -hw: the Halftone scanout
 
-`-hw` turns the video DMA and the Halftone scanout on (`video fb_bram
-halftone`; fb_bram is proven cycle-identical to the video-off build, so
-cycles/tick stay comparable with non-hw runs) and advertises the hardware to
-the blob in SHARED +544 (ABI.md §11). The blob then copies each frame into
-the Halftone window instead of dithering it. `-fbw` in this mode dumps the
-frame the panel shows: after the park, the raster free-runs one full scan
-(~1.1 M cycles) and the harness rebuilds the .fbw from `ht_ack`/`ht_word`
-plus the SoC's `vidreq`/`vidadr` — same file format, same golden
-comparison.
+The shipped configuration always carries the framebuffer shadow and the
+Halftone display mode; `-hw` advertises the hardware to the blob in SHARED
++544 (ABI.md §11), so the blob copies each frame into the Halftone window
+instead of dithering it. `-fbw` in this mode dumps the frame the panel shows:
+after the park, the raster free-runs one full scan (~1.1 M cycles) and the
+harness rebuilds the .fbw from `ht_ack`/`ht_word` plus the SoC's
+`vidreq`/`vidadr` — same file format, same golden comparison.
