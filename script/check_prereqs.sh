@@ -4,7 +4,7 @@
 # packages themselves come from opam (`opam install --deps-only .`, see
 # dune-project); this covers the rest — submodules, the switches, the gcc
 # multilib, SDL2, the GNU tools. Exits 1 if a prerequisite of the default
-# targets (blob, dsk, test, golden) is missing; ref/sim ones only warn.
+# targets (blob, dsk, test, golden) is missing; ref/run/sim ones only warn.
 #   make prereqs   (SWITCH= / OXSWITCH= as for every other target)
 set -u
 cd "$(dirname "$0")/.."
@@ -57,7 +57,7 @@ report req "curl + md5sum [wad]" "install curl and coreutils" \
   sh -c 'command -v curl && command -v md5sum'
 report req "GNU patch + GNU sed [dsk]" "install patch and GNU sed" \
   sh -c 'patch --version | grep -q GNU && sed --version | grep -q GNU'
-report opt "sdl2-config [ref]" "libsdl2-dev (Debian/Ubuntu), SDL2-devel (Fedora)" \
+report opt "sdl2-config [ref run]" "libsdl2-dev (Debian/Ubuntu), SDL2-devel (Fedora)" \
   command -v sdl2-config
 
 echo "opam switch '$SWITCH' (override: make SWITCH=...)"
@@ -67,6 +67,9 @@ report req "goblint-cil 2.1.0 [blob test]" \
   "opam install --switch $SWITCH --deps-only ." pkg_is "$SWITCH" goblint-cil 2.1.0
 report req "crunch [dsk]" \
   "opam install --switch $SWITCH --deps-only ." pkg_is "$SWITCH" crunch any
+report opt "tsdl + imagelib [run]" \
+  "opam install --switch $SWITCH tsdl imagelib" \
+  sh -c "opam list --switch '$SWITCH' --installed --short tsdl imagelib 2>/dev/null | wc -l | grep -qx 2"
 
 echo "opam switch '$OXSWITCH' (override: make OXSWITCH=...)"
 report opt "the switch exists [sim]" \

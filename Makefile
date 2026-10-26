@@ -6,6 +6,7 @@
 #   make prereqs   check the system prerequisites (submodules, switches, -m32)
 #   make blob      the DOOM blob (doomcc over _out/i + libc)
 #   make dsk       the bootable DOOM.dsk (script/mkdsk.sh)
+#   make run       play it: a fresh copy of the dsk in the emulator's window
 #   make wad       fetch the shareware IWAD (md5-pinned)
 #   make chunks    split it into the <=3 MiB chunk files the dsk carries
 #   make rom       the Cyclesim boot ROM stub (_out/doomboot.rom)
@@ -40,8 +41,8 @@ SRCDIR := vendor/doomgeneric/doomgeneric
 LIBC   := libc/mini.c libc/stdio.c libc/fixed.c libc/doom_heap.c \
           libc/doom_oberon.c libc/dither.c
 
-.PHONY: all prereqs build blob chunks dsk rom i wad ref golden goldens test check fmt \
-        sim clean
+.PHONY: all prereqs build blob chunks dsk run rom i wad ref golden goldens test check \
+        fmt sim clean
 
 all: blob dsk
 
@@ -116,6 +117,14 @@ rom:
 
 dsk: blob chunks
 	DUNE='$(DUNE)' ./script/mkdsk.sh
+
+# the emulator writes the disk it boots, so it boots a copy; its window needs SDL2 and
+# the tsdl and imagelib packages (the emulator's own dependencies)
+EMU := vendor/oberon-risc-hardcaml/vendor/oberon-risc-emu-ocaml
+run:
+	@test -f _out/DOOM.dsk || $(MAKE) dsk
+	cp _out/DOOM.dsk _out/play.dsk
+	$(DUNE) exec --root $(EMU) bin/risc.exe -- $(CURDIR)/_out/play.dsk
 
 # ---- the host oracles (plain gcc — keep dune-free, see header) --------------
 
