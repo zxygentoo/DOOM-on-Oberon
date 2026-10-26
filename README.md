@@ -24,6 +24,13 @@ PC build.
 
 *On the board, in a viewer (photo from the hardware repository).*
 
+The goal was to have some fun with the Oberon machine built in
+[the hardware project](https://github.com/zxygentoo/oberon-risc-hardcaml), not to build
+a C compiler for it — so it compiles exactly as much C as DOOM needs, and many corners
+are strategically cut: no `long long`, no floating point at run time, no structs passed
+by value, a register allocator that would embarrass a textbook, and a `malloc` that never
+frees. XD
+
 ## What is in here
 
 | Path | What |
